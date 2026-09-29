@@ -1,17 +1,17 @@
 /**
  * lib/lingxu.js 单元测试（node:test，零依赖，mock fetch，不触网）。
  *
- * 覆盖 task-11 的 5 个真实缺陷（全部来自真实平台实测 + 平台前端 main.chunk.js 逆向）：
- *   1. answerTheory 发 JSON + option 数组（原来 form-encoded 字符串 ⇒ HTTP 500）
- *   2. theoryTests 读 is_parse（交卷后 is_begin=false，只看 is_begin 会误判「未开始」）
- *   3. theoryQuestions 读 content 选项字典 + user_option 数组
- *   4. finishTheory 统一 JSON body
- *   5. releaseEnvironment / startEnvironment 对「平台未配置环境」分类，不算失败
- *   6. sessionid 失效（HTTP 403 + {"detail":"未登录"}）→ code: 'session-expired'
+ * 覆盖平台接口和前端实现中发现的 5 个缺陷：
+ *  1. answerTheory 发 JSON + option 数组（原来 form-encoded 字符串 ⇒ HTTP 500）
+ *  2. theoryTests 读 is_parse（交卷后 is_begin=false，只看 is_begin 会误判「未开始」）
+ *  3. theoryQuestions 读 content 选项字典 + user_option 数组
+ *  4. finishTheory 统一 JSON body
+ *  5. releaseEnvironment / startEnvironment 对「平台未配置环境」分类，不算失败
+ *  6. sessionid 失效（HTTP 403 + {"detail":"未登录"}）→ code: 'session-expired'
  *
  * 运行：
- *   "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/node/bin/node" \
- *     --test tests/lingxu.test.mjs
+ *  "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/node/bin/node" \
+ *    --test tests/lingxu.test.mjs
  */
 
 import test from 'node:test'
@@ -91,7 +91,7 @@ const lastCall = (calls) => calls[calls.length - 1]
 const bodyOf = (call) => JSON.parse(String(call.init.body))
 const contentTypeOf = (call) => call.init.headers['Content-Type']
 
-// ────────────────────────────────────────────── 纯函数：选项归一化
+//  纯函数：选项归一化
 
 test('normalizeOptionArray：数组 / 字符串 / 分隔符 / 空值', () => {
   assert.deepEqual(normalizeOptionArray(['B', 'C']), ['B', 'C'])
@@ -141,7 +141,7 @@ test('theoryOptionTypeLabel / theoryTestStatus', () => {
   assert.equal(theoryTestStatus({ isEnd: true, isParse: false }).key, 'ended')
 })
 
-// ────────────────────────────────────────────── session 失效识别
+//  session 失效识别
 
 test('session 失效：403 + {"detail":"未登录"} → code session-expired 且带响应体文案', async () => {
   const [restore] = withFetch(() => jsonResponse({ detail: '未登录' }, 403))
@@ -215,7 +215,7 @@ test('isSessionExpired / isEnvNotConfigured：丢 code 后仍按文案兜底识�
   assert.equal(isEnvNotConfigured(undefined), false)
 })
 
-// ────────────────────────────────────────────── 理论题
+//  理论题
 
 test('theoryTests：读 is_parse / parse_count，交卷后 is_begin=false 也判「已交卷」', async () => {
   const [restore] = withFetch(() => jsonResponse([
@@ -366,7 +366,7 @@ test('finishTheory：JSON body {status:1}；beginTheoryTest 不带 body', async 
   } finally { restore() }
 })
 
-// ────────────────────────────────────────────── 环境：分类
+//  环境：分类
 
 test('releaseEnvironment：四种分类（已释放 / 本来没环境 / 平台未配置 / 真失败）', async () => {
   const cases = [
@@ -470,11 +470,11 @@ test('startEnvironment：正常三步不受影响（回归）', async () => {
   } finally { restore() }
 })
 
-// ══════════════════════════════════════════════ task-16：源码级深度适配
+//  源码级深度适配
 // 依据：平台 Django 源码 event_app/views/env.py、test.py、other.py、
 // serializers.py、models.py（用户提供的完整源码）。
 
-// ────────────────────────────────────────────── choices 标签
+//  choices 标签
 
 test('choices 标签：task_type / flag_type / answer_mode / shared / property / score_mode', () => {
   assert.equal(ctfTaskTypeLabel(1), '环境型')
@@ -494,7 +494,7 @@ test('choices 标签：task_type / flag_type / answer_mode / shared / property /
   assert.equal(EVENT_TEST_TYPES[2], '实操题')
 })
 
-// ────────────────────────────────────────────── 环境错误分类（源码 7 条）
+//  环境错误分类（源码 7 条）
 
 test('classifyEnvErrorPayload：源码 7 条环境错误逐条分类（含 env_limit 数字）', () => {
   const cases = [
@@ -623,7 +623,7 @@ test('startEnvironment：run 的「该环境正在启动」→ env-busy（status
   } finally { restore() }
 })
 
-// ────────────────────────────────────────────── addr / 剩余时间
+//  addr / 剩余时间
 
 test('envRemainingSeconds：优先 end_second，其次 release_time，过期归零', () => {
   assert.equal(envRemainingSeconds({ end_second: 1234 }), 1234)
@@ -714,7 +714,7 @@ test('startEnvironment：把 addr 的生命周期字段带进返回值', async (
   } finally { restore() }
 })
 
-// ────────────────────────────────────────────── 环境延时（/delayed/）
+//  环境延时（/delayed/）
 
 test('delayEnvironment：成功 +30 分钟（status=2）', async () => {
   const [restore, calls] = withFetch(() => jsonResponse({ status: 2, msg: '成功延时30分钟' }))
@@ -760,7 +760,7 @@ test('delayEnvironment：HTTP 400（团队赛未加入战队）抛带 code 的�
   } finally { restore() }
 })
 
-// ────────────────────────────────────────────── 题目详情（三类题型）
+//  题目详情（三类题型）
 
 test('challengeDetail：task_type=3 附件型必须有附件路径 + 类型标签', async () => {
   const [restore] = withFetch(() => jsonResponse({
@@ -867,7 +867,7 @@ test('challengeDetail：源码接口不返回的字段「有就解析、没有�
   } finally { restore2() }
 })
 
-// ────────────────────────────────────────────── 新端点
+//  新端点
 
 test('eventChart：默认 type=2（源码 type=1 恒为空数组）；解析 start/end + 前 10 名走势', async () => {
   const [restore, calls] = withFetch(() => jsonResponse({
@@ -1044,10 +1044,10 @@ test('submitFlag：status=1 时把动态分值 score 带出来', async () => {
   } finally { restore() }
 })
 
-// ══════════════════════════════════════════════ task-18：AWD / CFS 两种赛制
+//  AWD / CFS 两种赛制
 // 依据：源码 event_app/views/awd.py、cfs.py、serializer/cfs.py、models.py、utils/awd_flag.py
 
-// ────────────────────────────────────────────── 赛事类型（test_type）
+//  赛事类型（test_type）
 
 test('normalizeTestTypes：JSONField → [{id,name,size}]（1理论/2CTF/3AWD/4CFS）', () => {
   const rows = normalizeTestTypes({
@@ -1089,7 +1089,7 @@ test('eventType：GET /event/4/type/ 返回 codes + labels', async () => {
   } finally { restore() }
 })
 
-// ────────────────────────────────────────────── AWD 错误分类（源码原文案）
+//  AWD 错误分类（源码原文案）
 
 test('classifyAwdErrorPayload：源码全部 AWD 文案逐条分类', () => {
   const cases = [
@@ -1153,7 +1153,7 @@ test('isStageError：code 优先 + 文案兜底', () => {
   assert.equal(isStageError(null), false)
 })
 
-// ────────────────────────────────────────────── AWD 端点
+//  AWD 端点
 
 test('awdRoundInfo：赛段状态/回合/加固期/token/排名', async () => {
   const [restore, calls] = withFetch(() => jsonResponse({
@@ -1258,7 +1258,7 @@ test('awdChallengeDetail：URL 参数顺序是 (cat_id, ca_id) —— 源码注�
   } finally { restore() }
 })
 
-test('awdSubmitFlag：★ token/flag 走 query 参数（GET 与 POST 都可以）', async () => {
+test('awdSubmitFlag：token/flag 走 query 参数（GET 与 POST 都可以）', async () => {
   const [restore, calls] = withFetch(() => jsonResponse({ status: 1, data: 'Flag提交成功！' }))
   try {
     const c = client()
@@ -1464,7 +1464,7 @@ test('awdDynamicTests / awdDynamicUsers / awdFlagApi', async () => {
   } finally { restore() }
 })
 
-// ────────────────────────────────────────────── CFS 端点
+//  CFS 端点
 
 test('cfsRoundInfo：赛段状态（无回合概念）', async () => {
   for (const [status, label] of [[0, '进行中'], [1, '未开始'], [2, '已结束']]) {
@@ -1609,7 +1609,7 @@ test('cfsRank / cfsChart / cfsDynamic', async () => {
   } finally { restore() }
 })
 
-// ══════════════════════════════════════════════ task-33：全局限流 + 429 退避
+//  全局限流 + 429 退避
 // 背景：面板 5s 轮询 × 6 次请求 + 8 个 agent → 平台会话被打爆（真实事故：全队 403）。
 
 const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -1763,7 +1763,7 @@ test('退避：平台文案说「请求过于频繁」也重试；超过 maxRetr
   } finally { restore2() }
 })
 
-test('★ 403「未登录」是会话失效：绝不退避重试，直接抛 session-expired', async () => {
+test('403「未登录」是会话失效：绝不退避重试，直接抛 session-expired', async () => {
   let calls = 0
   const [restore] = withFetch(() => {
     calls += 1

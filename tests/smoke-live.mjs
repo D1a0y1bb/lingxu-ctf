@@ -3,10 +3,10 @@
  * 真实平台冒烟测试（只读为主，不会提交 flag / 不交卷）。
  *
  * 用法：
- *   LINGXU_COOKIE_FILE=/path/to/lingxu.cookie \
- *   LINGXU_BASE_URL=https://shuxinbei.clsadp.com:8000 \
- *   LINGXU_EVENT_ID=4 \
- *   node tests/smoke-live.mjs
+ *  LINGXU_COOKIE_FILE=/path/to/lingxu.cookie \
+ *  LINGXU_BASE_URL=https://shuxinbei.clsadp.com:8000 \
+ *  LINGXU_EVENT_ID=4 \
+ *  node tests/smoke-live.mjs
  *
  * 或者直接给 LINGXU_COOKIE="sessionid=...; csrftoken=..."
  *

@@ -34,7 +34,7 @@ function jsonResponse(body, status = 200) {
   }
 }
 
-// ────────────────────────────────────────────── 纯函数
+//  纯函数
 
 test('parseCookie / maskSecret', () => {
   const map = parseCookie('sessionid=abc; csrftoken=xyz; other=1')
@@ -118,7 +118,7 @@ test('createAdapter：未知平台抛 LingxuError（不静默降级）', () => {
   assert.equal(typeof LingxuAdapter, 'function')
 })
 
-// ────────────────────────────────────────────── 凌虚客户端
+//  凌虚客户端
 
 test('LingxuClient: 缺 sessionid 时 validateAccess 报错', async () => {
   const c = new LingxuClient({ baseUrl: 'https://x.com', eventId: 1, cookie: 'other=1' })
@@ -295,7 +295,7 @@ test('LingxuClient: theoryQuestions 兼容字符串选项', async () => {
   } finally { restore() }
 })
 
-// ────────────────────────────────────────────── 适配器
+//  适配器
 
 test('LingxuAdapter: validate 返回 punish 警告', async () => {
   const [restore] = withFetch(() => jsonResponse({
@@ -337,7 +337,7 @@ test('createAdapter：显式 platform 为 lingxu 时正常构造', () => {
   assert.equal(typeof a.downloadAttachment, 'function')
 })
 
-// ────────────────────────────────────────────── task-16：适配器接口同步
+//  适配器接口同步
 
 test('LingxuAdapter: 新增平台方法全部转发（接口完整性）', () => {
   const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })
@@ -397,7 +397,7 @@ test('LingxuAdapter: 环境地址 / 延时 / check / 新端点 的调用形状',
   } finally { restore() }
 })
 
-// ────────────────────────────────────────────── task-18：AWD / CFS + test_type
+//  AWD / CFS + test_type
 
 test('LingxuAdapter: AWD/CFS 方法全部转发（接口完整性）', () => {
   const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })

@@ -2,8 +2,8 @@
  * lib/tools.js 单元测试（node:test，零依赖）。
  *
  * 运行：
- *   "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/node/bin/node" \
- *     --test tests/tools.test.mjs
+ *  "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/node/bin/node" \
+ *    --test tests/tools.test.mjs
  *
  * 全部使用 mock deps：mock 适配器 + 真实 CtfStore（写到临时目录），不触网。
  */
@@ -377,7 +377,7 @@ test('ctf_status：统计题目/分类/排名/理论题', async () => {
   assert.match(out, /ctf_theory action=questions testId=1/)
 })
 
-test('★ task-34：ctf_status 显示 token 用量；拿不到就不显示、不编数字', async () => {
+test('ctf_status 显示 token 用量；拿不到就不显示、不编数字', async () => {
   const callStatus = async (deps) => createHarness({ deps }).tools.ctf_status.execute({})
 
   // ① 宿主注入读取器并返回数据 → 结果里出现千分位用量与来源
@@ -1059,7 +1059,7 @@ test('所有工具的 execute 都能容忍空参数对象', async () => {
   }
 })
 
-// ------------------------------------------------------------------ task-11 回归：理论题状态/选项/作答
+// ------------------------------------------------------------------ 理论题状态、选项和作答
 
 test('ctf_theory list：is_parse 优先于 is_begin → 已交卷；交卷次数单独成列', async () => {
   const adapter = createAdapter({
@@ -1178,7 +1178,7 @@ test('ctf_theory answer：schema 里 option 同时接受字符串与数组', () 
   assert.equal(tools.ctf_theory.parameters.option.oneOf[1].type, 'array')
 })
 
-// ------------------------------------------------------------------ task-11 回归：错误分类与文案
+// ------------------------------------------------------------------ 错误分类与文案
 
 test('ctf_release_env：平台未配置环境 → ℹ️ 提示且记为已释放（不是失败）', async () => {
   const store = await makeStore()
@@ -1336,7 +1336,7 @@ test('ctf_submit_flag：非 session 的 403 仍保留「结果未知」措辞', 
   })
 })
 
-// ------------------------------------------------------------------ task-14：ctf_session 探活
+// ------------------------------------------------------------------ ctf_session 探活
 
 /** 平台 session 失效的真实回包形状（HTTP 403 + {"detail":"未登录"}）。 */
 function sessionExpiredError() {
@@ -1415,7 +1415,7 @@ test('ctf_session：适配器没有 eventSummary 时退回 validate()', async ()
   assert.equal(callsOf(adapter, 'validate').length, 1)
 })
 
-// ------------------------------------------------------------------ task-14：start 前置探活（跨模块，真实 orchestrate）
+// ------------------------------------------------------------------ start 前置探活（跨模块，真实 orchestrate）
 
 test('跨模块集成：session 失效时 ctf_solve_start 不建任务、不 spawn', async () => {
   const store = await makeStore()
@@ -1464,7 +1464,7 @@ test('跨模块集成：session 失效时 ctf_solve_start 不建任务、不 spa
   assert.equal(callsOf(adapter, 'challenges').length, 0, '探活失败就不该再拉题目列表')
 })
 
-// ────────────────────────────────────────────── task-17：环境延时 / 限量 / 附件型 / check 模式
+//  环境延时 / 限量 / 附件型 / check 模式
 
 test('ctf_delay_env：五分类渲染（成功 / 太早 / 正在延时 / 不存在 / 已过期）', async () => {
   const cases = [
@@ -1737,7 +1737,7 @@ test('ctf_challenge：外链型显示 link_path；动态 flag 标注；附件型
 })
 
 
-// ────────────────────────────────────────────── task-19：AWD/CFS 赛段工具（动态注册）+ ctf_notice
+//  AWD/CFS 赛段工具（动态注册）+ ctf_notice
 
 /** 带赛段信息的 adapter：testTypes 用**数组**（新形状）+ hasXxx 布尔，AWD/CFS 方法齐全。 */
 function createStageAdapter(overrides = {}) {
@@ -2171,7 +2171,7 @@ test('isEnvLimitError：兜底识别「请释放后启动」半句文案', async
   assert.equal(isEnvLimitError(null), false)
 })
 
-// ────────────────────────────────────────────── task-21：释放即让位（就绪题点名）
+//  释放即让位（就绪题点名）
 
 test('ctf_release_env：释放后点名「就绪待环境」的题（准备 agent / PREP.md）', async () => {
   const workDir = await makeTmpDir()
@@ -2235,7 +2235,7 @@ test('ctf_solve_start / ctf_solve_status 的描述写清两阶段调度', () => 
   assert.match(status, /只提示不自动抢占/)
 })
 
-test('ctf_solve_start / ctf_solve_status 的描述写清 teammate 上限的来源与降级建议（task-22）', () => {
+test('ctf_solve_start / ctf_solve_status 的描述写清 teammate 上限的来源与降级建议', () => {
   const { tools } = createHarness()
   const start = tools.ctf_solve_start.description
   assert.match(start, /maxMembers/)
@@ -2261,7 +2261,7 @@ test('ctf_solve_start / ctf_solve_status 的描述写清 Agent 池（复用闲�
   assert.match(status, /闲置可复用/)
 })
 
-// ────────────────────────────────────────────── 设置页同步与来源提示（task-27）
+//  设置页同步与来源提示
 
 test('ctf_connect：成功后回写设置页，且**只写非 secret 字段**（绝不动 cookie）', async () => {
   const adapter = createAdapter()
@@ -2347,7 +2347,7 @@ test('connectionOriginLines：Cookie 来自同平台连接时解释一句（且�
   assert.equal(text.includes('super-secret-value'), false, '⚠️ 绝不能把 cookie 值写进输出')
 })
 
-// ────────────────────────────────────────────── 工作区路径 / 赛事隔离 / 多赛事（task-31）
+//  工作区路径 / 赛事隔离 / 多赛事
 
 test('resolveWorkDirInfo：会话 cwd 优先，绝不用 process.cwd()（插件软链场景）', () => {
   // ① 显式配置（绝对路径）

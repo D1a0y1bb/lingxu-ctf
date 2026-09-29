@@ -7,10 +7,10 @@
  * 工具走 defineTool 包装后的真实 execute，平台请求是真的。
  *
  * 用法：
- *   LINGXU_COOKIE_FILE=/path/cookie \
- *   LINGXU_BASE_URL=https://shuxianbei.clsadp.com:8000 \
- *   LINGXU_EVENT_ID=4 \
- *   node tests/e2e-live.mjs
+ *  LINGXU_COOKIE_FILE=/path/cookie \
+ *  LINGXU_BASE_URL=https://shuxianbei.clsadp.com:8000 \
+ *  LINGXU_EVENT_ID=4 \
+ *  node tests/e2e-live.mjs
  */
 
 import { promises as fsp } from 'node:fs'
@@ -52,7 +52,7 @@ function check(label, ok, detail = '') {
   console.log(`${ok ? '✔' : '✖'} ${label}${detail ? ` — ${detail}` : ''}`)
 }
 
-// ── mock Cordis ctx：走真实的注册路径 ─────────────────────────────────
+//  mock Cordis ctx：走真实的注册路径
 const collected = { tools: [], routes: [], sections: [], commands: [] }
 const ctx = {
   logger: { info() {}, warn() {}, error() {} },
@@ -90,7 +90,7 @@ check('注册斜杠命令', collected.commands.length === 1)
 const tool = (n) => collected.tools.find((t) => t.name === n)
 const exec = { agent: undefined, signal: undefined, cwd: path.join(home, 'work') }
 
-// ── 1. ctf_connect ───────────────────────────────────────────────────
+//  1. ctf_connect
 console.log('\n── ctf_connect')
 const connectText = await tool('ctf_connect').execute(
   { platform: 'lingxu', baseUrl: BASE, eventId: Number(EVENT), cookie, label: '端到端联调' },
@@ -100,14 +100,14 @@ check('连接成功（返回里含用户名）', /xiyi|已连接|连接成功/.t
 check('返回里不回显完整 cookie', !connectText.includes(cookie), '凭据已脱敏')
 check('提示 punish 扣分风险', /punish|扣分/.test(connectText))
 
-// ── 1b. ctf_session（session 探活，只读）─────────────────────────────
+//  1b. ctf_session（session 探活，只读）
 console.log('\n── ctf_session')
 const sessionText = await tool('ctf_session').execute({}, exec)
 check('会话探活成功', /^✅ 凌虚会话有效/.test(sessionText), sessionText.split('\n')[0].slice(0, 90))
 check('输出含剩余时间与 Cookie 摘要', /剩余|Cookie:/.test(sessionText))
 check('探活不回显完整 cookie', !sessionText.includes(cookie), '凭据已脱敏')
 
-// ── 2. ctf_status ────────────────────────────────────────────────────
+//  2. ctf_status
 console.log('\n── ctf_status')
 const statusText = await tool('ctf_status').execute({}, exec)
 check('拿到赛事总览', /题目|赛事/.test(statusText))
@@ -115,7 +115,7 @@ const totalMatch = /(\d+)\s*题/.exec(statusText)
 check('解析出题目总数', totalMatch && Number(totalMatch[1]) > 0, totalMatch ? `${totalMatch[1]} 题` : statusText.slice(0, 120))
 console.log(statusText.split('\n').slice(0, 8).map((l) => `   ${l}`).join('\n'))
 
-// ── 3. ctf_challenges ────────────────────────────────────────────────
+//  3. ctf_challenges
 console.log('\n── ctf_challenges')
 const listText = await tool('ctf_challenges').execute({ solved: false, limit: 5 }, exec)
 check('列出未解题（limit=5 生效）', /Crypto|Web|Pwn|Misc|安全/.test(listText))
@@ -124,24 +124,24 @@ const listed = listText.split('\n').filter((l) => /^\|\s*\d+\s*\|/.test(l)).leng
 check('条目数受 limit 约束', listed === 5, `列出 ${listed} 条`)
 check('表格含 id 与分值列', /\|\s*id\s*\|/.test(listText) && /分值/.test(listText))
 
-// ── 4. ctf_challenge（含附件下载路径）────────────────────────────────
+//  4. ctf_challenge（含附件下载路径）
 console.log('\n── ctf_challenge')
 const detailText = await tool('ctf_challenge').execute({ id: 1 }, exec)
 check('拿到题面', /NeuroSign|题面|描述/.test(detailText), detailText.split('\n')[0].slice(0, 80))
 const workFiles = await fsp.readdir(path.join(home, 'work', 'challenges')).catch(() => [])
 check('题目工作目录已建立', workFiles.length > 0, workFiles.join(', '))
 
-// ── 5. ctf_leaderboard ───────────────────────────────────────────────
+//  5. ctf_leaderboard
 console.log('\n── ctf_leaderboard')
 const boardText = await tool('ctf_leaderboard').execute({ kind: 'user', size: 5 }, exec)
 check('拿到排行榜', /1\.|排名|分/.test(boardText), boardText.split('\n')[0].slice(0, 80))
 
-// ── 6. ctf_theory（只读，不 begin/finish）────────────────────────────
+//  6. ctf_theory（只读，不 begin/finish）
 console.log('\n── ctf_theory (list)')
 const theoryText = await tool('ctf_theory').execute({ action: 'list' }, exec)
 check('拿到理论题列表', /理论题|单选|多选|判断/.test(theoryText), theoryText.split('\n')[0].slice(0, 90))
 
-// ── 7. ctf_submit_flag 去重护栏（不真的提交：用已提交过的 flag）──────
+//  7. ctf_submit_flag 去重护栏（不真的提交：用已提交过的 flag）
 console.log('\n── ctf_submit_flag 去重护栏')
 const store = (await import('../lib/store.js')).getStore()
 const conn = await store.resolveConnection({})
@@ -150,7 +150,7 @@ await store.recordSubmission({ connKey, challengeId: 1, flag: 'flag{e2e-dedupe-p
 const dedupeText = await tool('ctf_submit_flag').execute({ id: 1, flag: 'flag{e2e-dedupe-probe}' }, exec)
 check('重复 flag 被去重拦截（未打到平台）', /已提交|重复|already/i.test(dedupeText), dedupeText.split('\n')[0].slice(0, 90))
 
-// ── 8. ctf_solve_start 在无 agentTeams 时给出清晰报错 ────────────────
+//  8. ctf_solve_start 在无 agentTeams 时给出清晰报错
 console.log('\n── ctf_solve_start（无 agentTeams 服务）')
 // 设计约定：编排类工具在前置条件不满足时**硬失败**（抛异常），错误文案必须可读可照做
 let solveMsg = ''
@@ -161,7 +161,7 @@ try {
 }
 check('缺 agentTeams 时给出可读说明', /Agent Teams|agentTeams|orchestrator|Lead|调用/.test(solveMsg), solveMsg.slice(0, 110))
 
-// ── 9. Web 面板快照 ──────────────────────────────────────────────────
+//  9. Web 面板快照
 console.log('\n── /lingxu-ctf/state 快照')
 const route = collected.routes.find((r) => r.path === '/lingxu-ctf/state')
 let body = ''

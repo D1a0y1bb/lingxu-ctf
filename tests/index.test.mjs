@@ -8,7 +8,7 @@ import {
   apply, normalizeConfig, slugify, maskFlag, injectBootEntry, buildPanelState,
   buildTeamState, buildReportsState, readLimitParam, toChallengeId, toEpochMs, withSessionCapture,
   name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
-  describeConfigFields, readJsonBody,
+  describeConfigFields, normalizeConfigPatch, readJsonBody,
   createStageToolRegistry,
   pickConnection, createResolveAdapter, cookieLooksUsable, normalizeCookie, settingsHasPlatform,
   CONNECTION_ORIGIN_TEXT,
@@ -270,7 +270,7 @@ function injectAwareCtx(available = {}) {
   return ctx
 }
 
-test('★ task-34：宿主侧读 DSH tokenUsage 投影（与日志折叠对账用）', async () => {
+test('宿主侧读 DSH tokenUsage 投影（与日志折叠对账用）', async () => {
   const { readProjectedTokenUsage } = await import('../lib/index.js')
 
   // 投影 = 客户端统计药丸读的同一份（sessions.list 的 projectionValues.tokenUsage）
@@ -285,6 +285,25 @@ test('★ task-34：宿主侧读 DSH tokenUsage 投影（与日志折叠对账�
     uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 300, cacheWriteTokens: 0, total: 420,
   })
 
+  // 宿主 sessions.list() 返回 Session 实例时，投影来自 sessionProjections。
+  const session = { id: 'session-a' }
+  const hostSessions = { list: () => [session] }
+  const projections = {
+    snapshot(value, keys) {
+      assert.equal(value, session)
+      assert.deepEqual(keys, ['tokenUsage'])
+      return { values: { tokenUsage: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 2, cacheWriteTokens: 1 } } }
+    },
+  }
+  assert.deepEqual(readProjectedTokenUsage(hostSessions, 'session-a', projections), {
+    uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 2, cacheWriteTokens: 1, total: 13,
+  })
+  assert.deepEqual(readProjectedTokenUsage({ get: () => session }, 'session-a', {
+    stateOf: () => ({ totals: { uncachedInputTokens: 2, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }),
+  }), {
+    uncachedInputTokens: 2, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, total: 3,
+  })
+
   // 拿不到投影/会话不存在/没有服务 → null（不抛错、不猜数字）
   assert.equal(readProjectedTokenUsage(sessions, 'session-b'), null)
   assert.equal(readProjectedTokenUsage(sessions, ''), null)
@@ -295,7 +314,7 @@ test('★ task-34：宿主侧读 DSH tokenUsage 投影（与日志折叠对账�
   assert.equal(readProjectedTokenUsage({ list: () => ({ byId: { 'session-d': { projectionValues: { tokenUsage: { uncachedInputTokens: 0, outputTokens: 0 } } } } }) }, 'session-d'), null)
 })
 
-test('★ task-35：端到端 —— 投递事件经只读钩子落进 store，/team 能读回 agent 间交流', async () => {
+test('端到端 —— 投递事件经只读钩子落进 store，/team 能读回 agent 间交流', async () => {
   const { CtfStore } = await import('../lib/store.js')
   const { buildTeamState } = await import('../lib/index.js')
   const { mkdtempSync } = await import('node:fs')
@@ -328,7 +347,7 @@ test('★ task-35：端到端 —— 投递事件经只读钩子落进 store，/
     time: Date.parse('2026-09-29T06:00:00Z'),
     data: {
       source: { kind: 'team-message', teamId: 'team-1', messageId: 'team-message-e2e', senderId: 'a1', senderName: 'solver-web-01' },
-      message: { content: [{ type: 'text', text: 'Team message team-message-e2e from solver-web-01:' }, { type: 'text', text: '图书馆的凭据给你：admin:pass' }] },
+      content: [{ type: 'text', text: 'Team message team-message-e2e from solver-web-01:' }, { type: 'text', text: '图书馆的凭据给你：admin:pass' }],
     },
   })
   await new Promise((resolve) => setTimeout(resolve, 30))
@@ -359,7 +378,7 @@ test('★ task-35：端到端 —— 投递事件经只读钩子落进 store，/
     time: Date.parse('2026-09-29T06:00:05Z'),
     data: {
       source: { kind: 'team-message', messageId: 'team-message-e2e', senderName: 'solver-web-01' },
-      message: { content: [{ type: 'text', text: '重复投递' }] },
+      content: [{ type: 'text', text: '重复投递' }],
     },
   })
   await new Promise((resolve) => setTimeout(resolve, 30))
@@ -380,10 +399,10 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(ctx._collected.tools.length, 17, '工具只依赖 tools，立即可用')
   assert.deepEqual(
     ctx._collected.injected.map((d) => d[0]).sort(),
-    ['agentTeams', 'commands', 'sessions', 'settings', 'systemPrompt', 'webServer'],
-    '六个可选服务都应通过 ctx.inject 声明（settings=设置页回写；sessions=token 用量投影对账，task-34）',
+    ['agentTeams', 'commands', 'sessionProjections', 'sessions', 'settings', 'systemPrompt', 'webServer'],
+    '可选服务都应通过 ctx.inject 声明（settings=设置页回写；sessions/sessionProjections=token 用量投影对账）',
   )
-  assert.equal(ctx._collected.pending.length, 6, '依赖未就绪时应挂起而不是失败（含 settings / sessions）')
+  assert.equal(ctx._collected.pending.length, 7, '依赖未就绪时应挂起而不是失败（含 settings / sessions / sessionProjections）')
 
   // 逐个交付服务
   const sections = []
@@ -398,14 +417,14 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(routes.some((r) => r.path === '/lingxu-ctf/state'), true, 'webServer 就绪后应注册面板路由')
 
   ctx._collected_deliver('commands', { register: () => () => {} })
-  assert.equal(ctx._collected.pending.length, 3, '只剩 agentTeams / sessions / settings 未就绪')
+  assert.equal(ctx._collected.pending.length, 4, '只剩 agentTeams / sessions / settings / sessionProjections 未就绪')
 
   // settings 就绪 → deps.settings 被填上（ctf_connect 要用它回写设置页）
   ctx._collected_deliver('settings', {
     describe: () => [{ ns: 'lingxu-ctf', revision: 3 }],
     update: async () => {},
   })
-  assert.equal(ctx._collected.pending.length, 2, '只剩 agentTeams / sessions 未就绪')
+  assert.equal(ctx._collected.pending.length, 3, '只剩 agentTeams / sessions / sessionProjections 未就绪')
 })
 
 test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延迟赋值）', async () => {
@@ -473,7 +492,7 @@ test('apply: 未配置平台时 ctf_status 返回引导性提示而不是崩溃'
   assert.match(text, /ctf_connect/, '必须告诉模型下一步该调 ctf_connect')
 })
 
-// ────────────────────────────────────────────── 面板快照
+//  面板快照
 
 test('buildPanelState: 汇总平台与本地状态', async () => {
   const adapter = {
@@ -549,7 +568,7 @@ test('buildPanelState: 平台接口部分失败时不整体崩', async () => {
   assert.deepEqual(state.theory, [])
 })
 
-// ────────────────────────────────────────────── 插件配置（设置页表单）
+//  插件配置（设置页表单）
 
 test('Config schema：存在、有默认值、字段齐全', () => {
   assert.equal(typeof Config, 'function', 'Config 应是 schemastery schema（可调用）')
@@ -658,7 +677,7 @@ test('apply：配置为空时才提示去设置页', async () => {
   assert.match(out, /设置|插件配置|ctf_connect/, '要告诉用户去哪里配置')
 })
 
-// ────────────────────────────────────────────── 模块形状（Loader 契约）
+//  模块形状（Loader 契约）
 
 test('默认导出必须携带 Config/inject/apply —— Loader 只认 default 导出', async () => {
   // cordis-plugin-loader 的 normalizeExports 是 `exports = exports.default ?? exports`：
@@ -676,7 +695,7 @@ test('默认导出必须携带 Config/inject/apply —— Loader 只认 default 
   assert.equal(plainConfigValue(def.Config({})).concurrency, 4)
 })
 
-// ────────────────────────────────────────────── 设置页配置读写接口
+//  设置页配置读写接口
 
 test('describeConfigFields：14 个字段，含中文标签/类型/说明/secret 标记', () => {
   const fields = describeConfigFields()
@@ -717,6 +736,16 @@ test('readJsonBody：解析 JSON、空体、非法体、超限', async () => {
   assert.deepEqual(await readJsonBody(mk(['   '])), {}, '空体应为 {}')
   await assert.rejects(() => readJsonBody(mk(['{not json'])), /不是合法 JSON/)
   await assert.rejects(() => readJsonBody(mk(['x'.repeat(300)]), { maxBytes: 10 }), /过大/)
+})
+
+test('normalizeConfigPatch：配置路由只接受已声明字段和正确类型', () => {
+  assert.deepEqual(normalizeConfigPatch({ baseUrl: 'https://x.test', eventId: 4, cookie: 'sessionid=x' }), {
+    baseUrl: 'https://x.test', eventId: 4, cookie: 'sessionid=x',
+  })
+  assert.deepEqual(normalizeConfigPatch({ cookie: '', label: null, timeoutMs: undefined }), {})
+  assert.throws(() => normalizeConfigPatch({ unknown: true }), /不支持的配置项/)
+  assert.throws(() => normalizeConfigPatch({ eventId: '4' }), /有限数字/)
+  assert.throws(() => normalizeConfigPatch({ enableWebPanel: 'yes' }), /布尔值/)
 })
 
 /**
@@ -788,7 +817,7 @@ test('index.js 源码里不再调用 webServer.tapIndex 注入 boot graph', asyn
   assert.deepEqual(calls, [], `不得调用 tapIndex，实际 ${calls.length} 处`)
 })
 
-// ────────────────────────────────────────────── 顶部「CTF」视图：/lingxu-ctf/team
+//  顶部「CTF」视图：/lingxu-ctf/team
 
 const TEAM_CONN_KEY = 'lingxu:x.com:4'
 const TEAM_AGENT = { id: 'agent-lead', name: 'lead' }
@@ -876,13 +905,13 @@ test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 
   assert.deepEqual(state.connection, { key: TEAM_CONN_KEY, label: '数信杯测试赛' })
   assert.deepEqual(Object.keys(state).sort(), ['connection', 'counts', 'generatedAt', 'members', 'messages', 'ok', 'runtime', 'tasks', 'tokenUsage'])
 
-  // ── members：listMembers 透传 + work/description 映射出题目
+  //  members：listMembers 透传 + work/description 映射出题目
   assert.equal(state.members.length, 3)
   for (const member of state.members) {
     assert.deepEqual(
       Object.keys(member).sort(),
       ['category', 'challengeId', 'challengeName', 'currentAction', 'description', 'lastActivityAt', 'name', 'role', 'staleSeconds', 'status'],
-      '成员多出 currentAction / lastActivityAt / staleSeconds —— task-30 的「agent 在干啥 + 多久没动」',
+      '成员多出 currentAction / lastActivityAt / staleSeconds —— 可显示 agent 当前动作和停滞时间',
     )
   }
   const lead = state.members[0]
@@ -894,7 +923,7 @@ test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 
       currentAction: undefined, lastActivityAt: undefined, staleSeconds: undefined,
     },
   )
-  // 活动信息（task-30）：lead 收到过一条团队消息 → 有 lastActivityAt 与动作描述
+  // 活动信息：lead 收到过一条团队消息 → 有 lastActivityAt 与动作描述
   assert.equal(typeof lead.lastActivityAt, 'string')
   assert.match(lead.currentAction, /消息|暂无活动记录/)
   const solver = state.members[1]
@@ -919,7 +948,7 @@ test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 
   assert.equal(idle.lastActivityAt, null)
   assert.equal(idle.currentAction, '暂无活动记录')
 
-  // ── tasks
+  //  tasks
   assert.equal(state.tasks.length, 2)
   for (const task of state.tasks) {
     assert.deepEqual(Object.keys(task).sort(), [
@@ -938,7 +967,7 @@ test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 
   assert.equal(state.tasks[1].status, 'completed')
   assert.equal(state.tasks[1].createdAt, null, 'DSH 任务没有时间戳 / 无 work 记录 → null')
 
-  // ── messages：最新在前，字段裁剪到契约
+  //  messages：最新在前，字段裁剪到契约
   assert.equal(state.messages.length, 2)
   assert.deepEqual(Object.keys(state.messages[0]).sort(), ['at', 'challengeId', 'from', 'kind', 'messageId', 'text', 'to'])
   assert.equal(state.messages[0].kind, 'status', '最新一条在前')
@@ -947,7 +976,7 @@ test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 
     text: 'NeuroSign 已解出，flag 已提交', messageId: '', challengeId: null,
   })
 
-  // ── counts
+  //  counts
   assert.deepEqual(state.counts, {
     members: 3, running: 2, inactive: 1, tasksTotal: 2, tasksDone: 1, tasksInProgress: 1, tasksPending: 0,
   })
@@ -1009,6 +1038,45 @@ test('buildTeamState：没有平台连接也能看团队；store 缺方法不崩
   // description 兜底解析出题目（没有 work 记录）
   assert.equal(state.tasks[0].challengeId, 1)
   assert.equal(state.members[1].challengeId, 1)
+})
+
+test('buildTeamState：平台解析失败时按活动连接隔离消息', async () => {
+  const { teams } = mockAgentTeams()
+  const seen = []
+  const store = mockTeamStore({
+    async getActiveConnKey() { return TEAM_CONN_KEY },
+    async listTeamMessages(connKey) {
+      seen.push(connKey)
+      return [{ connKey, at: '2026-09-29T05:03:00.000Z', from: 'lead', to: 'team', kind: 'status', text: '只属于当前赛事' }]
+    },
+  })
+  const state = await buildTeamState({
+    store,
+    teams,
+    caller: TEAM_AGENT,
+    resolveAdapter: async () => { throw new Error('平台暂不可用') },
+    now: () => Date.parse('2026-09-29T05:04:00.000Z'),
+  })
+  assert.deepEqual(seen, [TEAM_CONN_KEY])
+  assert.equal(state.connection.key, TEAM_CONN_KEY)
+  assert.equal(state.messages.length, 1)
+  assert.equal(state.runtime.idleSeconds, 60, '活动时间使用注入时钟，测试与运行时口径一致')
+})
+
+test('buildTeamState：没有活动连接时不读取全部赛事消息', async () => {
+  const { teams } = mockAgentTeams()
+  const seen = []
+  const state = await buildTeamState({
+    store: mockTeamStore({
+      async getActiveConnKey() { return null },
+      async listTeamMessages(connKey) { seen.push(connKey); return [] },
+    }),
+    teams,
+    caller: TEAM_AGENT,
+    resolveAdapter: async () => { throw new Error('未配置') },
+  })
+  assert.equal(state.ok, true)
+  assert.deepEqual(seen, ['unknown'])
 })
 
 test('toChallengeId / toEpochMs：平台 id 与时间戳归一化', () => {
@@ -1088,7 +1156,38 @@ test('GET /lingxu-ctf/team：真调 handler —— 200 + JSON（caller 由 ctf_s
   assert.equal(JSON.parse(posted.body).ok, false)
 })
 
-// ────────────────────────────────────────────── 顶部「CTF」视图：/lingxu-ctf/reports
+test('GET /lingxu-ctf/usage：日志根目录不接受浏览器参数', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-usage-route-'))
+  const attackerRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-usage-attacker-'))
+  const previousHome = process.env.DSH_HOME
+  const sessionId = 'session-route-test'
+  try {
+    process.env.DSH_HOME = root
+    const dir = path.join(root, 'sessions', 'workspace', sessionId)
+    await fsp.mkdir(dir, { recursive: true })
+    await fsp.writeFile(path.join(dir, 'session.v4.jsonl'), [
+      JSON.stringify({ type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 11, outputTokens: 2 } } }),
+      '',
+    ].join('\n'))
+    const ctx = mockCtx()
+    apply(ctx, {})
+    const route = ctx._collected.routes.find((item) => item.path === '/lingxu-ctf/usage')
+    const response = await callRoute(route, { url: `/lingxu-ctf/usage?session=${sessionId}&root=${encodeURIComponent(attackerRoot)}` })
+    const body = JSON.parse(response.body)
+    assert.equal(body.ok, true)
+    assert.equal(body.totals.uncachedInputTokens, 11)
+    assert.equal(body.totals.outputTokens, 2)
+    assert.equal(body.file.startsWith(path.join(root, 'sessions')), true)
+    assert.equal(body.file.includes(attackerRoot), false)
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
+    await fsp.rm(attackerRoot, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+//  顶部「CTF」视图：/lingxu-ctf/reports
 
 test('buildReportsState：按 store 记录列出本地 WP，文件不存在则跳过', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-reports-'))
@@ -1156,7 +1255,7 @@ test('GET /lingxu-ctf/reports：真调 handler', async () => {
   assert.equal(posted.statusCode, 405)
 })
 
-// ────────────────────────────────────────────── enableFloatingPanel（默认关闭）
+//  enableFloatingPanel（默认关闭）
 
 test('enableFloatingPanel：默认 false（顶部「CTF」视图为主），显式 true 才开', () => {
   assert.equal(normalizeConfig({}).enableFloatingPanel, false)
@@ -1215,7 +1314,7 @@ test('GET /lingxu-ctf/team：任意 ctf_* 工具调用都能提供会话语境�
   assert.equal(calls.callers.every((caller) => caller === TEAM_AGENT), true)
 })
 
-// ────────────────────────────────────────────── 赛段工具动态注册
+//  赛段工具动态注册
 
 test('createStageToolRegistry：按赛事赛段动态注册/注销 AWD、CFS 工具', async () => {
   const live = []
@@ -1287,7 +1386,7 @@ test('接线守卫：apply 暴露 deps.syncStageTools，ctf_connect 换赛事时
   assert.match(tools, /hasAwd/, 'ctf_connect 必须把 hasAwd 传下去')
 })
 
-// ────────────────────────────────────────────── 连接解析：设置页 vs 本地连接（task-27）
+//  连接解析：设置页 vs 本地连接
 
 test('cookieLooksUsable：脱敏占位符不能当 Cookie 用（否则平台一直 403）', () => {
   assert.equal(cookieLooksUsable('sessionid=abc; csrftoken=x'), true)
@@ -1438,7 +1537,7 @@ test('createResolveAdapter：真实 store + 设置页配置 → 解析到设置�
     createAdapter: () => ({ marker: 'adapter' }),
   })
   const fallback = await redacted({})
-  // 设置页仍然声明平台/赛事（origin=settings），只是 Cookie 取同 key 的本地连接（task-28 语义）
+  // 设置页仍然声明平台/赛事（origin=settings），只是 Cookie 取同 key 的本地连接
   assert.equal(fallback.connection.cookie, 'sessionid=old', '脱敏 Cookie 时用本地已存连接')
   assert.equal(fallback.connection.origin, 'settings')
   assert.equal(fallback.connection.cookieFrom, '本地连接 lingxu:h:8000:4')
@@ -1473,7 +1572,7 @@ test('createResolveAdapter：设置页改了 eventId → **立刻生效**（不�
   assert.equal(normalized.connection.key, 'lingxu:h:8000:7')
 })
 
-test('★ 回归：设置页活配置必须拆 volatile 包装（否则 eventId 变 {} → 切赛事后一片空白）', async () => {
+test('回归：设置页活配置必须拆 volatile 包装（否则 eventId 变 {} → 切赛事后一片空白）', async () => {
   // 真实事故：settingsSnapshot() 直接读 rawConfig[field]，而 Config 字段全是 .volatile() 包装，
   // 于是 baseUrl 变成 "[object Object]"、eventId 变成 {}，拿去请求平台必然失败 →
   // 面板显示「剩余 已结束」+「暂无题目数据」。这里钉住拆包行为。
@@ -1512,9 +1611,9 @@ test('★ 回归：设置页活配置必须拆 volatile 包装（否则 eventId 
   assert.deepEqual(plainConfigValue({ a: vol(1), b: vol('x') }), { a: 1, b: 'x' })
 })
 
-// ────────────────────────────────────────────── Cookie 是平台级的（task-28）
+//  Cookie 是平台级的
 
-test('★ 设置页 eventId=7 + 设置页无 cookie + store 只有 …:4（cookie 可用）→ 用 7 且 cookie 来自 …:4', () => {
+test('设置页 eventId=7 + 设置页无 cookie + store 只有 …:4（cookie 可用）→ 用 7 且 cookie 来自 …:4', () => {
   // 用户真实现场：设置页写了 event 7，但 store 里只有上次 ctf_connect 的 event 4 连接，
   // 且设置页的 cookie 拿不到真值（DSH 对非 owner 读是空/脱敏）→ 旧实现会「无可用 Cookie」→ 403 未登录 → 空数据。
   const settings = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: '' }
@@ -1618,7 +1717,7 @@ test('createResolveAdapter：同平台 cookie 回退走真实 store（切赛事�
   assert.equal(seen[0].cookie, 'sessionid=platform-level', '适配器真的拿到了可用 cookie')
 })
 
-// ══════════════════════════════════════════════ task-33：面板缓存 / 单飞 / 写入穿透
+//  面板缓存 / 单飞 / 写入穿透
 // 背景：悬浮面板 + CTF 视图各自 5s 轮询，每次快照打 6 次平台 → ~140 请求/分钟
 // → 平台把会话打爆（403「未登录」）→ 全队掉线。
 
@@ -1687,7 +1786,7 @@ test('createPanelSnapshotCache：刷新下限 —— TTL 过期但未到下限�
   assert.equal(cache.stats.staleHits, 1)
 })
 
-test('createPanelSnapshotCache：★ loud 写操作穿透刷新下限（交 flag 面板马上变），且受 5s 冷却约束', async () => {
+test('createPanelSnapshotCache：loud 写操作穿透刷新下限（交 flag 面板马上变），且受 5s 冷却约束', async () => {
   let nowMs = 0
   let loads = 0
   const cache = createPanelSnapshotCache({
@@ -1725,7 +1824,7 @@ test('createPanelSnapshotCache：★ loud 写操作穿透刷新下限（交 flag
   assert.equal(loads, 3, '冷却结束后 loud 可再次穿透')
 })
 
-test('★ createPanelSnapshotCache：每分钟刷新硬上限（数学上保证 ≤30 次平台请求/分钟）', async () => {
+test('createPanelSnapshotCache：每分钟刷新硬上限（数学上保证 ≤30 次平台请求/分钟）', async () => {
   let nowMs = 0
   let loads = 0
   const cache = createPanelSnapshotCache({
@@ -1823,7 +1922,7 @@ function panelFetchMock({ delayMs = 0 } = {}) {
   return { calls, restore: () => { globalThis.fetch = original } }
 }
 
-test('★ GET /lingxu-ctf/state：TTL 缓存 + 单飞（并发 5 个请求只打一次平台）', async () => {
+test('GET /lingxu-ctf/state：TTL 缓存 + 单飞（并发 5 个请求只打一次平台）', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-panel-'))
   process.env.DSH_HOME = dir
   // 给平台响应加 5ms 延迟：让 5 个并发请求真的**重叠**，才能验证单飞（否则它们会串行命中 TTL 缓存）
@@ -1855,7 +1954,7 @@ test('★ GET /lingxu-ctf/state：TTL 缓存 + 单飞（并发 5 个请求只打
   }
 })
 
-test('★ 缓存穿透：写操作（ctf_submit_flag 落审计）后，面板必须重新拉取', async () => {
+test('缓存穿透：写操作（ctf_submit_flag 落审计）后，面板必须重新拉取', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-panel-w-'))
   process.env.DSH_HOME = dir
   const platform = panelFetchMock()

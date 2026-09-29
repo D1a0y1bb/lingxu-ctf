@@ -1,7 +1,7 @@
 {
   "name": "dsh-lingxu-ctf",
-  "version": "1.0.5",
-  "description": "DSH 凌虚竞赛平台 CTF 解题插件：自动枚举赛题/理论题/排行榜，并发 agent 团队协同解题，自动提交 flag 与生成 writeup。",
+  "version": "1.0.6",
+  "description": "DSH 凌虚竞赛插件：查看赛题、管理环境、编排解题 agent，并保存提交记录和 writeup。",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -10,6 +10,7 @@
     "./lingxu": "./lib/lingxu.js",
     "./platforms": "./lib/platforms.js",
     "./store": "./lib/store.js",
+    "./team-events": "./lib/team-events.js",
     "./package.json": "./package.json",
     "./stage-tools": "./lib/stage-tools.js"
   },
@@ -18,6 +19,7 @@
     "docs",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
@@ -45,7 +47,7 @@
     },
     "client": {
       "platform": "web",
-      "injectWhy": "⚠️ 这三项都不是「import 的依赖」，而是客户端 boot graph 的组装声明 —— 一个都不能删。\n\n为什么必须 @deepseek-ai/dsh-client-modules：\n  sessions 服务由 @deepseek-ai/dsh-api-session-controller 提供，但只有它进入客户端组合后\n  ctx.get('sessions') 才有值。少了它，CTF tab 的会话门控会【静默降级】成「任何会话都显示」——\n  因为 dsh-client-modules 对解析不到的包名是 `if (dependency !== undefined)` 直接跳过，\n  不警告也不抛错（packages/client/modules/src/client/system.ts）。\n  ⚠️ 曾用名 @deepseek-ai/dsh-client-runtime 在 DSH 0.2.0-rc.1 根本不存在，等于没声明 —— 已更正。\n\n为什么必须 @deepseek-ai/dsh-client-locale：tab 文案跟随语言（ui-conversation 自己也会拉，一并声明保证顺序）。\n为什么必须 @deepseek-ai/dsh-client-ui-conversation：它把 session-controller 拉进组合，是 sessions 的实际入口。\n\ndsh-pentest 用的是同一组 inject。改这里请同步跑 tests/client.test.mjs 的 inject 断言。",
+      "injectWhy": "客户端界面依赖这三个 DSH 模块：modules 提供客户端装配，locale 提供标签翻译，ui-conversation 提供 sessions 列表和顶部视图槽。缺少 ui-conversation 时无法按会话预设控制 CTF 标签，只能退回通用显示。模块名称随 DSH 版本变化，升级 DSH 后请重新验证。",
       "inject": [
         "@deepseek-ai/dsh-client-modules",
         "@deepseek-ai/dsh-client-locale",

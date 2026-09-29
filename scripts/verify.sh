@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# 交付前自检：单元测试 + 真实平台冒烟 + 打包清单 + profile 安装状态。
+# 发布前检查：语法、单元测试、可选的真实平台检查和打包清单。
 #
 # 用法：
 #   bash scripts/verify.sh
-#   LINGXU_COOKIE_FILE=/path/cookie bash scripts/verify.sh   # 额外跑真实平台冒烟
+#   LINGXU_COOKIE_FILE=/path/cookie bash scripts/verify.sh   # 运行真实平台检查
+#   VERIFY_REQUIRE_LIVE=1 bash scripts/verify.sh              # 没有凭据时直接失败
 
 set -uo pipefail
 
@@ -27,6 +28,7 @@ if [ -z "$NODE" ]; then
 fi
 
 FAILED=0
+LIVE_STATUS="skipped"
 step() { echo; echo "══ $1"; }
 ok()   { echo "  ✔ $1"; }
 bad()  { echo "  ✖ $1"; FAILED=1; }
@@ -59,18 +61,26 @@ process.exit(bad ? 1 : 0);
 '; then ok "index / orchestrate / writeup 的 slug 逐字一致"; else bad "slug 实现存在分歧"; fi
 
 step "4/6 真实平台冒烟（无凭据则跳过）"
-if [ -n "${LINGXU_COOKIE_FILE:-}${LINGXU_COOKIE:-}" ]; then
-  if "$NODE" tests/smoke-live.mjs; then ok "冒烟通过"; else bad "冒烟失败"; fi
+LIVE_COOKIE="${LINGXU_COOKIE:-}"
+if [ -z "$LIVE_COOKIE" ] && [ -n "${LINGXU_COOKIE_FILE:-}" ] && [ -r "$LINGXU_COOKIE_FILE" ]; then
+  LIVE_COOKIE="$(tr -d '\r\n' < "$LINGXU_COOKIE_FILE")"
+fi
+if [ -n "$LIVE_COOKIE" ]; then
+  if "$NODE" tests/smoke-live.mjs; then ok "冒烟通过"; LIVE_STATUS="passed"; else bad "冒烟失败"; LIVE_STATUS="failed"; fi
   echo "  ── 端到端联调（真实插件装配 + 真实平台）"
-  if "$NODE" tests/e2e-live.mjs 2>&1 | tail -3; then ok "端到端通过"; else bad "端到端失败"; fi
+  if "$NODE" tests/e2e-live.mjs 2>&1 | tail -3; then ok "端到端通过"; else bad "端到端失败"; LIVE_STATUS="failed"; fi
 else
-  echo "  ⏭ 未设置 LINGXU_COOKIE_FILE / LINGXU_COOKIE，跳过"
+  echo "  ⏭ 未设置 LINGXU_COOKIE_FILE / LINGXU_COOKIE，真实平台检查未运行"
+  if [ "${VERIFY_REQUIRE_LIVE:-0}" = "1" ]; then
+    bad "VERIFY_REQUIRE_LIVE=1，但没有平台凭据"
+    LIVE_STATUS="failed"
+  fi
 fi
 
 step "5/6 打包清单完整性"
-for f in package.json cordis.patch.yml README.md docs/DESIGN.md docs/DSH-API-NOTES.md docs/INSTALL.md \
+for f in package.json cordis.patch.yml README.md CHANGELOG.md docs/AUDIT.md docs/DESIGN.md docs/DSH-API-NOTES.md docs/INSTALL.md docs/NEXT-REVIEW.md docs/FORENSICS.md \
          lib/index.js lib/lingxu.js lib/platforms.js lib/store.js lib/toolkit.js \
-         lib/tools.js lib/stage-tools.js lib/orchestrate.js lib/writeup.js lib/client.js; do
+         lib/tools.js lib/stage-tools.js lib/orchestrate.js lib/writeup.js lib/client.js lib/team-events.js; do
   if [ -f "$f" ]; then ok "$f"; else bad "缺少 $f"; fi
 done
 
@@ -92,8 +102,12 @@ fi
 
 echo
 if [ "$FAILED" -eq 0 ]; then
-  echo "✅ 自检通过"
+  if [ "$LIVE_STATUS" = "passed" ]; then
+    echo "✅ 静态检查与真实平台检查均通过"
+  else
+    echo "✅ 静态检查通过；真实平台检查未运行"
+  fi
 else
-  echo "❌ 自检发现问题（见上）"
+  echo "❌ 检查发现问题（见上）"
 fi
 exit "$FAILED"

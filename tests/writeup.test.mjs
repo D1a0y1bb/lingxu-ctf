@@ -2,11 +2,11 @@
  * lib/writeup.js 单元测试。
  *
  * 用真实 CtfStore（临时目录）+ mock adapter，覆盖：
- *   1. 正常生成（题面 / 元信息 / 时间线 / flag / store 登记）
- *   2. 中文题名 slug 不被清空
- *   3. 无 work 记录时的降级文案
- *   4. 平台不支持 WP 提交时的明确说明（不抛异常）
- *   5. body 覆盖思路、force 语义、复现脚本内联、list
+ *  1. 正常生成（题面 / 元信息 / 时间线 / flag / store 登记）
+ *  2. 中文题名 slug 不被清空
+ *  3. 无 work 记录时的降级文案
+ *  4. 平台不支持 WP 提交时的明确说明（不抛异常）
+ *  5. body 覆盖思路、force 语义、复现脚本内联、list
  */
 
 import { test } from 'node:test'
@@ -127,7 +127,7 @@ test('resolveWorkDir：绝不用 process.cwd()（插件进程 cwd 是 DSH profil
   // ③ 都没有 → 家目录兜底（调用方会警告用户），**不是 process.cwd()**
   const fallback = resolveWorkDir({})
   assert.equal(fallback, path.join(os.homedir(), 'lingxu-ctf-work'))
-  assert.notEqual(fallback, path.join(process.cwd(), 'lingxu-ctf-work'), 'task-31：不能落到插件进程目录')
+  assert.notEqual(fallback, path.join(process.cwd(), 'lingxu-ctf-work'), '不能落到插件进程目录')
 })
 
 // ------------------------------------------------------------------ generate

@@ -18,7 +18,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import vm from 'node:vm'
 
-// ────────────────────────────────────────────────────────────── 最小 DOM stub
+//  最小 DOM stub
 
 function createDom() {
   const byId = new Map()
@@ -217,7 +217,7 @@ function installGlobals(fetchImpl) {
   return env
 }
 
-// ────────────────────────────────────────────────────────────── 以生产路径加载 client.js
+//  以生产路径加载 client.js
 
 const CLIENT_URL = new URL('../lib/client.js', import.meta.url)
 let loadSeq = 0
@@ -299,7 +299,7 @@ const {
   CONFIG_SLOT_KEY,
   SECRET_SET_PLACEHOLDER,
   SECRET_UNSET_PLACEHOLDER,
-  // ── task-13：顶部「CTF」视图 tab ──
+  //  顶部「CTF」视图 tab
   VIEW_SLOT,
   VIEW_SLOT_ID,
   VIEW_ORDER,
@@ -400,7 +400,7 @@ const jsonResponse = (payload, init = {}) => ({
 /**
  * 显式挂出右下角悬浮面板的辅助函数。
  *
- * task-13 起 `apply()` **默认不挂**悬浮面板（用户明确要求不要；只有宿主
+ * `apply()` **默认不挂**悬浮面板（用户明确要求不要；只有宿主
  * `GET /lingxu-ctf/config` 下发 `enableFloatingPanel: true` 才挂）。下面这些用例
  * 测的是面板自身的渲染 / 轮询 / 折叠行为，所以显式打开开关 ——
  * 默认行为另有专门用例（见「悬浮面板：默认不挂」一节）。
@@ -417,7 +417,7 @@ async function settleFloating() {
   await flush()
 }
 
-// ────────────────────────────────────────────────────────────── 1. 模块形态
+//  1. 模块形态
 
 test('模块导出 shape：name + apply + 纯函数助手', () => {
   assert.equal(name, 'dsh-lingxu-ctf')
@@ -449,7 +449,7 @@ test('自包含 classic script 形态：0 顶层 export / 0 裸包 import / 走 
   assert.equal(source.includes('var(--dsh-color-'), false, '--dsh-color-* 在安装版 DSH 中不存在，不应使用')
 })
 
-// ────────────────────────────────────────────────────────────── 2. 容错
+//  2. 容错
 
 test('normalizeState 对 null / 垃圾输入全部容错且不抛错', () => {
   for (const input of [null, undefined, 42, 'nope', [], {}, { stats: 'x', challenges: 'y' }]) {
@@ -483,7 +483,7 @@ test('normalizeChallenge 状态推断：solved 布尔与 status 字符串双向�
   assert.equal(normalizeChallenge(null).submitAttempts, 0)
 })
 
-// ────────────────────────────────────────────────────────────── 3. 纯函数
+//  3. 纯函数
 
 test('formatDuration', () => {
   assert.equal(formatDuration(0), '已结束')
@@ -534,7 +534,7 @@ test('groupChallenges 分组并统计已解数', () => {
   assert.deepEqual(challengeCategories(state.challenges), ['Misc', 'Web', 'Crypto'])
 })
 
-// ────────────────────────────────────────────────────────────── 4. 渲染片段
+//  4. 渲染片段
 
 test('渲染片段：头部 / 统计 / 看板 / 排行榜 / 审计 / 理论题', () => {
   const state = normalizeState(fullSnapshot())
@@ -645,7 +645,7 @@ test('排行榜最多 20 行', () => {
   assert.equal(html.includes('u20'), false)
 })
 
-// ────────────────────────────────────────────────────────────── 5. apply / 生命周期
+//  5. apply / 生命周期
 
 test('apply(ctx) 通过 ctx.effect 注册且不抛错，销毁后卸载', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
@@ -700,7 +700,7 @@ test('findHostContainer：找不到容器时返回 null（→ 浮动模式）', 
   assert.equal(findHostContainer(dom.document), host)
 })
 
-// ────────────────────────────────────────────────────────────── 6. 数据流
+//  6. 数据流
 
 test('成功路径：渲染赛事名、统计、题目卡片、排行榜与提交审计', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
@@ -829,7 +829,7 @@ test('响应不是 JSON（json() 抛错）→ 错误态而非崩溃', async () =
   }
 })
 
-// ────────────────────────────────────────────────────────────── 7. 轮询与交互
+//  7. 轮询与交互
 
 test('轮询：页面隐藏时暂停，恢复可见后立即刷新', async () => {
   let calls = 0
@@ -950,7 +950,7 @@ test('createPanel 可显式注入 doc/win/fetch，不依赖全局', async () => 
   panel.destroy()
 })
 
-// ────────────────────────────────────────────────────────────── 8. 生产路径：classic script + __ModuleLoader__
+//  8. 生产路径：classic script + __ModuleLoader__
 
 test('生产路径：脚本执行即向 __ModuleLoader__ 注册 factory（默认不挂悬浮面板）', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
@@ -962,7 +962,7 @@ test('生产路径：脚本执行即向 __ModuleLoader__ 注册 factory（默认
     // factory 物化后必须给出 name / apply
     assert.equal(api.name, 'dsh-lingxu-ctf')
     assert.equal(typeof api.apply, 'function')
-    // ② 顶层装配完成，但**不再默认挂右下角悬浮**（task-13）
+    // ② 顶层装配完成，但**不再默认挂右下角悬浮**
     await api.pendingFloatingSync()
     assert.equal(
       env.dom.document.getElementById('lingxu-ctf-panel'),
@@ -1099,7 +1099,7 @@ test('生产路径：文件可被当作 **classic script** 求值（浏览器真
   )
 })
 
-// ────────────────────────────────────────────────────────────── 9. 配置卡片（task-8）
+//  9. 配置卡片
 
 /** 12 个字段的配置快照，形状对齐宿主 `GET /lingxu-ctf/config`。 */
 function configPayload() {
@@ -1451,7 +1451,7 @@ test('apply(ctx)：注册配置卡片 + CTF 视图 tab，悬浮面板按开关�
   }
 })
 
-// ────────────────────────────────────────────── 配置卡片必须返回 React 元素
+//  配置卡片必须返回 React 元素
 
 test('renderConfigSlot(page) 必须返回 React 元素，而不是组件函数', async () => {
   // 渲染器是 `const Comp = entry.component; renderEntry(slotKey, Comp, ...)`：
@@ -1508,7 +1508,7 @@ test('CSS 作用域：面板布局不得泄漏到配置卡片上', async () => {
   }
 })
 
-// ────────────────────────────────────────────── 主题：只用 DSH 真实 token（task-15）
+//  主题：只用 DSH 真实 token
 
 /**
  * DSH 主题 token 白名单（104 个 `--dsw-alias-*`）。
@@ -1560,8 +1560,8 @@ const DSH_ALIAS_TOKEN_WHITELIST = new Set([
   '--dsw-alias-tooltip-bg', '--dsw-alias-tooltip-key-bg',
 ])
 
-test('★ 主题：CSS 里不得出现 prefers-color-scheme（暗色靠 body[data-ds-dark-theme]）', async () => {
-  // 这是 task-15 最关键的回归防线：DSH 的暗色由 `body[data-ds-dark-theme]` 切换，
+test('主题：CSS 里不得出现 prefers-color-scheme（暗色靠 body[data-ds-dark-theme]）', async () => {
+  // 这是暗色主题的回归防线：DSH 的暗色由 `body[data-ds-dark-theme]` 切换，
   // token 自己会变；用媒体查询判断暗色会导致「系统浅色 + DSH 暗色」时露出浅色兜底。
   const { api } = await loadClientModule()
   const css = api.panelCss()
@@ -1576,7 +1576,7 @@ test('★ 主题：CSS 里不得出现 prefers-color-scheme（暗色靠 body[dat
   )
 })
 
-test('★ 主题：不得有 --lx-* 间接层（直接用 var(--dsw-alias-*)）', async () => {
+test('主题：不得有 --lx-* 间接层（直接用 var(--dsw-alias-*)）', async () => {
   const { api } = await loadClientModule()
   const css = api.panelCss()
   assert.equal(css.includes('--lx-'), false, 'CSS 里不得再定义/使用 --lx-* 变量')
@@ -1585,7 +1585,7 @@ test('★ 主题：不得有 --lx-* 间接层（直接用 var(--dsw-alias-*)）'
   assert.deepEqual(hexes, [], `CSS 里不应出现硬编码 hex 颜色，实际: ${hexes.join(',')}`)
 })
 
-test('★ 主题：用到的 --dsw-alias-* 名必须在白名单内（防拼错 token 静默失效）', async () => {
+test('主题：用到的 --dsw-alias-* 名必须在白名单内（防拼错 token 静默失效）', async () => {
   const { api } = await loadClientModule()
   const css = api.panelCss()
   const used = [...new Set([...css.matchAll(/var\((--dsw-[a-z0-9-]+)\)/g)].map((m) => m[1]))]
@@ -1686,9 +1686,9 @@ test('配置卡片：布局 —— 布尔独占开关行，workDir 占两列，�
   card.destroy()
 })
 
-// ══════════════════════════════════════ 10. 顶部「CTF」视图 tab（task-13）
+//  10. 顶部「CTF」视图 tab
 
-/** 团队快照：形状对齐宿主 `GET /lingxu-ctf/team`（task-12 契约）。 */
+/** 团队快照：形状对齐宿主 `GET /lingxu-ctf/team`。 */
 function teamPayload() {
   return {
     ok: true,
@@ -1702,7 +1702,7 @@ function teamPayload() {
       { id: 't1', subject: '解出 Web 题', status: 'in_progress', owner: 'solver-web-01', challengeId: '2', challengeName: '<img src=x onerror=alert(1)>', category: 'Web' },
       // 平台侧已解 → 不能因为任务完成而变回未解
       { id: 't2', subject: '解出签到', status: 'completed', owner: 'solver-misc-01', challengeId: 1, challengeName: '签到', category: 'Misc' },
-      // ★ 平台侧 pending + 任务 in_progress → 必须升级成「进行中 · solver-rev-02」
+      // 平台侧 pending + 任务 in_progress → 必须升级成「进行中 · solver-rev-02」
       { id: 't3', subject: '解出 RSA', status: 'in_progress', owner: 'solver-rev-02', challengeId: 3, challengeName: 'RSA', category: 'Crypto' },
       // 任务里有、平台列表里没有 → 补一张「仅任务」卡
       { id: 't4', subject: '解出隐藏题', status: 'in_progress', owner: 'solver-web-01', challengeId: 99, challengeName: '隐藏题', category: 'Web' },
@@ -2011,7 +2011,7 @@ test('视图：renderCtfViewSlot 必须返回 React 元素，而不是组件函�
   assert.equal(rendered.props.className, 'lx-view-host')
 })
 
-// ── 数据模型：全部容错 ──
+//  数据模型：全部容错
 
 test('视图模型：normalizeTeam 对 null / 垃圾 / ok:false 全部降级成空团队', () => {
   for (const input of [null, undefined, 42, 'nope', [], {}, { ok: false, error: '团队数据缺失' }]) {
@@ -2024,6 +2024,7 @@ test('视图模型：normalizeTeam 对 null / 垃圾 / ok:false 全部降级成�
     assert.equal(team.counts.tasksTotal, 0)
   }
   assert.equal(normalizeTeam({ ok: false, error: 'x' }).error, 'x')
+  assert.equal(normalizeTeam({ ok: true, members: [], tasks: [], messages: [] }).ok, true, '成功的空团队不是请求失败')
 })
 
 test('视图模型：counts 缺失时由 members / tasks 推导', () => {
@@ -2058,7 +2059,7 @@ test('视图模型：状态归一（连字符 / 大小写 / 别名）与 challen
   assert.equal(challengeKey(''), null)
 })
 
-test('★ 「进行中」必须可见：平台未解 + 任务 in_progress → working + owner', () => {
+test('「进行中」必须可见：平台未解 + 任务 in_progress → working + owner', () => {
   const state = normalizeState(fullSnapshot())
   const team = normalizeTeam(teamPayload())
   const board = mergeChallengeBoard(state.challenges, team)
@@ -2088,7 +2089,7 @@ test('★ 「进行中」必须可见：平台未解 + 任务 in_progress → wo
   assert.equal(stats.agents, 3)
 })
 
-test('★ 题目看板渲染出「进行中 · solver-rev-02」，并做注入防护', () => {
+test('题目看板渲染出「进行中 · solver-rev-02」，并做注入防护', () => {
   const state = normalizeState(fullSnapshot())
   const team = normalizeTeam(teamPayload())
   const board = mergeChallengeBoard(state.challenges, team)
@@ -2152,7 +2153,7 @@ test('视图：协同通信按「对话对」分组，组内从早到晚，带 f
   assert.match(html, /汇报/)
   assert.match(html, /lx-vmsg-spawn/)
   assert.match(html, /lx-vmsg-report/)
-  // task-30：按「谁 ↔ 谁」分组，一眼看出协同关系（用户问题 11）
+  // 按「谁 ↔ 谁」分组，一眼看出协同关系（用户问题 11）
   assert.match(html, /lx-vmsg-groups/)
   assert.match(html, /lx-vmsg-group-head/)
   assert.match(html, /lead ↔ solver-web-01/, '同一对话对应聚合到一组')
@@ -2254,7 +2255,7 @@ test('视图：所有片段标签闭合平衡（innerHTML 结构不会破损）'
   }
 })
 
-// ── DOM 控制器 ──
+//  DOM 控制器
 
 test('视图控制器：挂载后拉三份数据并渲染摘要 / 看板，切 tab 重绘', async () => {
   const { impl, calls } = viewFetch()
@@ -2263,7 +2264,7 @@ test('视图控制器：挂载后拉三份数据并渲染摘要 / 看板，切 t
 
   const text = collectText(dom.document.body)
   assert.match(text, /2026 测试赛/)
-  // 头部改版（task-24）：平台名/URL/更新时间/赛事 ID 都不再显示
+  // 头部改版：平台名/URL/更新时间/赛事 ID 都不再显示
   assert.equal(text.includes('凌虚'), false, '平台名不该出现在视图里')
   assert.equal(text.includes('更新于'), false)
   assert.equal(text.includes('赛事 #'), false)
@@ -2406,7 +2407,7 @@ test('视图控制器：未配置平台 → 空态提示 ctf_connect', async () 
   view.destroy()
 })
 
-// ── 悬浮面板开关（默认不挂） ──
+//  悬浮面板开关（默认不挂）
 
 test('悬浮面板：默认不挂 —— 宿主没给 enableFloatingPanel 字段', async () => {
   const env = installGlobals(async (url) => {
@@ -2461,7 +2462,7 @@ test('悬浮面板：配置读取失败 / 非 JSON / 404 一律按「不挂」',
   assert.equal(await floatingPanelEnabled({ enableFloatingPanel: true }), true)
 })
 
-// ══════════════════════════════════════ 11. 环境 / 题型（task-20）
+//  11. 环境 / 题型
 
 /** 带环境字段的快照：覆盖正常 / 告警 / 过期 / 未探测四种形态。 */
 function envSnapshot(overrides = {}) {
@@ -2512,7 +2513,7 @@ test('环境模型：limit/held/free 推导与「已满」判定', () => {
     known: true, limit: 2, held: 1, free: 1, full: false, blocked: false,
     blockedAt: null, heldScope: 'plugin', blockedReason: null,
   })
-  // task-30：blocked 的语义 + 原因要透传（文案靠它解释「为什么 0/2 却满了」）
+  // blocked 的语义 + 原因要透传（文案靠它解释「为什么 0/2 却满了」）
   const blockedEnv = normalizeEnv({ limit: 2, held: 0, free: 2, blocked: true, blockedReason: '别的会话占着' })
   assert.equal(blockedEnv.blocked, true)
   assert.equal(blockedEnv.blockedReason, '别的会话占着')
@@ -2581,7 +2582,7 @@ test('紧凑时长格式：25m / 3m20s / 45s / 1h5m', () => {
   assert.equal(formatShortDuration(null), '0s')
 })
 
-test('★ 看板卡片：题型徽章 + 环境剩余（橙 / 红 / 正常）都渲染出来', () => {
+test('看板卡片：题型徽章 + 环境剩余（橙 / 红 / 正常）都渲染出来', () => {
   const model = envModel(envSnapshot())
   const html = renderViewBoardHtml(model, {})
   assert.match(html, /环境型/)
@@ -2598,7 +2599,7 @@ test('★ 看板卡片：题型徽章 + 环境剩余（橙 / 红 / 正常）都�
   assert.equal(card.includes('lx-venv'), false)
 })
 
-test('★ 摘要指标行：环境 held/limit；free === 0 时高亮', () => {
+test('摘要指标行：环境 held/limit；free === 0 时高亮', () => {
   const normal = renderViewMetaHtml(envModel(envSnapshot()))
   // 文案刻意写明「本插件」：held 只统计插件自己起的实例，与平台侧配额是两回事
   assert.match(normal, /环境（本插件）1\/2/)
@@ -2610,7 +2611,7 @@ test('★ 摘要指标行：环境 held/limit；free === 0 时高亮', () => {
   assert.match(full, /lx-vmetric-warn/)
 })
 
-test('★ Agent 活动：持有环境的 agent 有标记（含告警色）', () => {
+test('Agent 活动：持有环境的 agent 有标记（含告警色）', () => {
   const team = {
     ok: true,
     members: [
@@ -2638,7 +2639,7 @@ test('★ Agent 活动：持有环境的 agent 有标记（含告警色）', () 
   assert.equal(memberEnvOf('solver-none', model.board), null)
 })
 
-test('★ 「环境」子视图：只列环境型题目，按告警/剩余排序，含配额与占用者', () => {
+test('「环境」子视图：只列环境型题目，按告警/剩余排序，含配额与占用者', () => {
   const team = {
     ok: true,
     members: [{ name: 'solver-pwn-02', status: 'running' }],
@@ -2703,7 +2704,7 @@ test('环境视图控制器：切到 env tab 渲染环境面板', async () => {
   view.destroy()
 })
 
-// ── 样式作用域 ──
+//  样式作用域
 
 test('视图 CSS：作用域限定在 .lx-v* / .lx-view*，且不含任何定位声明', async () => {
   const { api } = await loadClientModule()
@@ -2725,9 +2726,9 @@ test('视图 CSS：作用域限定在 .lx-v* / .lx-view*，且不含任何定位
   assert.equal(css.includes('prefers-color-scheme'), false)
 })
 
-// ══════════════════════════════════════ 12. tab 门控 inject / 头部重做 / flag 完整显示（task-24）
+//  12. tab 门控 inject / 头部重做 / flag 完整显示
 
-test('★ 门控：会话列表还没到时不得 latch「始终显示」（task-24 真 bug）', () => {
+test('门控：会话列表还没到时不得 latch「始终显示」', () => {
   // 页面刚加载时 sessions.list 快照是 { byId:{}, phase:'pending' }。
   // 旧实现 a) canDetectPreset({byId:{}}) === false → detectorBroken 被永久 latch
   //         → 之后无论什么会话都「始终显示」。
@@ -2777,7 +2778,7 @@ test('★ 门控：会话列表还没到时不得 latch「始终显示」（task
   assert.deepEqual(disposed, ['ctf'])
 })
 
-test('★ 门控：canDetectPreset —— 空列表/无字段不可判定，键存在即可判定', async () => {
+test('门控：canDetectPreset —— 空列表/无字段不可判定，键存在即可判定', async () => {
   const { api } = await loadClientModule()
   // 空列表 / 垃圾 → 不可判定（但调用方不能因此 latch）
   assert.equal(api.canDetectPreset({ byId: {} }), false)
@@ -2792,7 +2793,7 @@ test('★ 门控：canDetectPreset —— 空列表/无字段不可判定，键�
   assert.equal(api.canDetectPreset({ byId: { s1: { projectionValues: { other: 1 } } } }), false)
 })
 
-test('★ 门控：一次会话都没有时（current 找不到）不注册，也不报错', () => {
+test('门控：一次会话都没有时（current 找不到）不注册，也不报错', () => {
   const registered = []
   const ctx = {
     slots: {
@@ -2814,8 +2815,8 @@ test('★ 门控：一次会话都没有时（current 找不到）不注册，�
   assert.equal(registered.length, 0)
 })
 
-test('★ 门控：sessions 服务迟到 → 先始终显示，上线后自动升级为门控', () => {
-  // 真实事故（task-24）：客户端插件按加载顺序挂载，apply 时 sessions 可能还没 provide。
+test('门控：sessions 服务迟到 → 先始终显示，上线后自动升级为门控', () => {
+  // 真实事故：客户端插件按加载顺序挂载，apply 时 sessions 可能还没 provide。
   // 旧实现一次性探测失败就永久降级 → 「tab 在任何模式下都出现」。
   const registered = []
   const disposed = []
@@ -2859,9 +2860,9 @@ test('★ 门控：sessions 服务迟到 → 先始终显示，上线后自动�
   assert.deepEqual(disposed, ['ctf', 'ctf'])
 })
 
-test('★ package.json：dsh.client.inject 必须是「真实存在的」graph 行（门控失效的根因）', async () => {
+test('package.json：dsh.client.inject 必须是「真实存在的」graph 行（门控失效的根因）', async () => {
   // 背景（两次真实事故）：
-  //   ① task-24：inject 里少了 ui-conversation → boot graph 不组装那一行 → `sessions` 不存在
+  //   ① inject 里少了 ui-conversation → boot graph 不组装那一行 → `sessions` 不存在
   //      → registerCtfView 走「拿不到 sessions → 始终注册」→ **CTF tab 在任何模式下都出现**；
   //   ② 上游 issue：曾写了 **@deepseek-ai/dsh-client-runtime**，但该包在 DSH 0.2.0-rc.1
   //      **根本不存在**（正确名是 @deepseek-ai/dsh-client-modules）。而 dsh-client-modules 对
@@ -2890,7 +2891,7 @@ test('★ package.json：dsh.client.inject 必须是「真实存在的」graph �
   assert.match(why, /ui-conversation/)
 })
 
-test('★ 头部：只有居中标题 + 一行指标，不含平台名 / URL / 更新时间 / 赛事 ID / 刷新按钮 / 绿点', async () => {
+test('头部：只有居中标题 + 一行指标，不含平台名 / URL / 更新时间 / 赛事 ID / 刷新按钮 / 绿点', async () => {
   const { impl } = viewFetch()
   const { dom, view } = mountView({ fetchImpl: impl })
   await view.refresh()
@@ -2937,7 +2938,7 @@ test('★ 头部：只有居中标题 + 一行指标，不含平台名 / URL / �
   running.view.destroy()
 })
 
-test('★ 头部样式：标题居中且字号 ≥18px；指标行无 chip 底色', async () => {
+test('头部样式：标题居中且字号 ≥18px；指标行无 chip 底色', async () => {
   const { api } = await loadClientModule()
   const css = api.panelCss()
   const name = /\.lx-vname\{([^}]*)\}/.exec(css)
@@ -2957,7 +2958,7 @@ test('★ 头部样式：标题居中且字号 ≥18px；指标行无 chip 底�
   assert.match(renderViewMetaHtml(model), /<span class="lx-vsep"[^>]*>·<\/span>/)
 })
 
-test('★ 提交审计：70 字符 flag 完整显示（等宽 / break-all / 不省略）', async () => {
+test('提交审计：70 字符 flag 完整显示（等宽 / break-all / 不省略）', async () => {
   const { api } = await loadClientModule()
   const longFlag = 'flag{BB4400B4318B3C8E9D19AFB22B8929C56B421FDAAEF2D440CB91DCA0A0A1B85F}'
   assert.ok(longFlag.length > 60)
@@ -2991,12 +2992,12 @@ test('★ 提交审计：70 字符 flag 完整显示（等宽 / break-all / 不�
   assert.match(flagBlock[1], /background:var\(--dsw-alias-markdown-code-block\)/)
 })
 
-// ══════════════════════════════════════ 13. 防漂移：面板 vs 视图（task-25）
+//  13. 一致性：面板 vs 视图
 
 /**
- * 背景（task-25 真实事故）：`lib/client.js` 里有**两套平行的渲染族**
+ * 背景：`lib/client.js` 里有**两套平行的渲染族**
  * （悬浮面板 `render*Html` / 顶部视图 `renderView*Html`）。
- * task-24 只改了视图那套，用户截图打回来 —— 面板还在显示
+ * 只改视图那套时，面板可能继续显示旧内容；这里两套都检查。
  * `lingxu · https://…`、`lingxu` chip、`赛事 #4`、刷新按钮、截断的 flag。
  *
  * 下面这组用例是**结构性防线**：两族的公共片段必须共用
@@ -3052,7 +3053,7 @@ async function driftFragments() {
   }
 }
 
-test('★ 防漂移：两族头部都不含平台名 / 赛事 ID / URL / 更新时间 / 刷新', async () => {
+test('一致性：两族头部都不含平台名 / 赛事 ID / URL / 更新时间 / 刷新', async () => {
   const { panelMeta, viewMeta } = await driftFragments()
   for (const [name, html] of [['面板', panelMeta], ['视图', viewMeta]]) {
     assert.equal(html.includes('lingxu'), false, `${name}头部不该出现平台名`)
@@ -3072,7 +3073,7 @@ test('★ 防漂移：两族头部都不含平台名 / 赛事 ID / URL / 更新�
   assert.equal(panelMeta, viewMeta, '面板与视图的指标行应完全一致（共用 renderMetricsLineHtml）')
 })
 
-test('★ 防漂移：面板骨架里没有平台/URL 行，也没有刷新按钮；收起必须保留', async () => {
+test('一致性：面板骨架里没有平台/URL 行，也没有刷新按钮；收起必须保留', async () => {
   const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   // subEl（平台 · URL · 更新于）整行删除：源码里不该再有这段拼接
   assert.equal(source.includes('lx-panel-sub'), false, '面板副标题（平台 · URL）应已删除')
@@ -3099,7 +3100,7 @@ test('★ 防漂移：面板骨架里没有平台/URL 行，也没有刷新按�
   }
 })
 
-test('★ 防漂移：两族对同一条 70 字符 flag 都完整输出（共用 renderFlagBlockHtml）', async () => {
+test('一致性：两族对同一条 70 字符 flag 都完整输出（共用 renderFlagBlockHtml）', async () => {
   const { api, panelSubs, viewSubs } = await driftFragments()
   for (const [name, html] of [['面板', panelSubs], ['视图', viewSubs]]) {
     assert.ok(html.includes(LONG_FLAG), `${name}必须完整显示 70 字符 flag`)
@@ -3118,7 +3119,7 @@ test('★ 防漂移：两族对同一条 70 字符 flag 都完整输出（共用
   assert.match(flagBlock[1], /ui-monospace/)
 })
 
-test('★ 防漂移：排行榜空态区分「未连接」与「平台返回为空」', async () => {
+test('一致性：排行榜空态区分「未连接」与「平台返回为空」', async () => {
   const { api } = await loadClientModule()
   const connected = normalizeState({ connection: { key: 'k' }, leaderboard: [] })
   assert.match(api.renderLeaderboardHtml(connected), /平台返回为空/)
@@ -3131,14 +3132,14 @@ test('★ 防漂移：排行榜空态区分「未连接」与「平台返回为�
   assert.match(html, /lx-you/)
 })
 
-test('★ 防漂移：源码里必须有「改一族时检查另一族」的提示注释', async () => {
-  const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(source, /改任一族时\*\*必须检查另一族\*\*/, '两族说明注释不能被删（防漂移的第一道防线）')
-  assert.match(source, /renderMetricsLineHtml/)
-  assert.match(source, /renderSubmissionCardsHtml/)
+test('公共渲染片段在面板和视图中保持一致', async () => {
+  const { api, panelSubs, viewSubs } = await driftFragments()
+  assert.equal(panelSubs, viewSubs)
+  assert.equal(typeof api.renderMetricsLineHtml, 'function')
+  assert.equal(typeof api.renderSubmissionCardsHtml, 'function')
 })
 
-test('★ tab 文案：用户要的长名字（凌虚竞赛平台 CTF Agent 模式）', async () => {
+test('tab 文案：用户要的长名字（凌虚竞赛平台 CTF Agent 模式）', async () => {
   const { api } = await loadClientModule()
   assert.equal(api.VIEW_LABEL_FALLBACK, '凌虚竞赛平台 CTF Agent 模式')
   // 注册时 label thunk 返回长名字
@@ -3161,9 +3162,9 @@ test('★ tab 文案：用户要的长名字（凌虚竞赛平台 CTF Agent 模�
   assert.match(css, /\.lx-vtabs\{[^}]*overflow-x:auto/)
 })
 
-// ══════════════════════════════════════ 17. task-35：协同通信变丰富（钩子 + ctf_team_log）
+//  17. 协同通信变丰富（钩子 + ctf_team_log）
 
-test('★ task-35：只读钩子解析 teammate 消息（sent → 送达投递事件）', async () => {
+test('只读钩子解析 teammate 消息（sent → 送达投递事件）', async () => {
   const { teamDeliveryOf } = await import('../lib/index.js')
 
   // DSH 投递给目标会话的 user/message：data.source.kind === 'team-message'
@@ -3172,12 +3173,10 @@ test('★ task-35：只读钩子解析 teammate 消息（sent → 送达投递�
     time: 1790000000000,
     data: {
       source: { kind: 'team-message', teamId: 'team-1', messageId: 'team-message-abc', senderId: 'agent-1', senderName: 'solver-web-01' },
-      message: {
-        content: [
-          { type: 'text', text: 'Team message team-message-abc from solver-web-01:' },
-          { type: 'text', text: '图书馆那道题我拿到 shell 了，凭据在 /tmp/creds' },
-        ],
-      },
+      content: [
+        { type: 'text', text: 'Team message team-message-abc from solver-web-01:' },
+        { type: 'text', text: '图书馆那道题我拿到 shell 了，凭据在 /tmp/creds' },
+      ],
     },
   })
   assert.equal(delivery.messageId, 'team-message-abc')
@@ -3185,6 +3184,16 @@ test('★ task-35：只读钩子解析 teammate 消息（sent → 送达投递�
   assert.equal(delivery.kind, 'interactive', '钩子记的是「agent 间交流」，与 ctf_team_log 的 kind 区分开')
   assert.equal(delivery.text, '图书馆那道题我拿到 shell 了，凭据在 /tmp/creds', '去掉信箱自动加的信封行')
   assert.equal(delivery.at, 1790000000000)
+
+  // 旧版 DSH 曾把内容包在 data.message.content，保留兼容读取。
+  const legacy = teamDeliveryOf({
+    type: 'user/message',
+    data: {
+      source: { kind: 'team-message', messageId: 'legacy', senderName: 'solver-old' },
+      message: { content: [{ type: 'text', text: '旧版事件' }] },
+    },
+  })
+  assert.equal(legacy.text, '旧版事件')
 
   // 非 team 消息 / 其它事件类型 → null（绝不能把普通用户消息当成协同消息）
   assert.equal(teamDeliveryOf({ type: 'user/message', data: { source: { kind: 'user' }, message: { content: [] } } }), null)
@@ -3198,7 +3207,7 @@ test('★ task-35：只读钩子解析 teammate 消息（sent → 送达投递�
   assert.equal(empty.kind, 'interactive')
 })
 
-test('★ task-35：钩子失败绝不能影响消息送达（注入抛错的 store 也不崩）', async () => {
+test('钩子失败绝不能影响消息送达（注入抛错的 store 也不崩）', async () => {
   const { teamDeliveryOf } = await import('../lib/index.js')
   // 模拟钩子处理器：与 index.js 里同构（try/catch + 不 await + catch 兜底）
   const boom = { appendTeamMessage: async () => { throw new Error('disk full') } }
@@ -3220,7 +3229,7 @@ test('★ task-35：钩子失败绝不能影响消息送达（注入抛错的 st
   assert.equal(delivered, true, '写盘失败被吞掉（消息投递早已完成，不受影响）')
 })
 
-test('★ task-35：store 按 messageId 去重；ctf_team_log 的 challengeId 落盘', async () => {
+test('store 按 messageId 去重；ctf_team_log 的 challengeId 落盘', async () => {
   const { CtfStore } = await import('../lib/store.js')
   const { mkdtempSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
@@ -3242,7 +3251,7 @@ test('★ task-35：store 按 messageId 去重；ctf_team_log 的 challengeId �
   assert.equal((await store.listTeamMessages('k', 50)).length, 4)
 })
 
-test('★ task-35：prompt 要求 agent 用 ctf_team_log（跨题线索是硬要求）', async () => {
+test('prompt 要求 agent 用 ctf_team_log（跨题线索是硬要求）', async () => {
   const { buildSolverPrompt, buildPrepPrompt } = await import('../lib/orchestrate.js')
   const challenge = { id: 14, name: '图书馆管理系统', category: 'Web', score: 250 }
   const deps = { name: 'solver-web-01', challenge, taskId: 'task-1', connection: { platform: 'lingxu', baseUrl: 'x', eventId: 4 }, connKey: 'k', workDir: '/tmp/w', envLimit: 2, envHeld: 0, taskType: 2 }
@@ -3257,7 +3266,7 @@ test('★ task-35：prompt 要求 agent 用 ctf_team_log（跨题线索是硬要
   assert.match(prepText, /kind=\\"progress\\"/)
 })
 
-test('★ task-35：协同通信按来源分类（编排 / 交流 / 线索 / 求助 / 进展）并可筛选', async () => {
+test('协同通信按来源分类（编排 / 交流 / 线索 / 求助 / 进展）并可筛选', async () => {
   const { api } = await loadClientModule()
   assert.equal(api.messageCategory('interactive'), 'interactive')
   assert.equal(api.messageCategory('clue'), 'clue')
@@ -3309,7 +3318,7 @@ test('★ task-35：协同通信按来源分类（编排 / 交流 / 线索 / 求
   assert.match(none, /点「全部」/)
 })
 
-test('★ task-35：ctf_team_log 落盘并返回可读结果；参数容错', async () => {
+test('ctf_team_log 落盘并返回可读结果；参数容错', async () => {
   const { buildToolSpecs } = await import('../lib/tools.js')
   const rows = []
   const store = {
@@ -3343,8 +3352,8 @@ test('★ task-35：ctf_team_log 落盘并返回可读结果；参数容错', as
   assert.match(await noStore.execute({ text: 'x' }), /没有可用的团队日志存储/)
 })
 
-test('★ 预览假数据防漂移：配置项必须与宿主 describeConfigFields() 完全一致', async (t) => {
-  // 教训（task-25）：**预览页的假数据本身就是漂移源** —— 配置项从 11 涨到 14、
+test('预览假数据一致性：配置项必须与宿主 describeConfigFields() 完全一致', async (t) => {
+  // 教训：**预览页的假数据本身就是漂移源** —— 配置项从 11 涨到 14、
   // 面板假数据缺 leaderboard，都是「手抄」过期造成的。
   // 现在预览页的 config payload 由宿主 schema **生成**，这条用例守住它别再手抄回去。
   const previewPath = join(homedir(), 'Desktop', 'lingxu-ctf-view-preview.html')
@@ -3380,9 +3389,9 @@ test('★ 预览假数据防漂移：配置项必须与宿主 describeConfigFiel
   assert.equal(payload.secretsSet.cookie, true, 'cookie 是 secret，预览要展示「已设置」')
 })
 
-// ══════════════════════════════════════ 14. 布局四连修（task-26）
+//  14. 布局四连修
 
-test('★ 布局：看板卡片 / 分组标签 / 筛选行 共用同一条左侧基线', async () => {
+test('布局：看板卡片 / 分组标签 / 筛选行 共用同一条左侧基线', async () => {
   const { api } = await loadClientModule()
   const css = api.panelCss()
 
@@ -3410,7 +3419,7 @@ test('★ 布局：看板卡片 / 分组标签 / 筛选行 共用同一条左侧
   assert.match(css, /\.lx-card\{[^}]*padding:8px 10px 8px 14px/)
 })
 
-test('★ 布局：排行榜两种宽度都不散架（# 窄 / 选手自适应 / 分数有界）', async () => {
+test('布局：排行榜两种宽度都不散架（# 窄 / 选手自适应 / 分数有界）', async () => {
   const { api } = await loadClientModule()
   const state = api.normalizeState({
     connection: { key: 'k' },
@@ -3444,7 +3453,7 @@ test('★ 布局：排行榜两种宽度都不散架（# 窄 / 选手自适应 /
   assert.equal(you[1].includes('brand-primary'), false, '不再用近黑品牌色做实心底')
 })
 
-test('★ 布局：面板头部不再有分隔线；select 给箭头留位；控件放不下就整齐换行', async () => {
+test('布局：面板头部不再有分隔线；select 给箭头留位；控件放不下就整齐换行', async () => {
   const { api } = await loadClientModule()
   const css = api.panelCss()
 
@@ -3481,7 +3490,7 @@ test('★ 布局：面板头部不再有分隔线；select 给箭头留位；控
   assert.match(css, /\.lx-controls\{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px 14px 0;\}/)
 })
 
-test('★ 布局：理论题是独立子 tab（不再塞在看板末尾）', async () => {
+test('布局：理论题是独立子 tab（不再塞在看板末尾）', async () => {
   const { api } = await loadClientModule()
   // tab 表里紧跟「题目看板」
   const ids = api.VIEW_TABS.map((tab) => tab.id)
@@ -3511,7 +3520,7 @@ test('★ 布局：理论题是独立子 tab（不再塞在看板末尾）', asy
   assert.match(html, /理论题 B/)
   assert.match(html, /100 题/)
   assert.match(html, /已交卷/)
-  // 防漂移：试卷行仍由 renderTheoryItemsHtml 唯一实现 —— 面板行是视图卡片的前缀，
+  // 一致性：试卷行仍由 renderTheoryItemsHtml 唯一实现 —— 面板行是视图卡片的前缀，
   // 视图只是在行尾多塞了「加载题目概要」按钮 + 题目容器（动作槽）。
   const panelRow = api.renderTheoryHtml(state)
   assert.ok(html.startsWith(panelRow.slice(0, panelRow.indexOf('</div>'))), '试卷行的单元格必须与面板一致（共享实现）')
@@ -3533,7 +3542,7 @@ test('★ 布局：理论题是独立子 tab（不再塞在看板末尾）', asy
   assert.equal(api.renderViewBoardHtml(model, {}).includes('理论题'), false, '看板里不该再塞理论题')
 })
 
-test('★ 布局：理论题 tab 在视图控制器里可切换', async () => {
+test('布局：理论题 tab 在视图控制器里可切换', async () => {
   const { impl } = viewFetch({
     state: {
       ...fullSnapshot(),
@@ -3552,7 +3561,7 @@ test('★ 布局：理论题 tab 在视图控制器里可切换', async () => {
   view.destroy()
 })
 
-test('★ 布局：间距只用 4/6/8/10/12/14/16/20/24（防随手写 13px 之类）', async () => {
+test('布局：间距只用 4/6/8/10/12/14/16/20/24（防随手写 13px 之类）', async () => {
   const { api } = await loadClientModule()
   const css = api.panelCss()
   // 允许：约定间距 + 字号/行高/控件尺寸/圆角/列宽等非间距数值
@@ -3570,17 +3579,20 @@ test('★ 布局：间距只用 4/6/8/10/12/14/16/20/24（防随手写 13px 之�
   assert.deepEqual([...offenders], [], `出现了非约定间距值：${[...offenders].join(', ')}`)
 })
 
-// ══════════════════════════════════════ 15. task-30：实时信息 / 报告 / 环境 / 耗时 / 协同
+//  15. 实时信息 / 报告 / 环境 / 耗时 / 协同
 
-// ══════════════════════════════════════ 16. task-34：token 用量（会话日志 + DSH 投影对账）
+//  16. token 用量（会话日志 + DSH 投影对账）
 
-test('★ task-34：用量折叠按 DSH tokenUsage 投影语义（同 step 替换、重试重算）', async () => {
+test('用量折叠按 DSH tokenUsage 投影语义（同 step 替换、重试重算）', async () => {
   const { foldTokenUsage, usageBuckets, usageSampleOf } = await import('../lib/index.js')
 
   // ① 单条 assistant/message：inputTokens 即「未缓存输入」
   assert.deepEqual(usageBuckets({ inputTokens: 10, outputTokens: 2, cacheReadTokens: 3 }), {
     uncachedInputTokens: 10, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 0,
   })
+  assert.deepEqual(usageBuckets({ inputTokens: 'bad', outputTokens: Infinity, cacheReadTokens: -3 }), {
+    uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+  }, '异常 provider 数值不能污染累计结果')
 
   // ② 同一 (turn, step) 的后续样本**替换**而不是累加 —— 直接相加会翻倍（真实日志里
   //    assistant/attempt 与 assistant/message 常常描述同一步）
@@ -3620,7 +3632,7 @@ test('★ task-34：用量折叠按 DSH tokenUsage 投影语义（同 step 替�
   assert.equal(usageSampleOf({ type: 'tool/call' }), undefined)
 })
 
-test('★ task-34：会话日志是多帧 zstd，必须逐帧解压（整文件解只出第一帧）', async () => {
+test('会话日志是多帧 zstd，必须逐帧解压（整文件解只出第一帧）', async () => {
   const { scanZstdFrames, ZSTD_FRAME_MAGIC } = await import('../lib/index.js')
   const { zstdCompressSync } = await import('node:zlib')
 
@@ -3641,7 +3653,7 @@ test('★ task-34：会话日志是多帧 zstd，必须逐帧解压（整文件�
   assert.equal(torn.tornStart, frames[1].start)
 })
 
-test('★ task-34：readSessionTokenUsage 读真实形状的日志（含增量与错误路径）', async () => {
+test('readSessionTokenUsage 读真实形状的日志（含增量与错误路径）', async () => {
   const { readSessionTokenUsage } = await import('../lib/index.js')
   const { zstdCompressSync } = await import('node:zlib')
   const { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } = await import('node:fs')
@@ -3704,9 +3716,33 @@ test('★ task-34：readSessionTokenUsage 读真实形状的日志（含增量�
   const nothing = await readSessionTokenUsage({ sessionId: '', sessionsRoot: emptyRoot })
   assert.equal(nothing.ok, false)
   assert.match(nothing.error, /找不到任何会话日志/)
+
+  // 明文 JSONL 没有帧边界，追加后必须按完整文件重算。
+  const plainId = 'session-plain-usage'
+  const plainDir = join(root, '--Users-x--', plainId)
+  mkdirSync(plainDir, { recursive: true })
+  const plainFile = join(plainDir, 'session.v4.jsonl')
+  writeFileSync(plainFile, JSON.stringify({ type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 4, outputTokens: 1 } } }) + '\n')
+  const plainFirst = await readSessionTokenUsage({ sessionId: plainId, sessionsRoot: root })
+  assert.equal(plainFirst.totalTokens, 5)
+  appendFileSync(plainFile, JSON.stringify({ type: 'assistant/message', data: { turn: 1, step: 2, usage: { inputTokens: 6, outputTokens: 2 } } }) + '\n')
+  const plainSecond = await readSessionTokenUsage({ sessionId: plainId, sessionsRoot: root })
+  assert.equal(plainSecond.totalTokens, 13)
+
+  // 原路径被原子替换且新文件更大时，不能把旧缓存当成同一份追加日志。
+  const replacement = `${plainFile}.replacement`
+  writeFileSync(replacement, [
+    JSON.stringify({ type: 'assistant/message', data: { turn: 9, step: 1, usage: { inputTokens: 20, outputTokens: 2 } } }),
+    JSON.stringify({ type: 'assistant/message', data: { turn: 9, step: 2, usage: { inputTokens: 30, outputTokens: 3 } } }),
+    '',
+  ].join('\n'))
+  const { renameSync } = await import('node:fs')
+  renameSync(replacement, plainFile)
+  const plainReplaced = await readSessionTokenUsage({ sessionId: plainId, sessionsRoot: root })
+  assert.equal(plainReplaced.totalTokens, 55)
 })
 
-test('★ task-34：用量展示 —— 工作 / 压缩开销 / 合计 三个数 + 与 DSH 投影对账', async () => {
+test('用量展示 —— 工作 / 压缩开销 / 合计 三个数 + 与 DSH 投影对账', async () => {
   const { api } = await loadClientModule()
 
   // ① 两边一致（工作用量），且有压缩开销 → 三个数都出现，压缩明确标注、不报「不一致」
@@ -3759,7 +3795,7 @@ test('★ task-34：用量展示 —— 工作 / 压缩开销 / 合计 三个数
   assert.equal(api.normalizeUsageBuckets({}), null, '全 0 视为无数据')
 })
 
-test('★ task-34：用量只在拿到 sessionId 时请求，且 5 秒内不重复打（视图与面板共用缓存）', async () => {
+test('用量只在拿到 sessionId 时请求，且 5 秒内不重复打（视图与面板共用缓存）', async () => {
   const { api } = await loadClientModule()
   api.resetUsageCache()
   const calls = []
@@ -3810,7 +3846,30 @@ test('★ task-34：用量只在拿到 sessionId 时请求，且 5 秒内不重�
   api.resetUsageCache()
 })
 
-test('★ task-34：没有可用的用量来源时，视图与面板都显示同一句兜底（两族共用片段）', async () => {
+test('旧会话的慢响应不会覆盖新会话用量缓存', async () => {
+  const { api } = await loadClientModule()
+  api.resetUsageCache()
+  const pending = new Map()
+  const fetchImpl = (url) => new Promise((resolve) => {
+    const key = new URL(String(url), 'http://local').searchParams.get('session')
+    pending.set(key, resolve)
+  })
+
+  const oldRequest = api.loadTokenUsage(fetchImpl, 'session-old')
+  const currentRequest = api.loadTokenUsage(fetchImpl, 'session-current')
+  pending.get('session-current')({ json: async () => ({ ok: true, sessionId: 'session-current', totals: { inputTokens: 20, outputTokens: 2 } }) })
+  const current = await currentRequest
+  pending.get('session-old')({ json: async () => ({ ok: true, sessionId: 'session-old', totals: { inputTokens: 900, outputTokens: 90 } }) })
+  await oldRequest
+
+  const cached = await api.loadTokenUsage(() => { throw new Error('current session should stay cached') }, 'session-current')
+  assert.equal(current.sessionId, 'session-current')
+  assert.equal(cached.sessionId, 'session-current')
+  assert.equal(cached.log.total, 22)
+  api.resetUsageCache()
+})
+
+test('没有可用的用量来源时，视图与面板都显示同一句兜底（两族共用片段）', async () => {
   const { api, impl } = await (async () => {
     const mod = await loadClientModule()
     const source = viewFetch({ state: fullSnapshot() })
@@ -3834,7 +3893,7 @@ test('★ task-34：没有可用的用量来源时，视图与面板都显示同
   api.resetUsageCache()
 })
 
-test('★ task-30：相对时间与耗时格式化', async () => {
+test('相对时间与耗时格式化', async () => {
   const { api } = await loadClientModule()
   assert.equal(api.formatRelativeSeconds(0), '刚刚')
   assert.equal(api.formatRelativeSeconds(4), '刚刚')
@@ -3848,7 +3907,7 @@ test('★ task-30：相对时间与耗时格式化', async () => {
   assert.equal(api.STALE_AFTER_SECONDS, 300)
 })
 
-test('★ task-30：agent 活动显示「在做啥」+ 相对时间 + 停滞标记', async () => {
+test('agent 活动显示「在做啥」+ 相对时间 + 停滞标记', async () => {
   const { api } = await loadClientModule()
   const state = api.normalizeState({ connection: { key: 'k' }, challenges: [], leaderboard: [], submissions: [] })
   const team = api.normalizeTeam({
@@ -3880,7 +3939,7 @@ test('★ task-30：agent 活动显示「在做啥」+ 相对时间 + 停滞标�
   // 本轮耗时 + token 如实说明
   assert.match(html, /本轮已运行 12 分 34 秒/)
   assert.match(html, /团队最后活动 12 秒前/)
-  // task-34：这条断言改了语义 —— 以前永远为真（「宿主未提供」），现在必须验证**真实路径**。
+  // 这条断言改了语义 —— 以前永远为真（「宿主未提供」），现在必须验证**真实路径**。
   // 团队 payload 的 tokenUsage.available=false 只作兜底：显示「暂不可用」+原因，不编数字。
   assert.match(html, /token 用量：暂不可用/)
   assert.equal(/token 用量：合计/.test(html), false, '兜底路径不得出现合计数字')
@@ -3891,7 +3950,7 @@ test('★ task-30：agent 活动显示「在做啥」+ 相对时间 + 停滞标�
   assert.match(html, /耗时 5 分 0 秒/)
 })
 
-test('★ task-30：报告显示正文预览与生成时间；没有正文时如实说明', async () => {
+test('报告显示正文预览与生成时间；没有正文时如实说明', async () => {
   const { api } = await loadClientModule()
   const withBody = api.normalizeReports({
     ok: true,
@@ -3927,7 +3986,7 @@ test('★ task-30：报告显示正文预览与生成时间；没有正文时如
   assert.match(emptyHtml, /ctf_writeup/)
 })
 
-test('★ task-30：环境显示不再自相矛盾（本地计数 vs 平台已满分开讲）', async () => {
+test('环境显示不再自相矛盾（本地计数 vs 平台已满分开讲）', async () => {
   const { api } = await loadClientModule()
   const state = api.normalizeState({
     connection: { key: 'k' },
@@ -3950,7 +4009,7 @@ test('★ task-30：环境显示不再自相矛盾（本地计数 vs 平台已�
   assert.match(envHtml, /⚠ 平台环境配额已满/)
 })
 
-test('★ task-30：环境视图只列需要关注的题，并说明省略了多少', async () => {
+test('环境视图只列需要关注的题，并说明省略了多少', async () => {
   const { api } = await loadClientModule()
   const state = api.normalizeState({
     connection: { key: 'k' },
@@ -3972,7 +4031,7 @@ test('★ task-30：环境视图只列需要关注的题，并说明省略了多
   assert.match(html, /已省略 1 道已解且无环境的环境型题目/)
 })
 
-test('★ task-30：协同通信按对话对分组；数据少时说明原因', async () => {
+test('协同通信按对话对分组；数据少时说明原因', async () => {
   const { api } = await loadClientModule()
   const state = api.normalizeState({ connection: { key: 'k' }, challenges: [], leaderboard: [], submissions: [] })
   const team = api.normalizeTeam({
@@ -4001,7 +4060,7 @@ test('★ task-30：协同通信按对话对分组；数据少时说明原因', 
   assert.match(emptyHtml, /投递时/)
 })
 
-test('★ task-30：页脚显示数据新鲜度（优先宿主 cachedAt / fromCache）', async () => {
+test('页脚显示数据新鲜度（优先宿主 cachedAt / fromCache）', async () => {
   // 场景 1：宿主给了 cachedAt（面板缓存）→ 用它的年龄 + 「缓存」标记
   const state = api_nonnull(await loadClientModule())
   void state
@@ -4025,7 +4084,7 @@ function api_nonnull(mod) {
   return mod.api
 }
 
-test('★ task-30：理论题按需加载题目概要（不在轮询里自动拉）', async () => {
+test('理论题按需加载题目概要（不在轮询里自动拉）', async () => {
   const calls = []
   const { impl } = (() => {
     const base = viewFetch({
@@ -4096,7 +4155,7 @@ test('★ task-30：理论题按需加载题目概要（不在轮询里自动拉
   view.destroy()
 })
 
-test('★ task-30：理论题空态区分「没有赛段」与「试卷未开启」', async () => {
+test('理论题空态区分「没有赛段」与「试卷未开启」', async () => {
   const { api } = await loadClientModule()
   const noTheory = api.normalizeState({ connection: { key: 'k' }, theory: [] })
   const model = { state: noTheory, team: api.normalizeTeam(null), board: [], reports: api.normalizeReports(null) }
@@ -4223,7 +4282,7 @@ test('watchViewVisibility：按实际可见性挂/摘 body 标记', async () => 
   assert.doesNotThrow(() => { const s = api.watchViewVisibility({ getClientRects: () => { throw new Error('x') } }, dom.document); s() })
 })
 
-test('★ 视图组件标识必须稳定（否则宿主每次重渲染都会重挂载 → 一直闪）', async () => {
+test('视图组件标识必须稳定（否则宿主每次重渲染都会重挂载 → 一直闪）', async () => {
   const { api } = await loadClientModule()
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
@@ -4263,7 +4322,7 @@ test('环境配额：blocked（平台侧已满）比本地计数可信', async (
   assert.match(html, /只统计它自己起的实例|其他会话或手工起的实例/, 'tooltip 要解释为什么 0/2 却满了')
 })
 
-test('★ 回归：createConfigCard 必须自行注入样式表（不依赖视图/悬浮面板的 mount）', async () => {
+test('回归：createConfigCard 必须自行注入样式表（不依赖视图/悬浮面板的 mount）', async () => {
   // 真实事故（v1.0.3 及之前）：配置卡片的三个入口（React slot / 纯 DOM 回退 / 直接调用）
   // 都不经过 CTF 视图或悬浮面板的 mount()，而样式原先只在那两处 ensureStyles()。
   // 结果「设置 → 内置插件 → dsh-lingxu-ctf」的表单是裸 DOM：栅格塌陷、标签与输入框重叠。

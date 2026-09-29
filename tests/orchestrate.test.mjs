@@ -1320,7 +1320,7 @@ test('config.concurrency 作为默认值，非法值回退 4', async () => {
   assert.equal(b.calls.spawn.length, LIMITS.defaultConcurrency)
 })
 
-// ---------------------------------------------------------------- task-14：session 前置探活
+// ---------------------------------------------------------------- session 前置探活
 
 /** 平台 session 失效的真实回包形状（HTTP 403 + {"detail":"未登录"}）。 */
 function sessionExpiredError() {
@@ -1430,7 +1430,7 @@ test('start 前置探活：适配器没有 validate/eventSummary 时跳过探活
   assert.doesNotMatch(out, /前置探活失败/)
 })
 
-// ---------------------------------------------------------------- task-14：status 失效横幅
+// ---------------------------------------------------------------- status 失效横幅
 
 test('status：session 失效 → 顶部 🛑 横幅 + 统计「⚠️ 会话失效」，且不自动中断 agent', async () => {
   const members = [
@@ -1482,7 +1482,7 @@ test('status：session 正常的非失效错误仍走原有降级文案（回归
   assert.doesNotMatch(report, /sessionid 已失效/)
 })
 
-// ---------------------------------------------------------------- 环境感知调度（task-17 核心）
+// ---------------------------------------------------------------- 环境感知调度
 
 /** 造一道题 + 它的详情（taskType：1 环境型 / 2 外链型 / 3 附件型）。 */
 function envChallenge(id, score, taskType, name) {
@@ -1570,7 +1570,7 @@ test('环境调度：envLimit=0（自学习）→ 用平台实测值；配置值
   const { teams, calls } = makeTeams({ members })
   const learned = await makeOrchestrator({ challenges: envs, teams, store, details, config: { concurrency: 5, envLimit: 0 } })
   const learnedSummary = await learned.orchestrator.start({ __agent: AGENT })
-  // 自学习到 3 → 3 个「全程 agent」拿环境；剩下 2 个并发槽派「离线准备 agent」（task-21：不干等）
+  // 自学习到 3 → 3 个「全程 agent」拿环境；剩下 2 个并发槽派「离线准备 agent」（不干等）
   const learnedNames = calls.spawn.map((c) => c.request.name)
   assert.equal(learnedNames.filter((name) => name.startsWith('solver-')).length, 3, `自学习到 3 就该放 3 个全程环境题，实际 ${learnedNames}`)
   assert.equal(learnedNames.filter((name) => name.startsWith('prep-')).length, 2, '剩余并发槽派离线准备 agent')
@@ -1757,7 +1757,7 @@ test('环境调度：纯环境题池（10 道 / envLimit=2 / 并发 6）→ 只�
   assert.match(summary, /题型探测：本轮按需探测 10 题/)
 })
 
-// ---------------------------------------------------------------- 智能调度（task-21：两阶段派发）
+// ---------------------------------------------------------------- 智能调度（两阶段派发）
 
 test('两阶段派发：配额满时派「离线准备 agent」而不是干等，prompt 明确不许反复起环境', async () => {
   const members = [{ name: 'lead', role: 'lead', status: 'running' }]
@@ -2016,7 +2016,7 @@ test('ctf_solve_status：显示「就绪待环境」与「准备中」段', asyn
   assert.match(report, /- P0 就绪待环境：1 题｜准备中：1 题/)
 })
 
-// ---------------------------------------------------------------- teammate 上限（task-22）
+// ---------------------------------------------------------------- teammate 上限
 
 test('resolveMaxTeamMembers：读运行时配置，缺失/垃圾值退回默认', () => {
   assert.equal(resolveMaxTeamMembers({ config: { maxMembers: 8 } }), 8, '用户 profile 覆盖成 8 时必须读到 8')
@@ -2158,7 +2158,7 @@ test('ctf_solve_status：显示成员 N/M 与上限来源', async () => {
   assert.match(fallbackReport, /上限 16（来源：默认值）/)
 })
 
-// ---------------------------------------------------------------- Agent 池：复用闲置槽（task-23）
+// ---------------------------------------------------------------- Agent 池：复用闲置槽
 //
 // 为什么必须复用：DSH 的 roster 是 **append-only + 累计计数**
 // （README：「maxMembers = 一支团队最多可**曾创建过**的 teammate 数，含失败的」；
@@ -2474,7 +2474,7 @@ test('Agent 池：离线准备槽单独显示（不写 teammate，但别显示�
   assert.match(report, /- prep-ready-7：🌙 准备槽（#7 prep-target 等环境配额/)
 })
 
-// ---------------------------------------------------------------- 工作区路径（task-31 ③）
+// ---------------------------------------------------------------- 工作区路径
 
 test('start：workDir 用会话 cwd 的绝对路径（teammate prompt 里也是绝对路径）', async () => {
   const members = [{ name: 'lead', role: 'lead', status: 'running' }]

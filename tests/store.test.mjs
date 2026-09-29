@@ -110,6 +110,20 @@ test('持久化跨实例可读', async () => {
   assert.equal((await b.resolveConnection({})).cookie, 'sessionid=zzz')
 })
 
+test('状态目录和文件只允许当前用户访问', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows 由用户目录 ACL 管理，POSIX mode 不适用')
+    return
+  }
+  const dir = await tempDir()
+  const store = new CtfStore({ dir })
+  await store.upsertConnection({ platform: 'lingxu', baseUrl: 'https://a.com', eventId: 9, cookie: 'sessionid=private' })
+  const dirMode = (await fsp.stat(dir)).mode & 0o777
+  const fileMode = (await fsp.stat(path.join(dir, 'state.json'))).mode & 0o777
+  assert.equal(dirMode, 0o700)
+  assert.equal(fileMode, 0o600)
+})
+
 test('损坏的状态文件：备份后从空状态继续，不抛错', async () => {
   const dir = await tempDir()
   await fsp.writeFile(path.join(dir, 'state.json'), '{ this is not json', 'utf8')
@@ -129,7 +143,7 @@ test('emptyState 形状稳定', () => {
   assert.deepEqual(s.teamMessages, [], '团队消息队列必须存在（旧状态文件也要能兼容）')
 })
 
-// ────────────────────────────────────────────── 团队协同消息
+//  团队协同消息
 
 test('团队消息：append/list、默认字段、按连接过滤', async () => {
   const dir = await tempDir()
@@ -160,6 +174,18 @@ test('团队消息：append/list、默认字段、按连接过滤', async () => 
   assert.equal((await store.listTeamMessages()).length, 3)
   // limit = 取最新 N 条
   assert.deepEqual((await store.listTeamMessages(key, 1)).map((m) => m.text), ['只有正文'])
+})
+
+test('团队消息：messageId 只在同一赛事内去重', async () => {
+  const dir = await tempDir()
+  const store = new CtfStore({ dir })
+  const first = await store.appendTeamMessage('event-a', { messageId: 'm-1', text: 'A' })
+  const duplicate = await store.appendTeamMessage('event-a', { messageId: 'm-1', text: 'A again' })
+  const otherEvent = await store.appendTeamMessage('event-b', { messageId: 'm-1', text: 'B' })
+  assert.equal(first.at, duplicate.at)
+  assert.deepEqual((await store.listTeamMessages('event-a')).map((row) => row.text), ['A'])
+  assert.deepEqual((await store.listTeamMessages('event-b')).map((row) => row.text), ['B'])
+  assert.notEqual(otherEvent.connKey, first.connKey)
 })
 
 test('团队消息：单条正文截断到 2000 字符（不把大段内容写进状态文件）', async () => {
@@ -242,9 +268,9 @@ test('getActiveConnection：只看活动连接（供 ctf_connect 新鲜度判断
   assert.ok(dir)
 })
 
-// ────────────────────────────────────────────── 赛事隔离（task-31 ①）
+//  赛事隔离
 
-test('★ 提交审计按赛事隔离：两个连接的提交互不串', async () => {
+test('提交审计按赛事隔离：两个连接的提交互不串', async () => {
   const dir = await tempDir()
   const store = new CtfStore({ dir })
   const A = 'lingxu:a:8000:4'
@@ -275,7 +301,7 @@ test('★ 提交审计按赛事隔离：两个连接的提交互不串', async (
 test('提交审计：老记录（无 eventId）读取时兜底；无 connKey 的归「未知赛事」默认不显示', async () => {
   const dir = await tempDir()
   const store = new CtfStore({ dir })
-  // 模拟 task-31 之前的历史数据：有 connKey 但没 eventId
+  // 模拟旧数据：有 connKey 但没有 eventId
   store.state.submissions.push(
     { at: '2026-09-01T00:00:00.000Z', connKey: 'lingxu:a:8000:7', challengeId: '1', flag: 'flag{x}', status: 'correct' },
     { at: '2026-09-01T00:01:00.000Z', connKey: null, challengeId: '2', flag: 'flag{old}', status: 'correct' },
