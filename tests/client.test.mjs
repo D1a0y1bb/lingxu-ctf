@@ -2788,3 +2788,18 @@ test('watchViewVisibility：按实际可见性挂/摘 body 标记', async () => 
   assert.doesNotThrow(() => api.watchViewVisibility(null, dom.document)())
   assert.doesNotThrow(() => { const s = api.watchViewVisibility({ getClientRects: () => { throw new Error('x') } }, dom.document); s() })
 })
+
+test('★ 视图组件标识必须稳定（否则宿主每次重渲染都会重挂载 → 一直闪）', async () => {
+  const { api } = await loadClientModule()
+  const react = {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useRef: () => ({ current: null }),
+    useEffect: () => {},
+  }
+  // 真实 bug：组件曾定义在 reactCtfViewHost() 内部，每次调用都是新函数标识，
+  // React 按标识判类型 → 卸载整棵树再挂载 → 视觉闪烁 + 空态一闪而过。
+  const first = api.reactCtfViewHost(react, {})
+  const second = api.reactCtfViewHost(react, {})
+  assert.equal(typeof first.type, 'function', 'slot 必须返回元素（type 是组件），不是组件函数本身')
+  assert.equal(first.type, second.type, '两次调用的组件类型必须同一标识')
+})
