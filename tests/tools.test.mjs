@@ -2069,3 +2069,36 @@ test('赛段工具：能直接过 defineTool 注册（宿主路径），required
   const submit = registered.find((tool) => tool.name === 'ctf_cfs_submit')
   assert.deepEqual([...submit.parameters.required].sort(), ['cctId', 'flag'])
 })
+
+test('赛段上报：ctf_status / ctf_session 把 eventSummary 原对象交给宿主回调', async () => {
+  const adapter = createStageAdapter()
+  const seen = []
+  const { tools } = createHarness({ adapter, deps: { onStageInfo: (summary) => seen.push(summary) } })
+
+  const statusOut = await tools.ctf_status.execute({})
+  assert.match(statusOut, /📊 赛事总览/)
+  assert.equal(seen.length, 1, 'ctf_status 应回报一次赛段信息')
+  // 必须是 eventSummary 的原对象（带 testTypes + hasXxx），不能是拼出来的 {hasAwd,hasCfs}
+  assert.equal(seen[0].name, '凌虚测试赛')
+  assert.equal(Array.isArray(seen[0].testTypes), true, '要带上 testTypes（三态判定依赖它）')
+  assert.equal(seen[0].hasAwd, true)
+  assert.equal(recommendStageTools(seen[0]).awd, true, '宿主拿它就能判定该注册哪一套')
+
+  const sessionOut = await tools.ctf_session.execute({})
+  assert.match(sessionOut, /✅ 凌虚会话有效/)
+  assert.equal(seen.length, 2, 'ctf_session 也应回报一次')
+
+  // 没有回调时静默跳过（不能因为宿主没接就崩）
+  const plain = createHarness({ adapter })
+  assert.match(await plain.tools.ctf_status.execute({}), /📊 赛事总览/)
+  assert.match(await plain.tools.ctf_session.execute({}), /✅ 凌虚会话有效/)
+
+  // 回调抛错 / 异步 rejection / 非函数 → 都不影响工具输出
+  const boom = createHarness({ adapter, deps: { onStageInfo: () => { throw new Error('sync boom') } } })
+  assert.match(await boom.tools.ctf_status.execute({}), /📊 赛事总览/)
+  const asyncBoom = createHarness({ adapter, deps: { onStageInfo: async () => { throw new Error('async boom') } } })
+  assert.match(await asyncBoom.tools.ctf_status.execute({}), /📊 赛事总览/)
+  const notFn = createHarness({ adapter, deps: { onStageInfo: 'not-a-function' } })
+  assert.match(await notFn.tools.ctf_status.execute({}), /📊 赛事总览/)
+  await new Promise((resolve) => setTimeout(resolve, 10)) // 让异步 rejection 走完，确认没有 unhandled rejection 崩测试
+})
