@@ -172,7 +172,12 @@ check('题目数 > 0', snapshot.stats.total > 0, `${snapshot.stats.total} 题，
 check('含排行榜', Array.isArray(snapshot.leaderboard) && snapshot.leaderboard.length > 0, `${snapshot.leaderboard.length} 行`)
 check('含我的排名', snapshot.rank && snapshot.rank.rank !== null, `第 ${snapshot.rank?.rank} 名`)
 check('含分类看板', snapshot.challenges.length > 0, `${snapshot.challenges.length} 张卡片`)
-check('提交审计已脱敏', snapshot.submissions.every((s) => !String(s.flag).includes('e2e-dedupe-probe')), JSON.stringify(snapshot.submissions[0] ?? {}).slice(0, 90))
+// flag 现在明文展示（用户要求便于核对），真正必须脱敏的是凭据。
+check(
+  '提交审计：flag 明文 + 凭据脱敏',
+  snapshot.submissions.every((s) => !/sessionid=|cookie/i.test(JSON.stringify(s))),
+  JSON.stringify(snapshot.submissions[0] ?? {}).slice(0, 90),
+)
 check('含理论题信息', snapshot.theory.length > 0, JSON.stringify(snapshot.theory[0] ?? {}).slice(0, 90))
 
 console.log(`\n${failures === 0 ? '✅ 端到端联调全部通过' : `❌ ${failures} 项失败`}`)
