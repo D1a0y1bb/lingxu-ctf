@@ -1,41 +1,20 @@
 /**
- * lib/client.js（Web 控制面板浏览器半）单测。
+ * lib/client.js（Web 控制面板 + 配置卡片浏览器半）单测。
  *
  * 刻意**不引入 jsdom**：本文件手写一个最小 DOM stub，只实现 client.js 真正用到的
  * 那部分 API（createElement / appendChild / innerHTML / textContent / dataset /
  * addEventListener / 假定时器）。这样测试零依赖、跑得快，也不会把浏览器语义的
  * 复杂度带进 CI。
+ *
+ * 加载方式与生产**完全一致**：client.js 是 classic script（无顶层 export），
+ * 由 DSH 客户端模块加载器抓取并期待它调 `window.__ModuleLoader__.load({id, factory})`。
+ * 所以这里先 stub `__ModuleLoader__`，import 后捕获 factory，再物化拿插件导出。
  */
 
 import test, { afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-
-import {
-  name,
-  apply,
-  createPanel,
-  normalizeState,
-  normalizeChallenge,
-  filterChallenges,
-  groupChallenges,
-  challengeCategories,
-  formatDuration,
-  formatTime,
-  escapeHtml,
-  truncate,
-  renderStatusHtml,
-  renderBoardHtml,
-  renderLeaderboardHtml,
-  renderSubmissionsHtml,
-  renderTheoryHtml,
-  renderStatsHtml,
-  renderHeaderMetaHtml,
-  findHostContainer,
-  NOT_CONFIGURED_HINT,
-  STATE_URL,
-  POLL_INTERVAL_MS,
-} from '../lib/client.js'
+import vm from 'node:vm'
 
 // ────────────────────────────────────────────────────────────── 最小 DOM stub
 
@@ -231,6 +210,85 @@ function installGlobals(fetchImpl) {
   return env
 }
 
+// ────────────────────────────────────────────────────────────── 以生产路径加载 client.js
+
+const CLIENT_URL = new URL('../lib/client.js', import.meta.url)
+let loadSeq = 0
+
+/**
+ * 按 DSH 客户端模块加载器的方式加载 client.js：
+ * stub `window.__ModuleLoader__` → 动态 import（classic script，无顶层 export）→
+ * 捕获 factory → 物化 → 拿到插件导出。
+ *
+ * 每次用不同 query，让 ESM 求值一份**全新实例**（模块级单例互不干扰）。
+ */
+async function loadClientModule({ react = null } = {}) {
+  const captured = []
+  assert.ok(globalThis.window, 'loadClientModule 需要先安装 window stub')
+  globalThis.window.__ModuleLoader__ = {
+    load: (registration) => { captured.push(registration) },
+  }
+  await import(`${CLIENT_URL.href}?case=${++loadSeq}`)
+  assert.equal(captured.length, 1, '应当恰好向 __ModuleLoader__ 注册一个 factory')
+  const registration = captured[0]
+  assert.equal(registration.id, 'dsh-lingxu-ctf')
+  assert.equal(typeof registration.factory, 'function')
+  const requireStub = (id) => {
+    if (id === 'react' && react !== null) return react
+    throw new Error(`unexpected require(${id})`)
+  }
+  return { api: registration.factory(requireStub), registration }
+}
+
+// 共享实例：供纯函数类用例使用（不关心单例状态）。
+const bootstrapDom = createDom()
+globalThis.document = bootstrapDom.document
+globalThis.window = bootstrapDom.window
+const bootstrapped = await loadClientModule()
+const client = bootstrapped.api
+
+// 顶层自挂载在 import 时已经挂了一个浮动面板，立刻销毁，避免污染后续用例。
+client.getPanel().destroy()
+
+const {
+  name,
+  apply,
+  createPanel,
+  normalizeState,
+  normalizeChallenge,
+  filterChallenges,
+  groupChallenges,
+  challengeCategories,
+  formatDuration,
+  formatTime,
+  escapeHtml,
+  truncate,
+  renderStatusHtml,
+  renderBoardHtml,
+  renderLeaderboardHtml,
+  renderSubmissionsHtml,
+  renderTheoryHtml,
+  renderStatsHtml,
+  renderHeaderMetaHtml,
+  findHostContainer,
+  normalizeConfig,
+  configFieldKind,
+  renderConfigSummary,
+  collectConfigPatch,
+  createConfigCard,
+  renderConfigSlot,
+  registerConfigCard,
+  resetConfigSummaryCache,
+  NOT_CONFIGURED_HINT,
+  STATE_URL,
+  POLL_INTERVAL_MS,
+  CONFIG_URL,
+  CONFIG_SLOT,
+  CONFIG_SLOT_KEY,
+  SECRET_SET_PLACEHOLDER,
+  SECRET_UNSET_PLACEHOLDER,
+} = client
+
 /** 构造一个「已配置 + 有数据」的快照。 */
 function fullSnapshot() {
   return {
@@ -276,13 +334,20 @@ test('模块导出 shape：name + apply + 纯函数助手', () => {
   assert.equal(POLL_INTERVAL_MS, 5000)
 })
 
-test('自包含：文件里没有任何 import 语句（更没有裸包名）', () => {
+test('自包含 classic script 形态：0 顶层 export / 0 裸包 import / 走 __ModuleLoader__', () => {
   const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  const importStatements = source.match(/^\s*import\s.+$/gm) || []
-  assert.deepEqual(importStatements, [], `lib/client.js 不应有 import：${importStatements.join(' | ')}`)
-  // 动态 import / require 也不允许
-  assert.equal(/\bimport\s*\(/.test(source), false, '不应有动态 import()')
-  assert.equal(/\brequire\s*\(/.test(source), false, '不应有 require()')
+  // classic script 里顶层 export 是语法错误 → 面板与卡片会全部消失
+  assert.deepEqual(source.match(/^export\s/gm) || [], [], '不能有顶层 export')
+  // ESM import 语句在 classic script 里同样是语法错误
+  assert.deepEqual(source.match(/^\s*import\s.+$/gm) || [], [], '不能有 import 语句')
+  assert.equal(/\bimport\s*\(/.test(source), false, '不能有动态 import()')
+  // require 只允许取 react（模块表静态 externalized 的那一个）
+  const requires = [...new Set(
+    [...source.matchAll(/\brequire\s*\(\s*["']([^"']+)["']\s*\)/g)].map((match) => match[1]),
+  )]
+  assert.deepEqual(requires, ['react'], '只允许 require("react")，不得引入其他包')
+  // 必须注册进客户端模块表，否则拿不到 ctx
+  assert.match(source, /__ModuleLoader__\.load/)
   // 确认用的是真实存在的 DSH token 命名空间
   assert.match(source, /--dsw-alias-/)
   // 注释里提到过 --dsh-color-*（说明为何不用），这里断言的是**实际使用**：
@@ -782,17 +847,23 @@ test('createPanel 可显式注入 doc/win/fetch，不依赖全局', async () => 
   panel.destroy()
 })
 
-// ────────────────────────────────────────────────────────────── 8. 生产路径：module script 自挂载
+// ────────────────────────────────────────────────────────────── 8. 生产路径：classic script + __ModuleLoader__
 
-test('生产路径：以 <script type="module"> 加载时顶层自挂载并拉数据', async () => {
+test('生产路径：脚本执行即向 __ModuleLoader__ 注册 factory，并自挂载浮动面板', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
-    // 加 query 让 ESM 求值一份**全新实例**，从而真正跑到文件末尾的自挂载分支。
-    const mod = await import('../lib/client.js?self-mount=immediate')
+    const { api, registration } = await loadClientModule()
+    // ① 模块表注册（宿主据此建 cordis entry → 拿到真 ctx）
+    assert.equal(registration.id, 'dsh-lingxu-ctf')
+    assert.equal(typeof registration.factory, 'function')
+    // factory 物化后必须给出 name / apply
+    assert.equal(api.name, 'dsh-lingxu-ctf')
+    assert.equal(typeof api.apply, 'function')
+    // ② 顶层自挂载（不依赖 ctx）
     const mounted = env.dom.document.getElementById('lingxu-ctf-panel')
     assert.ok(mounted, '顶层自挂载应立即创建面板（无需宿主调用 apply）')
 
-    const panel = track(mod.getPanel())
+    const panel = track(api.getPanel())
     assert.equal(panel.root(), mounted)
     await panel.ready
     assert.match(collectText(panel.root()), /2026 测试赛/)
@@ -806,14 +877,14 @@ test('生产路径：DOM 未就绪（readyState=loading）时等 DOMContentLoade
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   env.dom.document.readyState = 'loading'
   try {
-    const mod = await import('../lib/client.js?self-mount=deferred')
+    const { api } = await loadClientModule()
     assert.equal(env.dom.document.getElementById('lingxu-ctf-panel'), null, 'DOM 未就绪时不应提前挂载')
 
     env.dom.document.dispatch('DOMContentLoaded')
     const mounted = env.dom.document.getElementById('lingxu-ctf-panel')
     assert.ok(mounted, 'DOMContentLoaded 后应挂载')
 
-    const panel = track(mod.getPanel())
+    const panel = track(api.getPanel())
     await panel.ready
     assert.match(collectText(panel.root()), /2026 测试赛/)
   } finally {
@@ -824,10 +895,401 @@ test('生产路径：DOM 未就绪（readyState=loading）时等 DOMContentLoade
 test('生产路径：宿主页面没有 fetch 时也不抛错（降级为错误态）', async () => {
   const env = installGlobals(undefined)
   try {
-    const mod = await import('../lib/client.js?self-mount=nofetch')
-    const panel = track(mod.getPanel())
+    const { api } = await loadClientModule()
+    const panel = track(api.getPanel())
     await panel.refresh()
     assert.match(collectText(panel.root()), /加载失败|不支持 fetch/)
+  } finally {
+    env.restore()
+  }
+})
+
+test('生产路径：没有 __ModuleLoader__ 时脚本仍能跑（浮动面板照旧）', async () => {
+  const env = installGlobals(async () => jsonResponse(fullSnapshot()))
+  try {
+    // 模拟「没有模块加载器」的降级场景：注册应当被安全跳过
+    const { api } = await loadClientModule()
+    delete globalThis.window.__ModuleLoader__
+    assert.ok(env.dom.document.getElementById('lingxu-ctf-panel'), '没有模块加载器也要挂出面板')
+    track(api.getPanel())
+  } finally {
+    env.restore()
+  }
+})
+
+test('生产路径：classic script 无 export，Node 侧经全局兜底取到 API', async () => {
+  const env = installGlobals(async () => jsonResponse(fullSnapshot()))
+  try {
+    const { api } = await loadClientModule()
+    // 全局兜底暴露的是内部 API 对象（factory 返回的是带 Module tag 的副本）
+    const fallback = globalThis.__DSH_LINGXU_CTF_CLIENT__
+    assert.equal(fallback.name, 'dsh-lingxu-ctf')
+    assert.equal(typeof fallback.renderConfigSlot, 'function')
+    assert.equal(typeof fallback.apply, 'function')
+    assert.equal(fallback.name, api.name)
+    track(api.getPanel())
+  } finally {
+    env.restore()
+  }
+})
+
+test('生产路径：文件可被当作 **classic script** 求值（浏览器真实解析方式）', () => {
+  // 这是本文件最关键的回归护栏：DSH 的 defaultLoadBundle 用
+  // `document.createElement("script")`（无 type="module"）加载 bundle，
+  // 所以只要有人加回顶层 `export` / `import.meta`，浏览器就会 SyntaxError、
+  // 面板与配置卡片全部消失。vm.runInContext 按 **script** 编译，正好复现这一点。
+  const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const dom = createDom()
+  const registered = []
+  const sandbox = {
+    window: { __ModuleLoader__: { load: (registration) => registered.push(registration) } },
+    document: dom.document,
+    console,
+  }
+  vm.createContext(sandbox)
+
+  assert.doesNotThrow(
+    () => vm.runInContext(source, sandbox, { filename: 'lingxu-ctf-client.js' }),
+    '必须以 classic script 语法通过（顶层 export 会在此抛 SyntaxError）',
+  )
+  assert.equal(registered.length, 1, '求值后应恰好注册一个 factory')
+  assert.equal(registered[0].id, 'dsh-lingxu-ctf')
+  assert.equal(typeof registered[0].factory, 'function')
+
+  // 物化后仍要给出 name / apply / inject
+  const exports = registered[0].factory(() => { throw new Error('no react') })
+  assert.equal(exports.name, 'dsh-lingxu-ctf')
+  assert.equal(typeof exports.apply, 'function')
+  // 注意：数组来自 vm 的另一个 realm，需拷回本 realm 再比较
+  assert.deepEqual([...exports.inject], ['slots'])
+
+  // 顶层自挂载也要在 script 求值时生效
+  assert.ok(dom.document.getElementById('lingxu-ctf-panel'), 'classic script 求值后应挂出浮动面板')
+})
+
+// ────────────────────────────────────────────────────────────── 9. 配置卡片（task-8）
+
+/** 12 个字段的配置快照，形状对齐宿主 `GET /lingxu-ctf/config`。 */
+function configPayload() {
+  return {
+    ok: true,
+    fields: [
+      { key: 'platform', type: 'union', description: '平台类型', role: null, default: 'lingxu', options: ['lingxu', 'ctfd'] },
+      { key: 'baseUrl', type: 'string', description: '平台根地址', role: null, default: '' },
+      { key: 'eventId', type: 'number', description: '赛事 ID', role: null, default: null },
+      { key: 'cookie', type: 'string', description: '凌虚 sessionid Cookie', role: 'secret', default: '' },
+      { key: 'token', type: 'string', description: 'CTFd API Token', role: 'secret', default: '' },
+      { key: 'label', type: 'string', description: '连接备注名', role: null, default: '' },
+      { key: 'concurrency', type: 'number', description: '并发解题 agent 数', role: null, default: 4 },
+      { key: 'maxWrongAttempts', type: 'number', description: '每题错误提交上限', role: null, default: 0 },
+      { key: 'dedupeFlags', type: 'boolean', description: 'flag 去重', role: null, default: true },
+      { key: 'workDir', type: 'string', description: '解题工作目录', role: null, default: '' },
+      { key: 'timeoutMs', type: 'number', description: '请求超时（毫秒）', role: null, default: 30000 },
+      { key: 'enableWebPanel', type: 'boolean', description: '启用 Web 面板', role: null, default: true },
+    ],
+    values: {
+      platform: 'lingxu',
+      baseUrl: 'https://x.test:8000',
+      eventId: 4,
+      cookie: '',
+      token: '',
+      label: '测试',
+      concurrency: 4,
+      maxWrongAttempts: 0,
+      dedupeFlags: true,
+      workDir: '',
+      timeoutMs: 30000,
+      enableWebPanel: true,
+    },
+    secretsSet: { cookie: true, token: false },
+  }
+}
+
+/** 按 name 找控件。 */
+function findByKey(root, key) {
+  const stack = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node && node.name === key) return node
+    for (const child of (node && node.children) || []) stack.push(child)
+  }
+  return null
+}
+
+/** 统计带某个 class 的节点数。 */
+function countByClass(root, cls) {
+  let count = 0
+  const stack = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node && typeof node.className === 'string' && node.className.split(/\s+/).includes(cls)) count += 1
+    for (const child of (node && node.children) || []) stack.push(child)
+  }
+  return count
+}
+
+/** GET 返回配置、POST 记录调用的 fetch stub。 */
+function configFetch(payload, postResult = { ok: true, changed: 1 }) {
+  const calls = []
+  const impl = async (url, init) => {
+    calls.push({ url, init })
+    if (init && init.method === 'POST') return jsonResponse(postResult)
+    return jsonResponse(payload)
+  }
+  return { impl, calls }
+}
+
+const postCalls = (calls) => calls.filter((call) => call.init && call.init.method === 'POST')
+
+test('配置：normalizeConfig 容错 + 字段类型归一', () => {
+  const config = normalizeConfig(configPayload())
+  assert.equal(config.ok, true)
+  assert.equal(config.fields.length, 12)
+  assert.equal(config.secretsSet.cookie, true)
+
+  assert.equal(configFieldKind(config.fields[0]), 'select') // union
+  assert.equal(configFieldKind({ type: 'boolean' }), 'boolean')
+  assert.equal(configFieldKind({ type: 'number' }), 'number')
+  assert.equal(configFieldKind({ type: 'string' }), 'text')
+  assert.equal(configFieldKind({ type: 'string', role: 'secret' }), 'password')
+  assert.equal(configFieldKind({ type: 'union', options: ['a'] }), 'select')
+  assert.equal(configFieldKind(null), 'text')
+  assert.equal(configFieldKind({ type: '未知类型' }), 'text')
+
+  for (const bad of [null, undefined, 42, 'x', [], {}, { fields: 'nope' }, { fields: [null, {}] }]) {
+    const tolerant = normalizeConfig(bad)
+    assert.deepEqual(tolerant.fields, [])
+    assert.equal(typeof tolerant.values, 'object')
+  }
+})
+
+test('配置：renderConfigSummary 一句话摘要', () => {
+  assert.equal(renderConfigSummary(normalizeConfig(configPayload())), '平台：凌虚 · event 4 · 已配置')
+  // 缺 secret → 未配置
+  const noSecret = configPayload()
+  noSecret.secretsSet = { cookie: false, token: false }
+  assert.match(renderConfigSummary(normalizeConfig(noSecret)), /未配置$/)
+  assert.match(renderConfigSummary(normalizeConfig({ ok: false, error: '配置服务未就绪' })), /配置不可用：配置服务未就绪/)
+})
+
+test('配置：collectConfigPatch 只发改动，secret 空串绝不回传', () => {
+  const config = normalizeConfig(configPayload())
+  const values = config.values
+
+  assert.deepEqual(collectConfigPatch(config, { ...values }), {}, '无改动不应产生 patch')
+  assert.deepEqual(collectConfigPatch(config, { ...values, cookie: '', token: '' }), {}, 'secret 空串是「不修改」哨兵')
+
+  assert.deepEqual(collectConfigPatch(config, { ...values, cookie: 'sessionid=x' }), { cookie: 'sessionid=x' })
+  assert.deepEqual(collectConfigPatch(config, { ...values, baseUrl: 'https://new.test' }), { baseUrl: 'https://new.test' })
+  assert.deepEqual(collectConfigPatch(config, { ...values, dedupeFlags: false }), { dedupeFlags: false })
+  assert.deepEqual(collectConfigPatch(config, { ...values, concurrency: '8' }), { concurrency: 8 })
+  assert.deepEqual(collectConfigPatch(config, { ...values, concurrency: 'abc' }), {}, '非数字应忽略')
+  assert.deepEqual(collectConfigPatch(config, { ...values, eventId: '' }), {}, 'number 空值应忽略')
+})
+
+test('配置卡片：渲染 12 个字段，控件类型正确', async () => {
+  const dom = createDom()
+  const { impl } = configFetch(configPayload())
+  const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
+  await card.refresh()
+
+  assert.equal(countByClass(card.element, 'lx-config-field'), 12, '应渲染 12 个字段')
+  assert.equal(findByKey(card.element, 'platform').tagName, 'SELECT')
+  assert.equal(findByKey(card.element, 'eventId').type, 'number')
+  assert.equal(findByKey(card.element, 'dedupeFlags').type, 'checkbox')
+  assert.equal(findByKey(card.element, 'enableWebPanel').type, 'checkbox')
+  assert.equal(findByKey(card.element, 'baseUrl').type, 'text')
+  assert.equal(findByKey(card.element, 'baseUrl').value, 'https://x.test:8000')
+  assert.equal(findByKey(card.element, 'dedupeFlags').checked, true)
+
+  const text = collectText(card.element)
+  assert.match(text, /平台根地址/, '应显示字段描述')
+  assert.match(text, /凌虚 CTF 配置/)
+  assert.match(text, /共 12 项配置/)
+  card.destroy()
+})
+
+test('配置卡片：secret 永不回显，placeholder 反映 secretsSet', async () => {
+  const dom = createDom()
+  const payload = configPayload()
+  // 即使宿主（错误地）回显了 cookie，也必须被忽略
+  payload.values.cookie = 'sessionid=LEAKED'
+  payload.values.token = 'token=LEAKED'
+  const { impl } = configFetch(payload)
+  const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
+  await card.refresh()
+
+  const cookie = findByKey(card.element, 'cookie')
+  assert.equal(cookie.type, 'password')
+  assert.equal(cookie.value, '', 'secret 绝不能回显')
+  assert.equal(cookie.placeholder, SECRET_SET_PLACEHOLDER)
+  const token = findByKey(card.element, 'token')
+  assert.equal(token.value, '', 'secret 绝不能回显')
+  assert.equal(token.placeholder, SECRET_UNSET_PLACEHOLDER)
+
+  const text = collectText(card.element)
+  assert.equal(text.includes('LEAKED'), false, '页面里不得出现 secret 明文')
+  assert.match(text, /当前：已设置/)
+  assert.match(text, /当前：未设置/)
+  card.destroy()
+})
+
+test('配置卡片：保存只 POST 改动过的字段', async () => {
+  const dom = createDom()
+  const { impl, calls } = configFetch(configPayload())
+  const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
+  await card.refresh()
+
+  findByKey(card.element, 'baseUrl').value = 'https://new.test:9000'
+  findByKey(card.element, 'cookie').value = 'sessionid=abc'
+  await card.save()
+
+  const posts = postCalls(calls)
+  assert.equal(posts.length, 1, '应恰好发一次 POST')
+  assert.equal(posts[0].url, CONFIG_URL)
+  assert.equal(posts[0].init.method, 'POST')
+  assert.deepEqual(JSON.parse(posts[0].init.body), {
+    patch: { baseUrl: 'https://new.test:9000', cookie: 'sessionid=abc' },
+  })
+  assert.match(collectText(card.element), /已保存/)
+  // 保存后重新 GET 刷新（1 次初始 + 1 次刷新）
+  assert.equal(calls.filter((call) => !call.init || call.init.method !== 'POST').length, 2)
+  // 刷新后 secret 输入框重新清空
+  assert.equal(findByKey(card.element, 'cookie').value, '')
+  card.destroy()
+})
+
+test('配置卡片：没有改动时不发 POST', async () => {
+  const dom = createDom()
+  const { impl, calls } = configFetch(configPayload())
+  const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
+  await card.refresh()
+  await card.save()
+
+  assert.equal(postCalls(calls).length, 0, '无改动不应发 POST')
+  assert.match(collectText(card.element), /没有需要保存的改动/)
+  card.destroy()
+})
+
+test('配置卡片：GET 503 → 可读中文错误态，保存按钮禁用', async () => {
+  const dom = createDom()
+  const impl = async () => ({ ok: false, status: 503, json: async () => ({ ok: false, error: '配置服务未就绪' }) })
+  const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
+  await card.refresh()
+
+  const text = collectText(card.element)
+  assert.match(text, /读取配置失败/)
+  assert.match(text, /配置服务未就绪/)
+  assert.equal(countByClass(card.element, 'lx-config-field'), 0, '错误态不应渲染表单')
+  card.destroy()
+})
+
+test('配置卡片：网络异常 / POST 失败 → 错误态', async () => {
+  const dom = createDom()
+  const boom = createConfigCard({
+    doc: dom.document,
+    fetchImpl: async () => { throw new Error('network down') },
+  })
+  await boom.refresh()
+  assert.match(collectText(boom.element), /读取配置失败：network down/)
+  boom.destroy()
+
+  const dom2 = createDom()
+  const impl = async (url, init) => (init && init.method === 'POST'
+    ? { ok: false, status: 500, json: async () => ({ ok: false, error: '写入失败' }) }
+    : jsonResponse(configPayload()))
+  const card = createConfigCard({ doc: dom2.document, fetchImpl: impl })
+  await card.refresh()
+  findByKey(card.element, 'baseUrl').value = 'https://changed'
+  await card.save()
+  assert.match(collectText(card.element), /保存失败：写入失败/)
+  card.destroy()
+})
+
+test('配置卡片：注册进 plugins.bundle.config，key 为包名', () => {
+  const registered = []
+  const injected = []
+  const ctx = {
+    slots: {
+      register(options, render) { registered.push({ options, render }); return () => {} },
+      inject(slot, fn) { injected.push(slot); fn(); return () => {} },
+    },
+    effect(fn, label) { return fn() },
+  }
+  const register = registerConfigCard(ctx)
+  assert.equal(typeof register, 'function')
+  assert.deepEqual(injected, [CONFIG_SLOT])
+  assert.equal(CONFIG_SLOT, 'plugins.bundle.config')
+  assert.equal(CONFIG_SLOT_KEY, 'dsh-lingxu-ctf')
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].options.name, 'plugins.bundle.config')
+  assert.equal(registered[0].options.key, 'dsh-lingxu-ctf')
+  assert.equal(typeof registered[0].render, 'function')
+  // summary 视图必须给一句话字符串（React 可直接渲染）
+  const summary = registered[0].render({ view: 'summary' })
+  assert.equal(typeof summary, 'string')
+  assert.ok(summary.length > 0)
+})
+
+test('配置卡片：没有 slots 服务时安全跳过（不抛错）', () => {
+  assert.equal(registerConfigCard(null), null)
+  assert.equal(registerConfigCard(undefined), null)
+  assert.equal(registerConfigCard({}), null)
+  assert.equal(registerConfigCard({ slots: {} }), null)
+  assert.equal(registerConfigCard({ slots: { register: 'not-a-function' } }), null)
+})
+
+test('配置卡片：slot 渲染 —— 有 React 给元素，无 React 退化为纯 DOM', () => {
+  // 有 React：返回组件函数，调用后得到挂载点元素
+  const react = {
+    createElement(type, props, ...children) { return { type, props, children } },
+    useRef: () => ({ current: null }),
+    useEffect: () => {},
+  }
+  const component = renderConfigSlot({ view: 'page' }, { react, doc: createDom().document })
+  assert.equal(typeof component, 'function', '有 React 时应返回组件函数')
+  const element = component()
+  assert.equal(element.type, 'div')
+  assert.equal(element.props.className, 'lx-config-host')
+
+  // 无 React：直接给纯 DOM 节点
+  const dom = createDom()
+  const node = renderConfigSlot(
+    { view: 'page' },
+    { doc: dom.document, fetchImpl: async () => jsonResponse(configPayload()) },
+  )
+  assert.ok(node, '无 React 时应返回 DOM 节点')
+  assert.equal(node.className, 'lx-config')
+})
+
+test('配置卡片：summary 预热后带平台与 event 信息', async () => {
+  resetConfigSummaryCache()
+  const dom = createDom()
+  const options = { doc: dom.document, fetchImpl: async () => jsonResponse(configPayload()) }
+
+  const first = renderConfigSlot({ view: 'summary' }, options)
+  assert.equal(typeof first, 'string')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const second = renderConfigSlot({ view: 'summary' }, options)
+  assert.match(second, /平台：凌虚/)
+  assert.match(second, /event 4/)
+  assert.match(second, /已配置/)
+  resetConfigSummaryCache()
+})
+
+test('apply(ctx)：同时注册配置卡片与浮动面板', () => {
+  const env = installGlobals(async () => jsonResponse(fullSnapshot()))
+  try {
+    const registered = []
+    const ctx = {
+      slots: { register(options) { registered.push(options); return () => {} } },
+      effect(fn) { return fn() },
+    }
+    const panel = track(apply(ctx))
+    assert.equal(registered.length, 1, 'apply 应把配置卡片注册进 slot')
+    assert.equal(registered[0].name, 'plugins.bundle.config')
+    assert.equal(registered[0].key, 'dsh-lingxu-ctf')
+    assert.equal(panel.mounted, true, '浮动面板照旧挂载')
   } finally {
     env.restore()
   }
