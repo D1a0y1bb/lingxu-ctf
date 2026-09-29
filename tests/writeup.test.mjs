@@ -19,6 +19,7 @@ import { CtfStore, connectionKey } from '../lib/store.js'
 import { createWriteup, resolveWorkDir, slugify, writeupDir, writeupFileName } from '../lib/writeup.js'
 // 跨模块 slug 契约：编排层/工具层用 index.js 的 slugify 决定目录名，必须与本模块一致
 import { slugify as indexSlugify } from '../lib/index.js'
+import { writeScopeFor } from '../lib/orchestrate.js'
 
 const CONNECTION = { platform: 'lingxu', baseUrl: 'https://example.test:8000', eventId: 4 }
 const CONN_KEY = connectionKey(CONNECTION)
@@ -72,19 +73,21 @@ async function makeEnv({ detail = {}, adapter: adapterOverride = {}, connection 
 
 // ------------------------------------------------------------------ slug
 
-test('slugify：中文题名保留可读性，绝不返回空字符串', () => {
+test('slugify：中文题名保留可读性，退化题名回退裸 challenge', () => {
   assert.equal(slugify('签到题', 7), '签到题')
   assert.equal(slugify('Web/签到 题', 7), 'web-签到-题')
-  assert.equal(slugify('   ', 9), 'challenge-9')
-  assert.equal(slugify('', 9), 'challenge-9')
-  assert.equal(slugify(null, 9), 'challenge-9')
-  assert.equal(slugify('///', 9), 'challenge-9')
-  assert.equal(slugify('...', 9), 'challenge-9')
+  // 退化题名统一回退裸 `challenge`（与 index/orchestrate/tools 一致），id 由 writeupFileName 单独拼
+  assert.equal(slugify('   ', 9), 'challenge')
+  assert.equal(slugify('', 9), 'challenge')
+  assert.equal(slugify(null, 9), 'challenge')
+  assert.equal(slugify('///', 9), 'challenge')
+  assert.equal(slugify('...', 9), 'challenge')
+  assert.equal(slugify('\u0000\u0007', 5), 'challenge')
+  assert.equal(writeupFileName(slugify('///', 12), 12), 'challenge-12.md')
   assert.equal(slugify('../../etc/passwd', 3), 'etc-passwd')
   // 可读符号（! { } ( ) ☕）保留，只剔路径危险字符
   assert.equal(slugify('flag{test}', 3), 'flag{test}')
   assert.equal(slugify('Baby Heap!', 12), 'baby-heap!')
-  assert.equal(slugify('\u0000\u0007', 5), 'challenge-5')
   // 超长截断到 60 码点以内，且不留下尾部 `-`
   const long = slugify(`${'a'.repeat(120)}中文`, 1)
   assert.ok(Array.from(long).length <= 60, `slug 长度 ${Array.from(long).length}`)
@@ -106,9 +109,12 @@ test('slugify：与 lib/index.js 的规则逐字一致（跨模块契约）', ()
   for (const name of ['Sign In', 'flag{test}', '../../etc/passwd', 'café ☕ CTF', 'Web/签到 题']) {
     assert.equal(slugify(name, 7), indexSlugify(name), `slug 不一致：${name}`)
   }
-  // 空输入两边都回退（index.js 用 'challenge'，writeup 用 challenge-<id>）
-  assert.equal(indexSlugify('///'), 'challenge')
-  assert.equal(slugify('///', 12), 'challenge-12')
+  // 退化题名：两边都回退裸 `challenge`，且 WP 文件名只出现一次 id
+  for (const name of ['???', '***', '///', '...', '   ']) {
+    assert.equal(slugify(name, 12), indexSlugify(name), `退化 slug 不一致：${JSON.stringify(name)}`)
+    assert.equal(slugify(name, 12), 'challenge')
+    assert.equal(writeupFileName(slugify(name, 12), 12), 'challenge-12.md')
+  }
 })
 
 test('resolveWorkDir：未配置时回退到 cwd/lingxu-ctf-work', () => {
@@ -194,11 +200,11 @@ test('generate：中文题名 slug 不被清成空字符串', async () => {
   assert.equal(path.basename(result.path), `签到题（web-入门）-12.md`)
   assert.ok((await fsp.readFile(result.path, 'utf8')).startsWith('# 签到题（Web 入门）'))
 
-  // 纯符号题名回退 challenge-<id>
+  // 纯符号题名回退裸 challenge（id 只出现一次）
   const env2 = await makeEnv({ detail: { name: '///' } })
   const result2 = await env2.writeup.generate({ challengeId: 33 })
-  assert.equal(result2.slug, 'challenge-33')
-  assert.equal(path.basename(result2.path), 'challenge-33-33.md')
+  assert.equal(result2.slug, 'challenge')
+  assert.equal(path.basename(result2.path), 'challenge-33.md')
 })
 
 test('generate：无 work / 无提交记录时降级，不崩且给出占位说明', async () => {
@@ -249,6 +255,25 @@ test('generate：自动内联 workDir/scripts 下匹配题目的复现脚本', a
   assert.match(content, /### `scripts\/script-case-exp\.py`/)
   assert.match(content, /```python\nprint\("pwn"\)\n```/)
   assert.ok(!content.includes('nope'))
+})
+
+test('契约：WP 文件名与编排层 solver 目录同源（真跑生成 + 落盘断言）', async () => {
+  // 端到端：orchestrate 用 writeScopeFor 告诉 solver「把 exp 放这里」，
+  // writeup 必须把 WP 落在同名 slug 上、并能从该目录内联脚本（不再依赖 id 兜底）。
+  for (const name of ['Baby Heap!', '签到题（Web 入门）', '???']) {
+    const env = await makeEnv({ detail: { name } })
+    const result = await env.writeup.generate({ challengeId: 12 })
+
+    const scopeDir = path.basename(writeScopeFor({ id: 12, name, category: 'Web' }))
+    assert.equal(path.basename(result.path), `${scopeDir}.md`, `WP 文件名与 solver 目录不同源：${name}`)
+
+    const scriptDir = path.join(env.workDir, 'challenges', scopeDir)
+    await fsp.mkdir(scriptDir, { recursive: true })
+    await fsp.writeFile(path.join(scriptDir, 'exp.py'), 'print("ok")\n', 'utf8')
+    const second = await env.writeup.generate({ challengeId: 12, force: true })
+    assert.equal(second.scriptCount, 1, `未从 solver 目录内联脚本：${name}`)
+    assert.match(await fsp.readFile(second.path, 'utf8'), /exp\.py/)
+  }
 })
 
 test('generate：符号题名按共享 slug 精确命中 solver 目录（不依赖 id 兜底）', async () => {
