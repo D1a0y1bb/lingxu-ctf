@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
-  apply, normalizeConfig, slugify, maskFlag, injectClientScript, buildPanelState,
+  apply, normalizeConfig, slugify, maskFlag, injectBootEntry, buildPanelState,
   name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
   describeConfigFields, readJsonBody,
 } from '../lib/index.js'
@@ -91,47 +91,11 @@ test('maskFlag: 脱敏但仍可辨认', () => {
   assert.equal(maskFlag('flag{this_is_a_secret_flag}').includes('secret'), false)
 })
 
-test('injectClientScript: 注入 module script 到 </body> 前', () => {
-  const html = '<html><body><div id=app></div></body></html>'
-  const out = injectClientScript(html, '/lingxu-ctf/client.js?rev=abc')
-  assert.match(out, /<script type="module" src="\/lingxu-ctf\/client\.js\?rev=abc"><\/script>/)
-  assert.equal(out.indexOf('type="module"') < out.indexOf('</body>'), true)
-})
 
-test('injectClientScript: 幂等（重复注入同一 url 不叠加）', () => {
-  const html = '<body></body>'
-  const once = injectClientScript(html, '/x.js?rev=1')
-  const twice = injectClientScript(once, '/x.js?rev=1')
-  assert.equal(once, twice)
-  assert.equal(once.split('<script').length - 1, 1)
-})
 
-test('injectClientScript: 没有 </body> 时追加到末尾', () => {
-  const out = injectClientScript('<div></div>', '/x.js?rev=1')
-  assert.match(out, /<script type="module" src="\/x\.js\?rev=1"><\/script>$/)
-})
 
-test('injectClientScript: 不使用 __DSH_BOOT__ graph 行（0.2.0-rc.1 上是 no-op）', () => {
-  const out = injectClientScript('<body></body>', '/x.js')
-  assert.equal(out.includes('__DSH_BOOT__'), false)
-  assert.equal(out.includes('data-dsh-client-plugin'), false)
-  assert.equal(out.includes('application/json'), false)
-})
 
-test('injectClientScript: 必须带 type="module"（client.js 有顶层 export）', () => {
-  // lib/client.js 是 ESM（顶层 export），若被当成 classic script 加载会直接语法错误、
-  // 面板静默消失。这条断言防止有人改回 graph row / script-src 注入。
-  const out = injectClientScript('<body></body>', '/lingxu-ctf/client.js?rev=deadbeef')
-  assert.match(out, /<script type="module" /)
-  assert.equal(out.includes('type="module"'), true)
-  // 不得出现 classic script 形式（无 type 或无 src 的内联）
-  assert.equal(/<script(?![^>]*type="module")[^>]*src=/.test(out), false)
-})
 
-test('injectClientScript: 注入的 url 带内容哈希 rev，改代码后浏览器不会用旧缓存', () => {
-  const out = injectClientScript('<body></body>', '/lingxu-ctf/client.js?rev=abc123')
-  assert.match(out, /client\.js\?rev=abc123/)
-})
 
 test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份', () => {
   const ctx = mockCtx()
@@ -613,4 +577,90 @@ test('readJsonBody：解析 JSON、空体、非法体、超限', async () => {
   assert.deepEqual(await readJsonBody(mk(['   '])), {}, '空体应为 {}')
   await assert.rejects(() => readJsonBody(mk(['{not json'])), /不是合法 JSON/)
   await assert.rejects(() => readJsonBody(mk(['x'.repeat(300)]), { maxBytes: 10 }), /过大/)
+})
+
+/**
+ * 复刻 dsh-client-modules 的 `parseBootManifest` 校验规则（逐条对照源码写），
+ * 用来验证我们注入的 boot graph 一定会被宿主接受。
+ * 规则来源：dsh-client-modules/lib/client.js 的 parseBootManifest。
+ */
+function validateBootManifest(graph) {
+  if (typeof graph !== 'object' || graph === null) throw new Error('__DSH_BOOT__ is missing or not an object')
+  if (typeof graph.rev !== 'string') throw new Error('boot manifest rev must be a string')
+  if (!Array.isArray(graph.entries)) throw new Error('boot manifest entries must be an array')
+  if (!Array.isArray(graph.batches)) throw new Error('boot manifest batches must be an array')
+
+  const entryIds = new Set()
+  for (const row of graph.entries) {
+    if (typeof row !== 'object' || row === null) throw new Error('boot manifest entry is not an object')
+    if (typeof row.id !== 'string' || typeof row.url !== 'string' || typeof row.rev !== 'string') {
+      throw new Error('boot manifest entry must carry string id/url/rev')
+    }
+    if (entryIds.has(row.id)) throw new Error(`duplicate graph entry "${row.id}"`)
+    entryIds.add(row.id)
+  }
+
+  const batchUrls = new Set()
+  const initialUrls = new Map()
+  for (const batch of graph.batches) {
+    if (typeof batch !== 'object' || batch === null) throw new Error('boot manifest batch is not an object')
+    if (batch.phase !== 'bootstrap' && batch.phase !== 'application') throw new Error('bad batch phase')
+    if (typeof batch.url !== 'string' || typeof batch.rev !== 'string') throw new Error('batch must carry string url/rev')
+    if (batchUrls.has(batch.url)) throw new Error(`duplicate batch URL ${batch.url}`)
+    batchUrls.add(batch.url)
+    if (!Array.isArray(batch.entries) || batch.entries.length === 0) throw new Error('batch entries must be non-empty')
+    for (const id of batch.entries) {
+      if (!entryIds.has(id)) throw new Error(`batch names unknown entry "${id}"`)
+      if (initialUrls.has(id)) throw new Error(`entry "${id}" belongs to more than one batch`)
+      initialUrls.set(id, batch.url)
+    }
+  }
+
+  for (const row of graph.entries) {
+    if (initialUrls.get(row.id) === undefined) throw new Error(`entry "${row.id}" belongs to no initial-load batch`)
+  }
+  return true
+}
+
+test('injectBootEntry：注入的 boot graph 能通过宿主 parseBootManifest 的全部校验', () => {
+  const html = `<head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
+    rev: 'abc',
+    entries: [{ id: 'a', url: '/a.js', rev: 'abc' }],
+    batches: [{ phase: 'application', url: '/a.js', rev: 'abc', entries: ['a'] }],
+  })}</script></head><body></body>`
+  const out = injectBootEntry(html, { id: 'dsh-lingxu-ctf', url: '/lingxu-ctf/client.js?rev=r1', rev: 'r1' })
+  const m = /globalThis\["__DSH_BOOT__"\] = ([\s\S]*?)<\/script>/.exec(out)
+  assert.ok(m, '应能取回注入后的 boot graph')
+  const graph = JSON.parse(m[1])
+
+  assert.doesNotThrow(() => validateBootManifest(graph), '注入后必须仍是合法 boot manifest')
+
+  const mine = graph.entries.find((e) => e.id === 'dsh-lingxu-ctf')
+  assert.deepEqual(mine, {
+    id: 'dsh-lingxu-ctf',
+    url: '/lingxu-ctf/client.js?rev=r1',
+    rev: 'r1',
+    inject: [],
+    external: [],
+  })
+  const batch = graph.batches.find((b) => b.entries.includes('dsh-lingxu-ctf'))
+  assert.deepEqual(batch, { phase: 'application', url: '/lingxu-ctf/client.js?rev=r1', rev: 'r1', entries: ['dsh-lingxu-ctf'] })
+  assert.equal(graph.entries.length, 2, '不得重复注入')
+  assert.equal(graph.batches.length, 2)
+})
+
+test('injectBootEntry：幂等 / 无 boot 行 / 坏 JSON 都安全', () => {
+  const base = `<script>globalThis["__DSH_BOOT__"] = {"rev":"r","entries":[],"batches":[]}</script>`
+  const once = injectBootEntry(base, { id: 'x', url: '/x.js', rev: 'r' })
+  assert.equal(injectBootEntry(once, { id: 'x', url: '/x.js', rev: 'r' }), once, '幂等')
+  assert.equal(injectBootEntry('<html></html>', { id: 'x', url: '/x.js', rev: 'r' }), '<html></html>', '无 boot 行原样返回')
+  const broken = `<script>globalThis["__DSH_BOOT__"] = {oops</script>`
+  assert.equal(injectBootEntry(broken, { id: 'x', url: '/x.js', rev: 'r' }), broken, '坏 JSON 原样返回')
+})
+
+test('injectBootEntry：把 < 转义成 \\u003c，与 renderRow("global") 一致', () => {
+  const html = `<script>globalThis["__DSH_BOOT__"] = {"rev":"r","entries":[],"batches":[]}</script>`
+  const out = injectBootEntry(html, { id: 'x', url: '/x.js?a=<b>', rev: 'r' })
+  assert.equal(out.includes('<b>'), false, 'url 里的尖括号必须被转义')
+  assert.equal(out.includes('\\u003c'), true)
 })
