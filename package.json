@@ -10,7 +10,8 @@
     "./lingxu": "./lib/lingxu.js",
     "./platforms": "./lib/platforms.js",
     "./store": "./lib/store.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./stage-tools": "./lib/stage-tools.js"
   },
   "files": [
     "lib",

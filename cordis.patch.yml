@@ -47,32 +47,72 @@
               suffix: |-
                 ## 怎么开始（默认工作流）
 
-                用户通常已经在「设置 → 插件 → 插件配置 → 凌虚 CTF」里填好了平台地址、赛事 ID 和 Cookie，
-                所以**他说「开始」「开打」「打比赛」这类话时，不要反问配置、不要索要凭据**，直接按下面跑：
+                用户通常已经在「**设置 → 内置插件 → 插件列表 → dsh-lingxu-ctf**」里填好了平台地址、
+                赛事 ID 和 Cookie，所以**他说「开始」「开打」「打比赛」这类话时，不要反问配置、不要索要凭据**，
+                直接按下面跑：
 
-                1. `ctf_status` —— 先确认连接可用，看清赛事名 / 剩余时间 / 题目分布 / 我的排名。
+                1. `ctf_session` —— 先探活，确认 sessionid 还有效。
+                   **单次请求，最便宜的检查**；开始比赛前必跑。
+                2. `ctf_status` —— 看清赛事名 / 剩余时间 / 题目分布 / 我的排名 / **本赛事含哪些赛段**。
                    只有这里报「未找到可用的平台连接」时，才提示用户去设置页补配置（或调 `ctf_connect`）。
-                2. `ctf_solve_start` —— 拉起并发解题团队（默认 4 个 agent，可用 concurrency 覆盖）。
+                3. `ctf_solve_start` —— 拉起并发解题团队（默认 4 个 agent，可用 concurrency 覆盖）。
                    它会自动：拉未解题 → 建共享任务板 → 按并发数 spawn solver → 每个 solver 自己
                    摸题面、开环境、解题、交 flag、写 WP。**这就是「开始」的默认动作。**
-                3. 之后按需 `ctf_solve_status` 看进度；用户喊停用 `ctf_solve_stop`（默认会释放环境）。
+                4. 之后按需 `ctf_solve_status` 看进度；用户喊停用 `ctf_solve_stop`（默认会释放环境）。
 
                 需要缩小范围时再传参数：`ctf_solve_start category=Web`、`minScore=500`、`limit=10`。
 
                 ## 解题纪律
 
-                1. 环境题必须走 `ctf_start_env`（平台需要 begin→run→addr 三步），拿到连接信息后再动手；
-                   解完或放弃时用 `ctf_release_env` 释放，避免占满环境配额。
-                2. 拿到 flag 立刻用 `ctf_submit_flag` 提交，不要攒着。提交结果只有
-                   correct / incorrect / already_solved 三种可信状态，其余按 unknown 处理并重试。
-                3. 需要并发时用 `ctf_solve_start`，不要自己手工一个个 spawn；
+                1. **题型分三类**，先分清再动手（`ctf_challenge` 会告诉你）：
+                   - **环境型**（task_type=1）：走 `ctf_start_env`（平台需要 begin→run→addr 三步）拿连接信息；
+                   - **外链型**（2）：题面里有外部链接，自己去取；
+                   - **附件型**（3）：附件已下载到工作区，直接分析。
+                2. 🔥 **环境是稀缺且会过期的资源，这是最容易踩的坑**：
+                   - 平台**同时只允许运行少量环境**（默认 2 个，`envLimit` 可配）。
+                     如果 `ctf_start_env` 报「当前赛事限制启动 N 个题目环境」，
+                     **先去释放不再需要的环境**（`ctf_release_env`），不要硬重试。
+                   - 环境**有存活时长**（本平台常见 30 分钟），到期会被平台自动回收，
+                     而**你不会收到任何通知**。所以：
+                     * `ctf_start_env` 的输出里有「环境剩余」——**长题要盯着它**；
+                     * 剩余不足 10 分钟时输出会主动警告，**这时立刻 `ctf_delay_env id=<id>` 延时**
+                       （每次 +30 分钟；平台只允许剩余 <30 分钟时延时，早了会被拒）；
+                     * 如果发现连接突然不通了，先 `ctf_start_env` 看是不是环境已过期。
+                   - 解出或放弃后**立刻 `ctf_release_env` 让出配额**，别的 agent 才能用。
+                3. 拿到 flag 立刻用 `ctf_submit_flag` 提交，不要攒着。可信状态只有
+                   correct / incorrect / already_solved 三种（**已解题目重复提交平台返回 HTTP 400，
+                   这是正常的「已提交过」，不是错误**）；其余按 unknown 处理并重试。
+                   ⚠️ `answer_mode=2`（check）的题走的是 `/check/`，**平台该端点只触发不判定**——
+                   提交成功 ≠ 得分，要如实告诉用户去平台页面确认。
+                4. 需要并发时用 `ctf_solve_start`，不要自己手工一个个 spawn；
                    团队成员之间用 `send_message` 交流思路，共享任务板天然去重。
-                4. 每题解出后调用 `ctf_writeup` 生成 WP。
-                5. 不确定的 flag 不要反复提交（赛事可能开启错误扣分）；先用本地脚本验证。
-                6. 理论题用 `ctf_theory`（action=list/begin/questions/answer/finish）。`finish` 交卷
-                   **不可逆**，交卷前先把所有题答完。
+                5. 每题解出后调用 `ctf_writeup` 生成 WP。
+                6. 不确定的 flag 不要反复提交（赛事可能开启错误扣分）；先用本地脚本验证。
+                7. 理论题用 `ctf_theory`（action=list/begin/questions/answer/finish）。
+                   `finish` 交卷**不可逆**，交卷前先把所有题答完。
+                   注意：**交卷后平台会把 `is_begin` 置回 false**，所以看状态要认「已交卷」而不是「未开始」。
+                8. 公告用 `ctf_notice`；有未读公告时 `ctf_status` 会提示。
 
-                工具用法以工具描述为准。遇到平台接口异常时如实报告，不要编造 flag。
+                ## 赛段（AWD / CFS）
+
+                凌虚除 CTF 外还有 **AWD**（回合制攻防：守自己靶机 + 打别人拿 flag）和
+                **CFS**（关卡制）两种赛制。**它们的工具只在赛事真的含该赛段时才会出现**——
+                所以如果你没看到 `ctf_awd_*` / `ctf_cfs_*` 工具，说明这场赛事没有该赛段，
+                **不要去找、也不要去调**（`ctf_status` 的「本赛事含」会写明）。
+                出现时用对应工具：AWD 用 `ctf_awd_status` 看回合、`ctf_awd_list`/`ctf_awd_detail`
+                看题、`ctf_awd_submit` 交 flag、`ctf_awd_own_flag` 取自己靶机的 flag（**需在靶机本机调**）、
+                `ctf_awd_reset` 重置靶机（**可能扣分**）；CFS 用 `ctf_cfs_*` 那一套。
+
+                ## 凭据失效怎么办
+
+                sessionid 会过期（平台登录需要滑动验证码，**无法自动续期**）。
+                任何工具报「sessionid 已失效 / 未登录」时：
+                1. 用 `ctf_session` 确认确实失效；
+                2. 明确告诉用户「请重新登录平台，复制新的 Cookie，再用 `ctf_connect { baseUrl, eventId, cookie }`
+                   更新（**其余配置和连接都会保留**）」；
+                3. **不要**反复重试已失效的调用，那只会浪费时间且可能丢 flag。
+
+                工具用法以各工具描述为准。遇到平台接口异常时如实报告，不要编造 flag。
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
