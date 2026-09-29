@@ -1,7 +1,18 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createAdapter, listPlatforms, isSupportedPlatform, LingxuAdapter } from '../lib/platforms.js'
+import {
+  CAPABILITY_STATES,
+  LINGXU_PLATFORM_CONTRACT,
+  PLATFORM_CONTRACT_VERSION,
+  createAdapter,
+  listPlatforms,
+  isSupportedPlatform,
+  LingxuAdapter,
+  normalizePlatformError,
+  stageCapabilitiesFromSummary,
+  stageCapabilitiesFromTestType,
+} from '../lib/platforms.js'
 import {
   LingxuClient,
   LingxuError,
@@ -102,6 +113,47 @@ test('平台注册表：只支持凌虚', () => {
   assert.ok(createAdapter({ baseUrl: 'https://x.com', eventId: 1, cookie: 'sessionid=a' }) instanceof LingxuAdapter)
 })
 
+test('平台能力合同：test_type 缺失、为空和含赛段分别归一为 unknown/absent/present', () => {
+  assert.equal(PLATFORM_CONTRACT_VERSION, 1)
+  assert.deepEqual(LINGXU_PLATFORM_CONTRACT.stageIds, { theory: 1, ctf: 2, awd: 3, cfs: 4 })
+  assert.equal(stageCapabilitiesFromTestType(null).stages.awd, CAPABILITY_STATES.UNKNOWN)
+  assert.equal(stageCapabilitiesFromTestType([]).stages.awd, CAPABILITY_STATES.UNKNOWN)
+  assert.equal(stageCapabilitiesFromTestType({}).stages.awd, CAPABILITY_STATES.ABSENT)
+  const present = stageCapabilitiesFromTestType({ 2: { name: 'CTF' }, 3: { name: 'AWD' } })
+  assert.equal(present.stages.ctf, CAPABILITY_STATES.PRESENT)
+  assert.equal(present.stages.awd, CAPABILITY_STATES.PRESENT)
+  assert.equal(present.stages.cfs, CAPABILITY_STATES.ABSENT)
+  assert.equal(stageCapabilitiesFromSummary({ hasAwd: true }).stages.awd, CAPABILITY_STATES.PRESENT)
+  assert.equal(stageCapabilitiesFromSummary({}).stages.awd, CAPABILITY_STATES.UNKNOWN)
+})
+
+test('平台能力合同：异常三态值按 unknown 处理，不能把脏数据当成可用赛段', () => {
+  const summary = stageCapabilitiesFromSummary({
+    capabilities: { version: 1, stages: { awd: 'yes', cfs: 'present' } },
+  })
+  assert.equal(summary.stages.awd, CAPABILITY_STATES.UNKNOWN)
+  assert.equal(summary.stages.cfs, CAPABILITY_STATES.PRESENT)
+})
+
+test('normalizePlatformError：输出稳定且不携带原始响应体', () => {
+  const error = normalizePlatformError({
+    name: 'LingxuError', code: 'session-expired', httpStatus: 403, path: '/event/4/info/',
+    platformMessage: '未登录', payload: { token: 'secret', detail: '未登录' },
+  })
+  assert.deepEqual(error, {
+    ok: false,
+    code: 'session-expired',
+    message: '未登录',
+    httpStatus: 403,
+    platformStatus: null,
+    path: '/event/4/info/',
+    retryable: false,
+  })
+  assert.equal('payload' in error, false)
+  assert.equal(normalizePlatformError({ httpStatus: 503 }).retryable, true)
+  assert.equal(normalizePlatformError({ httpStatus: 403 }).code, 'forbidden')
+})
+
 test('createAdapter：未知平台抛 LingxuError（不静默降级）', () => {
   for (const platform of ['nope', 'ctfd', 'CTFd', 'ctfhub']) {
     assert.throws(
@@ -118,6 +170,13 @@ test('createAdapter：未知平台抛 LingxuError（不静默降级）', () => {
   assert.equal(typeof LingxuAdapter, 'function')
 })
 
+test('LingxuAdapter：暴露版本化能力合同与错误投影', () => {
+  const adapter = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 1, cookie: 'sessionid=a' })
+  assert.equal(adapter.contractVersion, PLATFORM_CONTRACT_VERSION)
+  assert.deepEqual(adapter.capabilities().stageIds, { theory: 1, ctf: 2, awd: 3, cfs: 4 })
+  assert.equal(adapter.normalizeError({ httpStatus: 429 }).retryable, true)
+})
+
 //  凌虚客户端
 
 test('LingxuClient: 缺 sessionid 时 validateAccess 报错', async () => {
@@ -128,6 +187,12 @@ test('LingxuClient: 缺 sessionid 时 validateAccess 报错', async () => {
 test('LingxuClient: 构造校验必填', () => {
   assert.throws(() => new LingxuClient({ eventId: 1 }), /baseUrl/)
   assert.throws(() => new LingxuClient({ baseUrl: 'https://x.com' }), /eventId/)
+  for (const eventId of [0, -1, 1.5, 'abc', Infinity]) {
+    assert.throws(
+      () => new LingxuClient({ baseUrl: 'https://x.com', eventId, cookie: 'sessionid=a' }),
+      /eventId 必须是正整数|eventId/,
+    )
+  }
 })
 
 test('LingxuClient: challenges 翻页合并并归一化字段', async () => {
@@ -438,8 +503,28 @@ test('LingxuAdapter: eventSummary 解析 test_type（1理论/2CTF/3AWD/4CFS）',
     assert.equal(summary.hasAwd, true)
     assert.equal(summary.hasCfs, false, '这场没有 CFS 赛段')
     assert.deepEqual(Object.keys(summary.testTypeMap).sort(), ['1', '2', '3'])
+    assert.equal(summary.capabilities.version, PLATFORM_CONTRACT_VERSION)
+    assert.equal(summary.capabilities.stages.awd, CAPABILITY_STATES.PRESENT)
+    assert.equal(summary.capabilities.stages.cfs, CAPABILITY_STATES.ABSENT)
     assert.equal(summary.remainingSeconds, 3600)
   } finally { restore() }
+})
+
+test('LingxuAdapter: test_type 形状异常时能力保持 unknown，不猜测赛段', async () => {
+  for (const malformed of [null, [], '3', 3]) {
+    const [restore] = withFetch((url) => {
+      if (url.endsWith('/info/')) return jsonResponse({ test_type: malformed, user: {} })
+      return jsonResponse({ name: '异常赛事' })
+    })
+    try {
+      const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })
+      const summary = await a.eventSummary()
+      assert.equal(summary.hasAwd, null)
+      assert.equal(summary.hasCfs, null)
+      assert.equal(summary.capabilities.stages.awd, CAPABILITY_STATES.UNKNOWN)
+      assert.equal(summary.capabilities.stages.cfs, CAPABILITY_STATES.UNKNOWN)
+    } finally { restore() }
+  }
 })
 
 test('LingxuAdapter: AWD/CFS 调用形状（路径与 query 参数）', async () => {

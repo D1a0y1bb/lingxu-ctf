@@ -1,6 +1,6 @@
 {
   "name": "dsh-lingxu-ctf",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "DSH 凌虚竞赛插件：查看赛题、管理环境、编排解题 agent，并保存提交记录和 writeup。",
   "type": "module",
   "main": "./lib/index.js",
@@ -42,6 +42,12 @@
   },
   "license": "MIT",
   "dsh": {
+    "runtime": {
+      "node": ">=18",
+      "dependencyPolicy": "host-managed",
+      "hostRuntimeManaged": true,
+      "lockHostRuntime": false
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

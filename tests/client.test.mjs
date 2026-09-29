@@ -829,6 +829,28 @@ test('响应不是 JSON（json() 抛错）→ 错误态而非崩溃', async () =
   }
 })
 
+test('悬浮面板：新一轮请求不能被旧的慢响应覆盖', async () => {
+  const dom = createDom()
+  const pending = []
+  const fetchImpl = async (url) => {
+    if (String(url).startsWith('/lingxu-ctf/usage')) return jsonResponse({ ok: false, sessionId: null })
+    return new Promise((resolve) => pending.push(resolve))
+  }
+  const panel = track(createPanel({ doc: dom.document, win: dom.window, fetchImpl, intervalMs: 60000 }))
+  panel.mount()
+  const first = panel.refresh()
+  await flush()
+  const second = panel.refresh()
+  await flush()
+  assert.equal(pending.length, 2)
+  pending[1](jsonResponse({ connection: { key: 'new' }, event: { name: '新赛事' }, challenges: [] }))
+  await second
+  pending[0](jsonResponse({ connection: { key: 'old' }, event: { name: '旧赛事' }, challenges: [] }))
+  await first
+  assert.equal(panel.state.snapshot.event.name, '新赛事')
+  panel.destroy()
+})
+
 //  7. 轮询与交互
 
 test('轮询：页面隐藏时暂停，恢复可见后立即刷新', async () => {
@@ -1793,6 +1815,19 @@ test('视图：slot 常量与 DSH 契约一致（list slot 必须有 id + order�
   )
 })
 
+test('会话路由：CTF 视图把同一个 session 参数带到 state/team/reports', async () => {
+  const { impl, calls } = viewFetch()
+  const { view } = mountView({
+    fetchImpl: impl,
+    sessionUsage: () => ({ sessionId: 'session-view-1' }),
+  })
+  await view.refresh()
+  assert.ok(calls.includes(`${STATE_URL}?session=session-view-1`))
+  assert.ok(calls.includes(`${TEAM_URL}?session=session-view-1`))
+  assert.ok(calls.includes(`${REPORTS_URL}?session=session-view-1`))
+  view.destroy()
+})
+
 test('视图：registerCtfView 注册 conversation.view，id=ctf / order=20 / label 可调用', () => {
   const registered = []
   const injected = []
@@ -2295,6 +2330,40 @@ test('视图控制器：挂载后拉三份数据并渲染摘要 / 看板，切 t
   // 未知 tab 忽略
   view.setTab('nope')
   assert.equal(view.state.tab, 'reports')
+  view.destroy()
+})
+
+test('视图控制器：新一轮请求会取消旧轮次，旧响应不能覆盖当前快照', async () => {
+  const pending = []
+  const impl = (url, init = {}) => {
+    if (String(url).startsWith(USAGE_URL)) return Promise.resolve(jsonResponse({ ok: false }))
+    const item = { url: String(url), signal: init.signal, resolve: null }
+    const promise = new Promise((resolve) => { item.resolve = resolve })
+    pending.push(item)
+    return promise
+  }
+  const { view } = mountView({ fetchImpl: impl })
+  const first = view.refresh()
+  // 让第一轮的三个请求进入 pending，再启动第二轮。
+  await Promise.resolve()
+  const firstRequests = pending.splice(0)
+  const second = view.refresh()
+  await Promise.resolve()
+  const secondRequests = pending.splice(0)
+  assert.equal(firstRequests.length, 3)
+  assert.equal(secondRequests.length, 3)
+  assert.ok(firstRequests.every((item) => item.signal?.aborted === true), '旧轮次应收到 abort')
+  assert.ok(secondRequests.every((item) => item.signal?.aborted !== true), '新轮次不应被误取消')
+
+  const newer = { ...fullSnapshot(), event: { ...fullSnapshot().event, name: '新赛事' } }
+  for (const item of secondRequests) item.resolve(jsonResponse(item.url === STATE_URL ? newer : item.url === TEAM_URL ? teamPayload() : reportsPayload()))
+  await second
+  assert.equal(view.state.snapshot.event.name, '新赛事')
+
+  const older = { ...fullSnapshot(), event: { ...fullSnapshot().event, name: '旧赛事' } }
+  for (const item of firstRequests) item.resolve(jsonResponse(item.url === STATE_URL ? older : item.url === TEAM_URL ? teamPayload() : reportsPayload()))
+  await first
+  assert.equal(view.state.snapshot.event.name, '新赛事', '旧响应不能覆盖新快照')
   view.destroy()
 })
 
@@ -3609,6 +3678,14 @@ test('用量折叠按 DSH tokenUsage 投影语义（同 step 替换、重试重�
   ])
   assert.deepEqual(added, { uncachedInputTokens: 150, outputTokens: 15, cacheReadTokens: 0, cacheWriteTokens: 0 })
 
+  // ③a step 可以交错出现；每个身份槽都应独立替换，不能只看上一个事件。
+  const interleaved = foldTokenUsage([
+    { type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 100, outputTokens: 10 } } },
+    { type: 'assistant/message', data: { turn: 1, step: 2, usage: { inputTokens: 50, outputTokens: 5 } } },
+    { type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 120, outputTokens: 12 } } },
+  ])
+  assert.deepEqual(interleaved, { uncachedInputTokens: 170, outputTokens: 17, cacheReadTokens: 0, cacheWriteTokens: 0 })
+
   // ④ llm/retry-started 关槽 → 重试后的新样本重新累加（不是替换）
   const retried = foldTokenUsage([
     { type: 'assistant/attempt', data: { turn: 2, step: 3, stream: { chunks: [{ type: 'usage', usage: { inputTokens: 100, outputTokens: 10 } }] } } },
@@ -4153,6 +4230,31 @@ test('理论题按需加载题目概要（不在轮询里自动拉）', async ()
   assert.match(text, /未答/)
   assert.match(text, /共 100 题、已答 37 题/)
   view.destroy()
+
+  // 理论题按需请求也必须沿用视图当前 session，不能读另一会话的试卷。
+  const sessionView = mountView({ fetchImpl: impl, sessionUsage: () => ({ sessionId: 'session-theory-1' }) })
+  await sessionView.view.refresh()
+  sessionView.view.setTab('theory')
+  const sessionBody = (() => {
+    const stack = [sessionView.view.element()]
+    while (stack.length) {
+      const node = stack.shift()
+      if (node && String(node.className || '').split(/\s+/).includes('lx-vbody')) return node
+      for (const child of (node && node.children) || []) stack.push(child)
+    }
+    return null
+  })()
+  assert.ok(sessionBody)
+  sessionBody.dispatch('click', {
+    target: {
+      className: 'lx-vbtn lx-vtheory-load',
+      getAttribute: (name) => (name === 'data-test-id' ? '4' : null),
+    },
+  })
+  await flush()
+  await flush()
+  assert.equal(calls.some((url) => String(url).includes(`${THEORY_URL}?testId=4&limit=100&session=session-theory-1`)), true)
+  sessionView.view.destroy()
 })
 
 test('理论题空态区分「没有赛段」与「试卷未开启」', async () => {

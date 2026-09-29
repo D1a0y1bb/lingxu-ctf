@@ -84,7 +84,7 @@ store 记录：
 
 `ctf_solve_start` 创建或复用 agent，并把题目写入任务板；`ctf_solve_status` 汇总成员、任务、环境和本地消息；`ctf_solve_stop` 停止任务并释放可清理的环境。
 
-会话内调用通过 `exec.agent` 捕获 caller。HTTP 路由没有 exec，因此 `/team` 使用最近一次捕获的会话身份。`agentTeams` 服务未挂载时，编排工具返回缺少服务的说明，不伪造任务状态。
+会话内调用通过 `exec.agent` 捕获 caller，并在 session registry 中保存 `{ sessionId, caller, connKey, eventId }`。HTTP 请求携带 session ID 后只读取对应上下文；并行会话不会共用最近一次 caller。没有 session ID 的旧宿主只有在唯一兼容上下文存在时才会退化。`agentTeams` 服务未挂载时，编排工具返回缺少服务的说明，不伪造任务状态。
 
 ### Team message 观察
 

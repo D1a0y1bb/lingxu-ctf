@@ -1,85 +1,57 @@
 # 交付审计
 
-本文记录当前工作树和可复现检查的结果。它不是平台运营报告；真实平台没有凭据时，相关项记为 `unverified`，不把静态测试当成 live 证据。
+审计基线为 `1.0.8` 工作树，Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
 
-审计基线：`v1.0.7` 工作树，Node `>=18`，目标 DSH 版本按仓库当前注入声明验证。旧版本的提交和 tag 保留不动。
-
-## 结论
+## 结果
 
 | 范围 | 状态 | 证据 |
 | --- | --- | --- |
 | JavaScript 语法 | `passed` | `node --check lib/*.js tests/*.mjs` |
-| 单元测试 | `passed` | `npm test`，612 个测试通过 |
-| 工具注册与动态赛段工具 | `passed` | `tests/index.test.mjs`、`tests/tools.test.mjs`、`tests/platforms.test.mjs` |
-| 客户端 classic script 装配 | `passed` | `tests/client.test.mjs` |
-| 会话 token 用量 | `passed`（本地样例） | zstd 多帧、明文 JSONL、宿主投影对账用例 |
-| 团队消息观察钩子 | `passed`（本地样例） | 真实 `data.content` 结构、旧嵌套结构、去重用例 |
-| 真实凌虚平台冒烟 | `unverified` | 本轮没有有效 `LINGXU_COOKIE` |
-| DSH 桌面端安装后 UI | `unverified` | 未启动用户桌面实例做视觉验收 |
+| 单元与契约回归 | `passed` | `npm test`，638/638 |
+| 多会话身份隔离 | `passed`（本地） | 并行 session registry、显式未知 session、客户端 session 路由用例 |
+| token 用量折叠 | `passed`（本地） | 多帧 zstd、JSONL、交错 step、retry 和宿主投影用例 |
+| 请求与附件边界 | `passed`（本地） | 同源跳转、响应大小、写请求重试、附件限额、正文超时和半文件清理用例 |
+| 状态存储 | `passed`（本地） | 权限、损坏恢复、两个 store 并发合并和 schema 归一化用例 |
+| 平台能力合同 | `passed`（本地） | `present/absent/unknown` 与执行前复核用例 |
+| 真实凌虚平台 | `unverified` | 当前环境没有有效 `LINGXU_COOKIE` |
+| DSH 桌面端双会话、热重载与界面 | `unverified` | 未启动目标宿主做视觉和生命周期验收 |
+| Windows 安装 | `unverified` | 当前没有 Windows 验证主机 |
 
-## 已核对的链路
+## 关键链路
 
-### 插件装配
+### 会话和赛事归属
 
-`lib/index.js` 只把 `tools` 作为硬依赖。`settings`、`sessions`、`sessionProjections`、`agentTeams` 和 `systemPrompt` 通过可选注入获取；缺少其中任一项不会阻止基础工具注册。
+工具执行时保存 `{ sessionId, caller, connKey, eventId }`。浏览器在同一轮 `/state`、`/team`、`/reports` 和 `/usage` 请求中携带同一个 session ID，服务端按该 ID 读取上下文。存在多个已知会话时，缺少或无法识别的 ID 不再退回最近会话。
 
-基础工具为 17 个。AWD（9 个）和 CFS（7 个）根据赛事摘要动态注册/注销，无法取得赛段信息时保持现状，不因一次网络失败清空工具。
+会话上下文有容量和过期上限；明确的会话结束事件、插件卸载和热重载会回收记录。团队事件订阅保存 disposer，重新装配服务前先解除旧订阅。
 
-### 连接和凭据
+### 用量
 
-连接来源按显式参数、设置页、本地 store 处理。Cookie 只在平台客户端请求时使用；设置同步只写 `baseUrl`、`eventId` 和 `label`，不把 secret 回写到普通配置。
+日志读取支持多帧 zstd 和普通 JSONL。用量按 `(turn, step, retry)` 保存独立槽位，同一槽的新快照替换旧值；不同 step 交错到达时不会互相覆盖。HTTP 路由只接受明确的 session，工具层为旧宿主保留带 `inferred` 标记的兼容路径。
 
-### 数据和路由
+### 平台请求和附件
 
-`/state` 使用服务端缓存和 single-flight；写操作会使缓存失效，但仍受刷新上限约束。`/team` 读取成员、任务和本地消息；`/reports` 只访问工作目录；`/usage` 只按 DSH 会话 ID 读取会话日志或宿主投影。
+平台根地址只接受 HTTP/HTTPS。绝对请求地址和跳转必须与根地址同源，跳转次数最多 5 次。普通响应体默认上限为 32 MiB，附件默认上限为 64 MiB。附件先写唯一临时文件，完成后原子改名，失败或超限会清理半文件。
 
-### 团队消息
+GET 等安全请求可按既有策略重试；POST、PUT、PATCH、DELETE 默认不因限流自动重放，只有调用方提供幂等键或明确启用时才重试。
 
-当前 DSH 投递事件是：
+### 本地状态和 HTTP 输出
 
-```js
-{
-  type: 'user/message',
-  data: {
-    source: { kind: 'team-message', messageId, senderName },
-    content: [{ type: 'text', text: '...' }]
-  }
-}
-```
+状态目录权限为 `0700`，文件为 `0600`。状态写入有进程间锁、唯一临时文件、原子替换和合并逻辑，文件上限为 16 MiB；异常 schema 会归一化，原型字段不会进入内存状态。
 
-解析器同时接受旧版 `data.message.content`，只观察事件、不参与投递，写盘失败不会阻塞原消息。`messageId` 用于去重。
+配置写接口拒绝跨站浏览器来源，只接受声明过的字段和类型。`/reports`、`/usage` 和 `/diag` 的普通响应不返回本机绝对路径。
 
-### 会话用量
+### 平台能力和不可信内容
 
-日志读取支持多帧 zstd 和普通 JSONL。折叠规则按 DSH 的 `tokenUsage` 投影处理：同一 step 的更新替换旧值，重试按最新尝试计数，压缩开销单列。宿主侧优先读取 `sessions`/`sessionProjections` 服务；服务不可用时保留日志侧结果。
+平台适配器暴露版本化能力合同，AWD/CFS 状态统一为 `present`、`absent` 或 `unknown`。保留旧工具名时，执行前会按当前连接重新确认，避免把上一场赛事的能力带到新会话。
 
-## 对用户问题的落实
+平台题面、理论题、附件元数据和目标响应都按不可信数据处理。prompt 和工具输出明确划出内容边界，题面中的指令不能扩大文件读取、凭据访问或消息发送范围。
 
-| 问题 | 当前处理 | 状态 |
-| --- | --- | --- |
-| 审计事件混在普通消息里 | 按事件类型和来源拆分，普通 `user/message` 不进团队通信 | `passed` |
-| 多帧日志和增量读取 | 逐帧解压，明文文件每次从头解析并用缓存去重 | `passed` |
-| 平台轮询过密 | TTL、single-flight、刷新下限和滚动上限 | `passed`（单测） |
-| 环境配额和过期 | 工具返回平台限制，面板区分本地持有与平台 blocked | `passed`（单测） |
-| 空报告、空团队、无环境 | 各路由返回明确空态，不用假数据填充 | `passed`（单测） |
-| 多赛事切换 | 连接 key 隔离；跨平台不复用 Cookie | `passed`（单测） |
-| Windows 安装 | 文档给出 GUI/junction 路径 | `partial`（未在 Windows 主机复验） |
-| agent 活动和协同 | 读取任务板、session event 和本地 team log | `partial`（live 服务未接入） |
-| 理论题 | 按需查询，交卷后不把状态显示成未开始 | `passed`（单测） |
+## 还需要外部环境补的检查
 
-## 发布前复核
+1. 用有效账号完成赛事摘要、分页、排行榜、理论题、AWD/CFS、附件和环境接口的 live 检查。
+2. 在 DSH 桌面端交错运行两个会话，并复验切换会话、服务重连、热重载和卸载后的订阅与定时器。
+3. 在 Windows 完成安装、路径、文件权限退化和界面检查。
+4. 多个独立 DSH 进程共用平台账号时，限流仍需由部署层统一协调。
 
-运行：
-
-```bash
-npm test
-bash scripts/verify.sh
-```
-
-带平台凭据时再运行 `tests/smoke-live.mjs` 和 `tests/e2e-live.mjs`。`verify.sh` 会把 live 检查显示为 `passed`、`failed` 或“未运行”，不会把跳过包装成通过。
-
-## 未验证项
-
-1. 当前机器没有可用的凌虚登录 Cookie，因此无法确认真实赛事字段、排行榜和理论题接口的当前返回。
-2. 未在 Windows、DSH 桌面端和生产 profile 中做本轮视觉/安装验收。
-3. 历史 tag 的提交说明仍保留原样；本轮采用前向版本整理，没有重写公共 Git 历史。
+历史提交和旧 tag 保持不变。本轮采用前向提交和新版本标签，不通过 force-push 改写公共历史。

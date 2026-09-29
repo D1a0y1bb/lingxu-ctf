@@ -48,7 +48,7 @@ ctx.tools.register(defineTool({
 
 ### `agentTeams`
 
-编排器使用成员、任务和停止接口；HTTP `/team` 路由使用最近捕获的 caller。服务缺失时，编排工具返回说明，不生成假的成员或任务。
+编排器使用成员、任务和停止接口。工具执行时按 session ID 保存 caller、连接 key 和赛事 ID，HTTP `/team` 路由只读取请求所对应的会话；并行会话不会共用“最近 caller”。服务缺失时，编排工具返回说明，不生成假的成员或任务。
 
 ## 会话事件
 
@@ -82,7 +82,9 @@ Web 服务使用 `register({ path, method, handler })`。插件路由如下：
 /lingxu-ctf/usage
 ```
 
-响应统一使用 JSON，错误时保留 HTTP 200 的业务状态对象或明确的 4xx；客户端不能把非 JSON 直接当成功数据。
+响应统一使用 JSON，错误时保留 HTTP 200 的业务状态对象或明确的 4xx；客户端不能把非 JSON 直接当成功数据。`/state`、`/team`、`/reports` 和 `/usage` 接受 `session` 查询参数。存在多个已知会话时，没有显式 session 的请求不会猜测最近会话。
+
+`POST /config` 校验浏览器的 `Origin` 和 Fetch Metadata，拒绝跨站写入；无浏览器头的宿主内部调用保持兼容。普通 `/reports`、`/usage` 和 `/diag` 响应会移除或遮盖本机绝对路径。
 
 旧的 `tapIndex`/boot graph 注入不是当前客户端装配路径。浏览器 bundle 通过 package manifest 的 `dsh.client.inject` 声明：
 
@@ -116,3 +118,4 @@ bash scripts/verify.sh
 3. `session/event` 的 team-message 内容位置没有变化；
 4. `settings.update` 的 revision 规则未改变；
 5. 带有效 Cookie 的 smoke/e2e 检查通过。
+6. 两个会话交错请求四条 session 路由时，返回的 caller、连接、报告和用量互不串线。

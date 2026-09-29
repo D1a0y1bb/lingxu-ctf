@@ -16,6 +16,9 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { promises as fsp } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 import {
   LingxuClient,
@@ -60,6 +63,9 @@ import {
   normalizeTheoryOption,
   theoryOptionTypeLabel,
   theoryTestStatus,
+  MAX_REQUEST_BODY_BYTES,
+  MAX_RESPONSE_BODY_BYTES,
+  MAX_ATTACHMENT_BYTES,
 } from '../lib/lingxu.js'
 
 /** 安装一个临时的 fetch 假实现，返回 [restore, calls]。 */
@@ -1844,4 +1850,129 @@ test('默认限流参数：生产默认有最小间隔，node:test 下自动放�
   // 测试运行器里默认 0（否则 550 个用例每个请求都要干等），生产默认 100ms
   assert.equal(DEFAULT_RATE_LIMIT.minIntervalMs, process.env.NODE_TEST_CONTEXT ? 0 : 100)
   assert.deepEqual(REQUEST_PRIORITIES, ['interactive', 'background'])
+})
+
+//  网络边界：请求体、重定向、副作用重试和附件落盘
+
+test('请求体超过上限时不发请求；跨站绝对 URL 被拒绝', async () => {
+  let calls = 0
+  const [restore] = withFetch(() => {
+    calls += 1
+    return jsonResponse({ ok: true })
+  })
+  try {
+    const c = client()
+    await assert.rejects(
+      () => c.request('/upload/', { method: 'POST', body: 'x'.repeat(MAX_REQUEST_BODY_BYTES + 1) }),
+      /请求体超过限制/,
+    )
+    await assert.rejects(() => c.request('https://evil.example/upload/'), (error) => {
+      assert.equal(error.code, 'cross-origin-request')
+      return true
+    })
+    assert.equal(calls, 0)
+  } finally { restore() }
+})
+
+test('无 Content-Length 的响应也受大小上限约束', async () => {
+  const [restore] = withFetch(() => ({
+    status: 200,
+    ok: true,
+    body: {
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.alloc(MAX_RESPONSE_BODY_BYTES + 1, 65)
+      },
+    },
+  }))
+  try {
+    await assert.rejects(() => client().request('/chunked/'), /响应体超过限制/)
+  } finally { restore() }
+})
+
+test('副作用 POST 遇 429 默认不重试；有幂等键时才重试', async () => {
+  let calls = 0
+  const [restore] = withFetch(() => {
+    calls += 1
+    return jsonResponse({ detail: 'too many requests' }, 429)
+  })
+  try {
+    const c = new LingxuClient({ baseUrl: 'https://retry-side-effect.test', eventId: 4, cookie: 'sessionid=a', minIntervalMs: 0, maxRetries: 2, backoffBaseMs: 1 })
+    await assert.rejects(() => c.request('/submit/', { method: 'POST', body: { flag: 'x' } }), /too many requests/)
+    assert.equal(calls, 1)
+    await assert.rejects(() => c.request('/submit/', { method: 'POST', body: { flag: 'x' }, idempotencyKey: 'op-1' }), /too many requests/)
+    assert.equal(calls, 4, '带幂等键时首次 + 两次重试')
+  } finally { restore() }
+})
+
+test('同源重定向允许，跨站重定向拒绝', async () => {
+  const [restore] = withFetch((url) => {
+    if (url.endsWith('/start/')) return new Response(null, { status: 302, headers: { location: '/final/' } })
+    return jsonResponse({ ok: true })
+  })
+  try {
+    const result = await client().request('/start/')
+    assert.deepEqual(result, { ok: true })
+  } finally { restore() }
+
+  const [restore2] = withFetch(() => new Response(null, { status: 302, headers: { location: 'https://evil.example/final/' } }))
+  try {
+    await assert.rejects(() => client().request('/start/'), (error) => error.code === 'cross-origin-redirect')
+  } finally { restore2() }
+})
+
+test('附件流式写入临时文件后原子改名，并拒绝超限响应', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-download-'))
+  const target = path.join(dir, 'nested', 'file.bin')
+  const bytes = new Uint8Array([1, 2, 3, 4, 5])
+  const [restore] = withFetch(() => new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.byteLength) } }))
+  try {
+    const result = await client().downloadAttachment('/media/file.bin', target, { maxBytes: MAX_ATTACHMENT_BYTES })
+    assert.equal(result.bytes, bytes.byteLength)
+    assert.deepEqual([...await fsp.readFile(target)], [...bytes])
+    assert.deepEqual((await fsp.readdir(path.dirname(target))).filter((name) => name.includes('.part-')), [])
+  } finally { restore() }
+
+  const [restore2] = withFetch(() => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-length': '3' } }))
+  try {
+    await assert.rejects(
+      () => client().downloadAttachment('/media/large.bin', path.join(dir, 'large.bin'), { maxBytes: 2 }),
+      /附件超过大小限制/,
+    )
+    assert.equal(await fsp.stat(path.join(dir, 'large.bin')).then(() => true).catch(() => false), false)
+  } finally { restore2() }
+})
+
+test('附件只返回响应头后停滞时也会超时，并清理临时文件', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-download-timeout-'))
+  const target = path.join(dir, 'stalled.bin')
+  const [restore] = withFetch((_url, init) => {
+    const body = new ReadableStream({
+      start(controller) {
+        init.signal.addEventListener('abort', () => {
+          controller.error(new DOMException('aborted', 'AbortError'))
+        }, { once: true })
+      },
+    })
+    return new Response(body, { status: 200 })
+  })
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://download-timeout.test', eventId: 4, cookie: 'sessionid=a',
+      timeoutMs: 30, minIntervalMs: 0,
+    })
+    await assert.rejects(() => c.downloadAttachment('/media/stalled.bin', target), /请求超时/)
+    assert.equal(await fsp.stat(target).then(() => true).catch(() => false), false)
+    assert.deepEqual((await fsp.readdir(dir)).filter((name) => name.includes('.part-')), [])
+  } finally { restore() }
+})
+
+test('raw 请求的 HTTP 错误不再把错误响应当成附件', async () => {
+  const [restore] = withFetch(() => jsonResponse({ detail: 'not found' }, 404))
+  try {
+    await assert.rejects(() => client().downloadAttachment('/missing.zip', '/tmp/missing.zip'), (error) => {
+      assert.equal(error.httpStatus, 404)
+      assert.match(error.message, /not found/)
+      return true
+    })
+  } finally { restore() }
 })

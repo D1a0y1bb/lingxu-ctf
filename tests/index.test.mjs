@@ -7,6 +7,8 @@ import path from 'node:path'
 import {
   apply, normalizeConfig, slugify, maskFlag, injectBootEntry, buildPanelState,
   buildTeamState, buildReportsState, readLimitParam, toChallengeId, toEpochMs, withSessionCapture,
+  createSessionRegistry, sessionIdFromRequest, resolveRequestSession,
+  isSameOriginConfigRequest,
   name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
   describeConfigFields, normalizeConfigPatch, readJsonBody,
   createStageToolRegistry,
@@ -1177,8 +1179,8 @@ test('GET /lingxu-ctf/usage：日志根目录不接受浏览器参数', async ()
     assert.equal(body.ok, true)
     assert.equal(body.totals.uncachedInputTokens, 11)
     assert.equal(body.totals.outputTokens, 2)
-    assert.equal(body.file.startsWith(path.join(root, 'sessions')), true)
-    assert.equal(body.file.includes(attackerRoot), false)
+    assert.equal('file' in body, false, '普通 HTTP 用量响应不应暴露本机日志绝对路径')
+    assert.equal(JSON.stringify(body).includes(attackerRoot), false)
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
@@ -1191,11 +1193,17 @@ test('GET /lingxu-ctf/usage：日志根目录不接受浏览器参数', async ()
 
 test('buildReportsState：按 store 记录列出本地 WP，文件不存在则跳过', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-reports-'))
+  const outsideDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-reports-outside-'))
   const writeupsDir = path.join(dir, 'writeups')
   await fsp.mkdir(writeupsDir, { recursive: true })
   const existing = path.join(writeupsDir, 'neurosign-1.md')
+  const outside = path.join(outsideDir, 'secret.md')
   await fsp.writeFile(existing, '# NeuroSign\n\nflag{test}\n', 'utf8')
   await fsp.writeFile(path.join(writeupsDir, 'babyheap-3.md'), '# babyheap\n', 'utf8')
+  await fsp.writeFile(outside, 'should not be exposed\n', 'utf8')
+  const linked = path.join(writeupsDir, 'linked-5.md')
+  let hasSymlink = true
+  try { await fsp.symlink(outside, linked) } catch { hasSymlink = false }
 
   const store = {
     async listChallengeWork() {
@@ -1203,6 +1211,8 @@ test('buildReportsState：按 store 记录列出本地 WP，文件不存在则�
         { connKey: TEAM_CONN_KEY, challengeId: '1', subject: '[Crypto] NeuroSign (100分)', writeupPath: existing },
         { connKey: TEAM_CONN_KEY, challengeId: '2', subject: '[Web] 签到 (100分)', writeupPath: path.join(writeupsDir, 'gone-2.md') },
         { connKey: TEAM_CONN_KEY, challengeId: '3', subject: '[Pwn] babyheap (300分)', writeupSlug: 'babyheap' },
+        { connKey: TEAM_CONN_KEY, challengeId: '4', subject: '[Misc] 外部路径 (10分)', writeupPath: outside },
+        ...(hasSymlink ? [{ connKey: TEAM_CONN_KEY, challengeId: '5', subject: '[Web] 符号链接 (10分)', writeupPath: linked }] : []),
       ]
     },
   }
@@ -1237,6 +1247,23 @@ test('buildReportsState：store 无记录 → ok:true + 空数组；store 抛错
   assert.deepEqual(broken.writeups, [])
 })
 
+test('buildReportsState：绑定 session 时只读取对应赛事，不能回退全量', async () => {
+  const seen = []
+  const state = await buildReportsState({
+    store: {
+      async listChallengeWork(connKey) {
+        seen.push(connKey)
+        return []
+      },
+    },
+    resolveAdapter: async () => { throw new Error('不应在已绑定 session 时走全局连接') },
+    workDir: '/tmp',
+    sessionContext: { sessionId: 'session-a', connKey: TEAM_CONN_KEY },
+  })
+  assert.equal(state.ok, true)
+  assert.deepEqual(seen, [TEAM_CONN_KEY])
+})
+
 test('GET /lingxu-ctf/reports：真调 handler', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-reports-route-'))
   process.env.DSH_HOME = dir
@@ -1253,6 +1280,25 @@ test('GET /lingxu-ctf/reports：真调 handler', async () => {
 
   const posted = await callRoute(route, { method: 'POST' })
   assert.equal(posted.statusCode, 405)
+})
+
+test('session 路由：未知 session 不读取 reports/theory 的全局数据', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-session-routes-'))
+  process.env.DSH_HOME = dir
+  const ctx = mockCtx()
+  apply(ctx, { workDir: dir })
+  const reports = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/reports')
+  const theory = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/theory')
+
+  const reportsResponse = await callRoute(reports, { url: '/lingxu-ctf/reports?session=does-not-exist' })
+  const reportsBody = JSON.parse(reportsResponse.body)
+  assert.equal(reportsBody.ok, false)
+  assert.deepEqual(reportsBody.writeups, [])
+
+  const theoryResponse = await callRoute(theory, { url: '/lingxu-ctf/theory?session=does-not-exist&testId=4' })
+  const theoryBody = JSON.parse(theoryResponse.body)
+  assert.equal(theoryBody.ok, false)
+  assert.deepEqual(theoryBody.questions, [])
 })
 
 //  enableFloatingPanel（默认关闭）
@@ -1296,6 +1342,45 @@ test('withSessionCapture：旁路记录 caller 和 session id，不改参数与�
   assert.equal(withSessionCapture({ name: 'x' }, session).name, 'x')
   const plain = { name: 'y', execute: () => 'z' }
   assert.equal(withSessionCapture(plain, null), plain, '没有会话槽时不包装')
+})
+
+test('createSessionRegistry：并发 session 的 caller/connKey 不串线，显式未知 session 不回退', async () => {
+  let clock = Date.parse('2026-09-30T00:00:00Z')
+  const registry = createSessionRegistry({ now: () => clock, ttlMs: 1000, maxContexts: 4 })
+  const callerA = { id: 'agent-a' }
+  const callerB = { id: 'agent-b' }
+  const contextA = registry.capture({ sessionId: 'session-a', agent: callerA, connKey: 'conn-a', eventId: 'evt-a' }, {})
+  const contextB = registry.capture({ sessionId: 'session-b', agent: callerB, connKey: 'conn-b', eventId: 'evt-b' }, {})
+  assert.equal(sessionIdFromRequest({ headers: { 'x-dsh-session-id': 'session-a' } }), 'session-a')
+  assert.equal(resolveRequestSession(registry, { url: '/x?session=session-a' }, { require: true }).context, contextA)
+  assert.equal(resolveRequestSession(registry, { url: '/x?session=missing' }, { require: true }).ok, false)
+  assert.equal(resolveRequestSession(registry, { url: '/x' }, { require: true }).ok, false, '多个 session 不应猜最近一个')
+
+  const observed = []
+  await Promise.all([
+    registry.run(contextA, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 8))
+      observed.push([registry.sessionId, registry.caller, registry.connKey])
+    }),
+    registry.run(contextB, async () => {
+      observed.push([registry.sessionId, registry.caller, registry.connKey])
+    }),
+  ])
+  observed.sort((left, right) => left[0].localeCompare(right[0]))
+  assert.deepEqual(observed[0], ['session-a', callerA, 'conn-a'])
+  assert.deepEqual(observed[1], ['session-b', callerB, 'conn-b'])
+
+  clock += 1001
+  assert.equal(registry.get('session-a'), null, '超过 TTL 的会话要回收')
+  assert.equal(registry.get('session-b'), null, '超过 TTL 的会话要回收')
+  registry.dispose()
+})
+
+test('配置写入：跨站 Origin / Fetch Metadata 被拒绝，无头本机调用保持兼容', () => {
+  assert.equal(isSameOriginConfigRequest({ headers: { origin: 'http://localhost:3000', host: 'localhost:3000' } }), true)
+  assert.equal(isSameOriginConfigRequest({ headers: { origin: 'https://evil.example', host: 'localhost:3000' } }), false)
+  assert.equal(isSameOriginConfigRequest({ headers: { 'sec-fetch-site': 'cross-site' } }), false)
+  assert.equal(isSameOriginConfigRequest({ headers: {} }), true)
 })
 
 test('GET /lingxu-ctf/team：任意 ctf_* 工具调用都能提供会话语境（不限于 solve_*）', async () => {
@@ -1365,6 +1450,8 @@ test('createStageToolRegistry：按赛事赛段动态注册/注销 AWD、CFS 工
   assert.equal(awd(), 9)
   reg.sync({})
   assert.equal(awd(), 9, 'hasAwd/hasCfs 都 undefined 时应保持现状')
+  reg.sync({ hasAwd: null, hasCfs: null })
+  assert.equal(awd(), 9, '显式 unknown 也应保持现状')
   reg.sync(null)
   assert.equal(awd(), 9, 'null 时应保持现状')
 

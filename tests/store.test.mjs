@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import {
   CtfStore, connectionKey, emptyState, eventIdOf, parseEventIdFromConnKey,
-  TEAM_MESSAGE_LIMIT, TEAM_MESSAGE_TEXT_LIMIT,
+  TEAM_MESSAGE_LIMIT, TEAM_MESSAGE_TEXT_LIMIT, STATE_SCHEMA_VERSION, MAX_STATE_BYTES,
 } from '../lib/store.js'
 
 async function tempDir() {
@@ -333,4 +333,76 @@ test('noteActiveConnection：设置页那种「store 里还没有的连接」也
   await store.noteActiveConnection('lingxu:a:8000:4')
   assert.equal((await store.getActiveConnection()).eventId, 4)
   assert.equal((await store.getActiveConnKey()), 'lingxu:a:8000:4')
+})
+
+test('两个 store 实例并发写入时保留双方的连接和提交记录', async () => {
+  const dir = await tempDir()
+  const a = new CtfStore({ dir })
+  const b = new CtfStore({ dir })
+  await Promise.all([
+    a.upsertConnection({ platform: 'lingxu', baseUrl: 'https://a.example.com', eventId: 1, cookie: 'sessionid=a' }),
+    b.upsertConnection({ platform: 'lingxu', baseUrl: 'https://b.example.com', eventId: 2, cookie: 'sessionid=b' }),
+  ])
+  const reopened = new CtfStore({ dir })
+  const keys = (await reopened.listConnections()).map((row) => row.key).sort()
+  assert.deepEqual(keys, ['lingxu:a.example.com:1', 'lingxu:b.example.com:2'])
+
+  await a.recordSubmission({ connKey: 'lingxu:a.example.com:1', challengeId: 1, flag: 'flag{a}', status: 'incorrect' })
+  await b.recordSubmission({ connKey: 'lingxu:b.example.com:2', challengeId: 2, flag: 'flag{b}', status: 'incorrect' })
+  const all = await new CtfStore({ dir }).recentSubmissions(10, { all: true })
+  assert.equal(all.length, 2)
+})
+
+test('同一个 store 的并发写入不会覆盖 await 期间产生的增量', async () => {
+  const dir = await tempDir()
+  const store = new CtfStore({ dir })
+  const originalRename = store.fs.rename.bind(store.fs)
+  const target = path.join(dir, 'state.json')
+  let blocked = false
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  store.fs = {
+    ...store.fs,
+    async rename(from, to) {
+      if (to === target && !blocked) {
+        blocked = true
+        await gate
+      }
+      return originalRename(from, to)
+    },
+  }
+
+  const first = store.upsertConnection({ platform: 'lingxu', baseUrl: 'https://same.test', eventId: 1, cookie: 'sessionid=a' })
+  while (!blocked) await new Promise((resolve) => setTimeout(resolve, 1))
+  const second = store.appendTeamMessage('lingxu:same.test:1', { text: '并发写入' })
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  release()
+  await Promise.all([first, second])
+
+  const reopened = new CtfStore({ dir })
+  assert.equal((await reopened.getConnection('lingxu:same.test:1')).eventId, 1)
+  assert.deepEqual((await reopened.listTeamMessages('lingxu:same.test:1')).map((row) => row.text), ['并发写入'])
+})
+
+test('状态 schema 字段和异常形状会归一化，不执行 JSON 原型字段', async () => {
+  const dir = await tempDir()
+  await fsp.writeFile(
+    path.join(dir, 'state.json'),
+    JSON.stringify({ version: 1, connections: null, challengeWork: [], submissions: 'bad', teamMessages: {}, __proto__: { polluted: true } }),
+    'utf8',
+  )
+  const store = new CtfStore({ dir })
+  const state = await store.load()
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION)
+  assert.deepEqual(state.connections, {})
+  assert.deepEqual(state.challengeWork, {})
+  assert.deepEqual(state.submissions, [])
+  assert.deepEqual(state.teamMessages, [])
+  assert.equal({}.polluted, undefined)
+})
+
+test('emptyState 声明 schemaVersion，并保留大状态文件硬上限', () => {
+  const state = emptyState()
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION)
+  assert.ok(MAX_STATE_BYTES >= 1024 * 1024)
 })
