@@ -1270,8 +1270,8 @@ test('enableFloatingPanel：默认 false（顶部「CTF」视图为主），显�
   assert.equal(field.label, '显示右下角浮动面板')
 })
 
-test('withSessionCapture：旁路记录 exec.agent，不改参数与返回值', async () => {
-  const session = { caller: null }
+test('withSessionCapture：旁路记录 caller 和 session id，不改参数与返回值', async () => {
+  const session = { caller: null, sessionId: '' }
   const seen = []
   const spec = {
     name: 'demo',
@@ -1279,13 +1279,15 @@ test('withSessionCapture：旁路记录 exec.agent，不改参数与返回值', 
   }
   const wrapped = withSessionCapture(spec, session)
   assert.notEqual(wrapped, spec, '必须返回包装后的新对象（不污染原 spec）')
-  assert.equal(await wrapped.execute({ x: 1 }, { agent: TEAM_AGENT }), 'ok:1')
+  assert.equal(await wrapped.execute({ x: 1 }, { agent: TEAM_AGENT, sessionId: 'session-real' }), 'ok:1')
   assert.equal(session.caller, TEAM_AGENT)
+  assert.equal(session.sessionId, 'session-real')
   assert.deepEqual(seen, [{ args: { x: 1 }, agent: TEAM_AGENT }], '参数与 exec 原样透传')
 
   // 没有 exec / 没有 agent → 不记录、不抛
   await wrapped.execute({ x: 2 }, {})
   assert.equal(session.caller, TEAM_AGENT)
+  assert.equal(session.sessionId, 'session-real')
   await wrapped.execute({ x: 3 }, null)
   assert.equal(await wrapped.execute({ x: 3 }), 'ok:3')
 
