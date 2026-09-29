@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createAdapter, listPlatforms, isSupportedPlatform, LingxuAdapter, CtfdAdapter } from '../lib/platforms.js'
+import { createAdapter, listPlatforms, isSupportedPlatform, LingxuAdapter } from '../lib/platforms.js'
 import {
   LingxuClient,
   LingxuError,
@@ -91,11 +91,31 @@ test('extractMessage 多路兜底', () => {
   assert.equal(extractMessage({}), '')
 })
 
-test('平台注册表', () => {
-  assert.deepEqual(listPlatforms().sort(), ['ctfd', 'lingxu'])
+test('平台注册表：只支持凌虚', () => {
+  assert.deepEqual(listPlatforms(), ['lingxu'])
   assert.equal(isSupportedPlatform('lingxu'), true)
+  assert.equal(isSupportedPlatform('LINGXU'), true)
   assert.equal(isSupportedPlatform('nope'), false)
-  assert.throws(() => createAdapter({ platform: 'nope', baseUrl: 'x' }), /不支持的平台/)
+  assert.equal(isSupportedPlatform(''), false)
+  assert.equal(isSupportedPlatform(undefined), false)
+  // 省略 platform 时按 lingxu 处理
+  assert.ok(createAdapter({ baseUrl: 'https://x.com', eventId: 1, cookie: 'sessionid=a' }) instanceof LingxuAdapter)
+})
+
+test('createAdapter：未知平台抛 LingxuError（不静默降级）', () => {
+  for (const platform of ['nope', 'ctfd', 'CTFd', 'ctfhub']) {
+    assert.throws(
+      () => createAdapter({ platform, baseUrl: 'https://x.com', eventId: 1, cookie: 'sessionid=a' }),
+      (error) => {
+        assert.equal(error.name, 'LingxuError')
+        assert.match(error.message, /不支持的平台/)
+        assert.match(error.message, /只支持 lingxu/)
+        return true
+      },
+      `platform=${platform} 应抛 LingxuError`,
+    )
+  }
+  assert.equal(typeof LingxuAdapter, 'function')
 })
 
 // ────────────────────────────────────────────── 凌虚客户端
@@ -309,40 +329,10 @@ test('LingxuAdapter: challengeDetail 标记环境题并规范化', async () => {
   } finally { restore() }
 })
 
-test('CtfdAdapter: 挑战列表与提交', async () => {
-  const [restore, calls] = withFetch((url) => {
-    if (url.endsWith('/api/v1/challenges')) {
-      return jsonResponse({ data: [{ id: 1, name: 'warmup', category: 'Misc', value: 100, solves: 5 }] })
-    }
-    if (url.endsWith('/api/v1/users/me')) return jsonResponse({ data: { id: 9, name: 'me', solves: [{ challenge_id: 1 }] } })
-    if (url.endsWith('/api/v1/challenges/attempt')) {
-      return jsonResponse({ data: { status: 'correct', message: 'Nice' } })
-    }
-    if (url.endsWith('/api/v1/config')) return jsonResponse({ data: { ctf_name: 'Demo CTF' } })
-    return jsonResponse({ data: [] })
-  })
-  try {
-    const a = createAdapter({ platform: 'ctfd', baseUrl: 'https://c.example.com', token: 'tok' })
-    assert.equal(a instanceof CtfdAdapter, true)
-    const v = await a.validate()
-    assert.equal(v.user.username, 'me')
-    const rows = await a.challenges()
-    assert.equal(rows.length, 1)
-    assert.equal(rows[0].solved, true)
-    const r = await a.submitFlag(1, 'flag{x}')
-    assert.equal(r.status, 'correct')
-    assert.equal(calls.find((c) => c.url.endsWith('/attempt')).init.headers.Authorization, 'Token tok')
-  } finally { restore() }
-})
-
-test('CtfdAdapter: 不支持的能力给出明确错误', async () => {
-  const a = createAdapter({ platform: 'ctfd', baseUrl: 'https://c.example.com', token: 'tok' })
-  await assert.rejects(() => a.startEnvironment(1), /不支持自动开启环境/)
-  await assert.rejects(() => a.beginTheoryTest(1), /不支持理论题/)
-  assert.deepEqual(await a.theoryTests(), [])
-})
-
-test('CtfdAdapter: 缺凭据时报错', async () => {
-  const a = createAdapter({ platform: 'ctfd', baseUrl: 'https://c.example.com' })
-  await assert.rejects(() => a.validate(), /需要 token 或 cookie/)
+test('createAdapter：显式 platform 为 lingxu 时正常构造', () => {
+  const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 1, cookie: 'sessionid=a' })
+  assert.equal(a instanceof LingxuAdapter, true)
+  assert.equal(a.id, 'lingxu')
+  assert.equal(typeof a.submitFlag, 'function')
+  assert.equal(typeof a.downloadAttachment, 'function')
 })

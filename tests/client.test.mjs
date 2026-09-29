@@ -977,25 +977,21 @@ function configPayload() {
   return {
     ok: true,
     fields: [
-      { key: 'platform', type: 'union', description: '平台类型', role: null, default: 'lingxu', options: ['lingxu', 'ctfd'] },
-      { key: 'baseUrl', type: 'string', description: '平台根地址', role: null, default: '' },
-      { key: 'eventId', type: 'number', description: '赛事 ID', role: null, default: null },
-      { key: 'cookie', type: 'string', description: '凌虚 sessionid Cookie', role: 'secret', default: '' },
-      { key: 'token', type: 'string', description: 'CTFd API Token', role: 'secret', default: '' },
-      { key: 'label', type: 'string', description: '连接备注名', role: null, default: '' },
-      { key: 'concurrency', type: 'number', description: '并发解题 agent 数', role: null, default: 4 },
-      { key: 'maxWrongAttempts', type: 'number', description: '每题错误提交上限', role: null, default: 0 },
-      { key: 'dedupeFlags', type: 'boolean', description: 'flag 去重', role: null, default: true },
-      { key: 'workDir', type: 'string', description: '解题工作目录', role: null, default: '' },
-      { key: 'timeoutMs', type: 'number', description: '请求超时（毫秒）', role: null, default: 30000 },
-      { key: 'enableWebPanel', type: 'boolean', description: '启用 Web 面板', role: null, default: true },
+      { key: 'baseUrl', label: '平台地址', type: 'string', description: '平台根地址', role: null, default: '' },
+      { key: 'eventId', label: '赛事 ID', type: 'number', description: '赛事 ID', role: null, default: null },
+      { key: 'cookie', label: 'Cookie（sessionid）', type: 'string', description: '凌虚 sessionid Cookie', role: 'secret', default: '' },
+      { key: 'label', label: '连接备注名', type: 'string', description: '连接备注名', role: null, default: '' },
+      { key: 'concurrency', label: '并发解题 Agent 数', type: 'number', description: '并发解题 agent 数', role: null, default: 4 },
+      { key: 'maxWrongAttempts', label: '单题错误提交上限', type: 'number', description: '每题错误提交上限', role: null, default: 0 },
+      { key: 'dedupeFlags', label: 'flag 本地去重', type: 'boolean', description: 'flag 去重', role: null, default: true },
+      { key: 'workDir', label: '工作目录', type: 'string', description: '解题工作目录', role: null, default: '' },
+      { key: 'timeoutMs', label: '请求超时（毫秒）', type: 'number', description: '请求超时（毫秒）', role: null, default: 30000 },
+      { key: 'enableWebPanel', label: '显示 Web 控制面板', type: 'boolean', description: '启用 Web 面板', role: null, default: true },
     ],
     values: {
-      platform: 'lingxu',
       baseUrl: 'https://x.test:8000',
       eventId: 4,
       cookie: '',
-      token: '',
       label: '测试',
       concurrency: 4,
       maxWrongAttempts: 0,
@@ -1047,10 +1043,9 @@ const postCalls = (calls) => calls.filter((call) => call.init && call.init.metho
 test('配置：normalizeConfig 容错 + 字段类型归一', () => {
   const config = normalizeConfig(configPayload())
   assert.equal(config.ok, true)
-  assert.equal(config.fields.length, 12)
+  assert.equal(config.fields.length, 10)
   assert.equal(config.secretsSet.cookie, true)
 
-  assert.equal(configFieldKind(config.fields[0]), 'select') // union
   assert.equal(configFieldKind({ type: 'boolean' }), 'boolean')
   assert.equal(configFieldKind({ type: 'number' }), 'number')
   assert.equal(configFieldKind({ type: 'string' }), 'text')
@@ -1070,7 +1065,7 @@ test('配置：renderConfigSummary 一句话摘要', () => {
   assert.equal(renderConfigSummary(normalizeConfig(configPayload())), '平台：凌虚 · event 4 · 已配置')
   // 缺 secret → 未配置
   const noSecret = configPayload()
-  noSecret.secretsSet = { cookie: false, token: false }
+  noSecret.secretsSet = { cookie: false }
   assert.match(renderConfigSummary(normalizeConfig(noSecret)), /未配置$/)
   assert.match(renderConfigSummary(normalizeConfig({ ok: false, error: '配置服务未就绪' })), /配置不可用：配置服务未就绪/)
 })
@@ -1090,14 +1085,13 @@ test('配置：collectConfigPatch 只发改动，secret 空串绝不回传', () 
   assert.deepEqual(collectConfigPatch(config, { ...values, eventId: '' }), {}, 'number 空值应忽略')
 })
 
-test('配置卡片：渲染 12 个字段，控件类型正确', async () => {
+test('配置卡片：渲染 10 个字段，控件类型正确、标签中文化', async () => {
   const dom = createDom()
   const { impl } = configFetch(configPayload())
   const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
   await card.refresh()
 
-  assert.equal(countByClass(card.element, 'lx-config-field'), 12, '应渲染 12 个字段')
-  assert.equal(findByKey(card.element, 'platform').tagName, 'SELECT')
+  assert.equal(countByClass(card.element, 'lx-config-field'), 10, '应渲染 10 个字段')
   assert.equal(findByKey(card.element, 'eventId').type, 'number')
   assert.equal(findByKey(card.element, 'dedupeFlags').type, 'checkbox')
   assert.equal(findByKey(card.element, 'enableWebPanel').type, 'checkbox')
@@ -1107,8 +1101,14 @@ test('配置卡片：渲染 12 个字段，控件类型正确', async () => {
 
   const text = collectText(card.element)
   assert.match(text, /平台根地址/, '应显示字段描述')
-  assert.match(text, /凌虚 CTF 配置/)
-  assert.match(text, /共 12 项配置/)
+  // 用户要求：不显示标题与说明性文字，也不显示「共 N 项配置」
+  assert.doesNotMatch(text, /凌虚 CTF 配置/)
+  assert.doesNotMatch(text, /共 \d+ 项配置/)
+  assert.doesNotMatch(text, /只保存在 DSH 本地存储/)
+  // 标签必须走中文 label，而不是英文 key
+  assert.match(text, /平台地址/)
+  assert.match(text, /并发解题 Agent 数/)
+  assert.doesNotMatch(text, /baseUrl/)
   card.destroy()
 })
 
@@ -1117,7 +1117,6 @@ test('配置卡片：secret 永不回显，placeholder 反映 secretsSet', async
   const payload = configPayload()
   // 即使宿主（错误地）回显了 cookie，也必须被忽略
   payload.values.cookie = 'sessionid=LEAKED'
-  payload.values.token = 'token=LEAKED'
   const { impl } = configFetch(payload)
   const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
   await card.refresh()
@@ -1126,14 +1125,20 @@ test('配置卡片：secret 永不回显，placeholder 反映 secretsSet', async
   assert.equal(cookie.type, 'password')
   assert.equal(cookie.value, '', 'secret 绝不能回显')
   assert.equal(cookie.placeholder, SECRET_SET_PLACEHOLDER)
-  const token = findByKey(card.element, 'token')
-  assert.equal(token.value, '', 'secret 绝不能回显')
-  assert.equal(token.placeholder, SECRET_UNSET_PLACEHOLDER)
 
   const text = collectText(card.element)
   assert.equal(text.includes('LEAKED'), false, '页面里不得出现 secret 明文')
   assert.match(text, /当前：已设置/)
-  assert.match(text, /当前：未设置/)
+
+  // secretsSet 为 false 时 placeholder 应显示「未设置」
+  const dom2 = createDom()
+  const payload2 = configPayload()
+  payload2.secretsSet = { cookie: false }
+  const card2 = createConfigCard({ doc: dom2.document, fetchImpl: configFetch(payload2).impl })
+  await card2.refresh()
+  assert.equal(findByKey(card2.element, 'cookie').placeholder, SECRET_UNSET_PLACEHOLDER)
+  assert.match(collectText(card2.element), /当前：未设置/)
+  card2.destroy()
   card.destroy()
 })
 

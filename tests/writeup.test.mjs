@@ -311,11 +311,11 @@ test('generate：slug 有分歧时按题目 id 兜底发现 solver 目录（NFKC
 
 test('submit：平台不支持 WP 提交时返回明确说明而不是崩溃', async () => {
   const env = await makeEnv({
-    connection: { platform: 'ctfd', baseUrl: 'https://ctfd.test', eventId: null },
+    connection: { platform: 'lingxu', baseUrl: 'https://no-submit.test', eventId: 1 },
     adapter: {
-      id: 'ctfd',
+      id: 'no-submit',
       async submitWriteup() {
-        throw new Error('CTFd 适配器不支持平台侧 WP 提交，请使用本地导出')
+        throw new Error('该适配器不支持平台侧 WP 提交，请使用本地导出')
       },
       async listWriteups() {
         return []
@@ -463,11 +463,11 @@ test('generate：submit=true 时生成后自动提交到平台', async () => {
 
   // 平台不支持提交时，生成仍然成功，但 submitted=false 并带明确说明
   const env2 = await makeEnv({
-    connection: { platform: 'ctfd', baseUrl: 'https://ctfd.test', eventId: null },
+    connection: { platform: 'lingxu', baseUrl: 'https://no-submit.test', eventId: 1 },
     adapter: {
-      id: 'ctfd',
+      id: 'no-submit',
       async submitWriteup() {
-        throw new Error('CTFd 适配器不支持平台侧 WP 提交，请使用本地导出')
+        throw new Error('该适配器不支持平台侧 WP 提交，请使用本地导出')
       },
     },
   })

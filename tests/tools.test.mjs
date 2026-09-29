@@ -255,7 +255,6 @@ test('ctf_connect 成功：校验、持久化、脱敏、警告', async () => {
   const adapter = createAdapter()
   const { tools } = createHarness({ adapter, store })
   const out = await tools.ctf_connect.execute({
-    platform: 'lingxu',
     baseUrl: 'https://example.com:8000/',
     eventId: 4,
     cookie: CONNECTION.cookie,
@@ -307,17 +306,19 @@ test('ctf_connect 参数校验：缺 baseUrl / 协议 / eventId / sessionid / �
     /缺少 sessionid/,
   )
   assert.match(
-    await tools.ctf_connect.execute({ baseUrl: 'https://example.com:8000', eventId: 4, cookie: 'sessionid=x', platform: 'ctfhub' }),
-    /不支持的平台/,
-  )
-  assert.match(
-    await tools.ctf_connect.execute({ platform: 'ctfd', baseUrl: 'https://ctfd.example.com' }),
-    /需要 token 或 cookie/,
-  )
-  assert.match(
     await tools.ctf_connect.execute({ baseUrl: 'https://example.com:8000', eventId: 'abc', cookie: 'sessionid=x' }),
     /eventId 必须是正整数/,
   )
+})
+
+test('ctf_connect：参数表不含 platform（只支持凌虚）', () => {
+  const { tools } = createHarness()
+  assert.deepEqual(Object.keys(tools.ctf_connect.parameters), ['baseUrl', 'eventId', 'cookie', 'label'])
+  assert.ok(!('platform' in tools.ctf_connect.parameters), 'platform 参数应已移除')
+  assert.ok(!('token' in tools.ctf_connect.parameters), 'token 参数（CTFd 专用）应已移除')
+  assert.match(tools.ctf_connect.description, /凌虚/)
+  // 即使调用方硬塞 platform/token，也不会被采纳（参数校验不拒绝未声明字段，工具应忽略它们）
+  assert.match(tools.ctf_connect.description, /^配置并校验凌虚赛事平台连接/)
 })
 
 test('ctf_connect：平台校验失败时返回排查指引', async () => {

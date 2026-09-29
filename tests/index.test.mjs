@@ -428,12 +428,14 @@ test('Config schema：存在、有默认值、字段齐全', () => {
   // volatile 字段解析出来是「稳定引用」对象，必须解包后才是真实值
   const parsed = plainConfigValue(Config({}))
   for (const key of [
-    'platform', 'baseUrl', 'eventId', 'cookie', 'token', 'label',
+    'baseUrl', 'eventId', 'cookie', 'label',
     'concurrency', 'maxWrongAttempts', 'dedupeFlags', 'workDir', 'timeoutMs', 'enableWebPanel',
   ]) {
     assert.equal(key in parsed, true, `Config 缺字段 ${key}`)
   }
-  assert.equal(parsed.platform, 'lingxu')
+  // 只支持凌虚：不应再有 CTFd 专用的 platform / token
+  assert.equal('platform' in parsed, false, 'platform 字段应已移除（只支持凌虚）')
+  assert.equal('token' in parsed, false, 'token 字段应已移除（CTFd 专用）')
   assert.equal(parsed.concurrency, 4)
   assert.equal(parsed.dedupeFlags, true)
   assert.equal(parsed.enableWebPanel, true)
@@ -444,7 +446,7 @@ test('Config schema：每个字段都标了 volatile —— 否则设置页根�
   // volatileForm 只在 schema 本身或某个字段带 meta.volatile 时才返回表单。
   // 只导出 Config 不加 volatile 的表现是「插件能跑，但设置里找不到任何配置项」。
   const fields = Object.entries(Config.dict ?? {})
-  assert.equal(fields.length, 12, `应有 12 个字段，实际 ${fields.length}`)
+  assert.equal(fields.length, 10, `应有 10 个字段，实际 ${fields.length}`)
   const notVolatile = fields.filter(([, child]) => child.meta?.volatile !== true).map(([k]) => k)
   assert.deepEqual(notVolatile, [], `这些字段缺 .volatile()，会导致设置页不显示：${notVolatile.join(', ')}`)
   // 外层 object 不能也标 volatile（schemastery 会直接抛 ValidationError）
@@ -460,7 +462,7 @@ test('plainConfigValue：解包 volatile 引用（真实 Loader 路径）', () =
   assert.equal(plain.eventId, 7)
   assert.equal(plain.cookie, 'sessionid=z')
   assert.equal(plain.concurrency, 6)
-  assert.equal(plain.platform, 'lingxu', '未显式给的字段应拿到 schema 默认值')
+  assert.equal(plain.eventId, 7, '未显式给的字段应拿到 schema 默认值')
   // normalizeConfig 必须自己解包，否则读到的是 {}
   const norm = normalizeConfig(parsed)
   assert.equal(norm.baseUrl, 'https://y.com')
@@ -469,33 +471,31 @@ test('plainConfigValue：解包 volatile 引用（真实 Loader 路径）', () =
   assert.equal(norm.concurrency, 6)
 })
 
-test('Config schema：cookie/token 标了 role(secret)（跨线脱敏、只写输入）', () => {
+test('Config schema：cookie 标了 role(secret)（跨线脱敏、只写输入）', () => {
   const json = JSON.stringify(Config.toJSON())
-  assert.match(json, /secret/, 'cookie/token 必须是 role(secret)，否则设置页会明文回显凭据')
+  assert.match(json, /secret/, 'cookie 必须是 role(secret)，否则设置页会明文回显凭据')
+  assert.equal(Config.dict.cookie.meta?.role, 'secret')
 })
 
-test('configHasCredentials：凌虚需要 baseUrl + eventId + cookie', () => {
+test('configHasCredentials：需要 baseUrl + eventId + cookie', () => {
   assert.equal(configHasCredentials(normalizeConfig({})), false)
   assert.equal(configHasCredentials(normalizeConfig({ baseUrl: 'https://x.com' })), false, '缺 eventId/cookie')
   assert.equal(
     configHasCredentials(normalizeConfig({ baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })),
     true,
   )
-  assert.equal(
-    configHasCredentials(normalizeConfig({ platform: 'ctfd', baseUrl: 'https://x.com', token: 't' })),
-    true,
-    'CTFd 用 token 即可',
-  )
+  assert.equal(configHasCredentials(normalizeConfig({ baseUrl: 'https://x.com' })), false, '只有 baseUrl 不够')
 })
 
 test('normalizeConfig：新字段的边界处理', () => {
-  const c = normalizeConfig({ platform: 'CTFD', baseUrl: 'https://x.com///', eventId: '4', cookie: '  a=b  ' })
-  assert.equal(c.platform, 'ctfd')
+  const c = normalizeConfig({ baseUrl: 'https://x.com///', eventId: '4', cookie: '  a=b  ' })
   assert.equal(c.baseUrl, 'https://x.com', '去掉尾部斜杠')
   assert.equal(c.eventId, 4)
   assert.equal(c.cookie, 'a=b', '去掉首尾空白')
-  assert.equal(normalizeConfig({ platform: 'nope' }).platform, 'lingxu', '非法平台回退 lingxu')
   assert.equal(normalizeConfig({ eventId: -5 }).eventId, 0)
+  assert.equal(normalizeConfig({}).concurrency, 4, '默认并发 4')
+  assert.equal(normalizeConfig({ concurrency: 99 }).concurrency, 8, '并发上限 8')
+  assert.equal(normalizeConfig({ concurrency: 0 }).concurrency, 1, '并发下限 1')
 })
 
 test('apply：设置页填好配置后，无需 ctf_connect 也能解析连接', async () => {
@@ -550,14 +550,23 @@ test('默认导出必须携带 Config/inject/apply —— Loader 只认 default 
 
 // ────────────────────────────────────────────── 设置页配置读写接口
 
-test('describeConfigFields：12 个字段，含类型/说明/secret 标记/下拉选项', () => {
+test('describeConfigFields：10 个字段，含中文标签/类型/说明/secret 标记', () => {
   const fields = describeConfigFields()
-  assert.equal(fields.length, 12)
+  assert.equal(fields.length, 10)
   const byKey = Object.fromEntries(fields.map((f) => [f.key, f]))
 
-  assert.deepEqual(byKey.platform.options, ['lingxu', 'ctfd'], 'union-of-consts 应给出下拉选项')
   assert.equal(byKey.cookie.role, 'secret')
-  assert.equal(byKey.token.role, 'secret')
+  assert.equal(byKey.cookie.label, 'Cookie（sessionid）')
+  assert.equal(byKey.baseUrl.label, '平台地址')
+  assert.equal(byKey.eventId.label, '赛事 ID')
+  // 每个字段都必须有中文标签，否则设置页会显示英文 key
+  for (const f of fields) {
+    assert.equal(typeof f.label, 'string', `${f.key} 缺 label`)
+    assert.equal(f.label.length > 0, true)
+    // 标签必须区别于英文 key（否则设置页会显示 baseUrl / concurrency 这种）
+    assert.notEqual(f.label, f.key, `${f.key} 的 label 不能等于 key`)
+    assert.equal(f.label.length >= 2, true, `${f.key} 的 label 太短`)
+  }
   assert.equal(byKey.dedupeFlags.type, 'boolean')
   assert.equal(byKey.eventId.type, 'number')
   assert.equal(byKey.baseUrl.type, 'string')
