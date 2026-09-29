@@ -1091,7 +1091,10 @@ test('配置卡片：渲染 10 个字段，控件类型正确、标签中文化'
   const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
   await card.refresh()
 
-  assert.equal(countByClass(card.element, 'lx-config-field'), 10, '应渲染 10 个字段')
+  // 8 个输入型字段在网格里，2 个布尔开关单独一行（放进网格会把行撑高、复选框被居中）
+  assert.equal(countByClass(card.element, 'lx-config-field'), 8, '网格里应有 8 个输入型字段')
+  assert.equal(countByClass(card.element, 'lx-config-check'), 2, '开关行应有 2 个布尔项')
+  assert.equal(countByClass(card.element, 'lx-config-toggles'), 1, '应有独立的开关行容器')
   assert.equal(findByKey(card.element, 'eventId').type, 'number')
   assert.equal(findByKey(card.element, 'dedupeFlags').type, 'checkbox')
   assert.equal(findByKey(card.element, 'enableWebPanel').type, 'checkbox')
@@ -1372,4 +1375,47 @@ test('CSS 作用域：暗色主题变量同时覆盖面板与卡片', async () =
   const { api } = await loadClientModule()
   const css = api.panelCss()
   assert.match(css, /@media \(prefers-color-scheme:dark\)\{#lingxu-ctf-panel,\.lx-config\{/)
+})
+
+test('配置卡片：布局 —— 布尔独占开关行，workDir 占两列，网格固定三列', async () => {
+  const dom = createDom()
+  const { impl } = configFetch(configPayload())
+  const card = createConfigCard({ doc: dom.document, fetchImpl: impl })
+  await card.refresh()
+
+  const css = (await loadClientModule()).api.panelCss()
+
+  // 固定三列 + 顶部对齐：auto-fit 会让列宽/行高参差
+  assert.match(css, /\.lx-config-grid\{display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\);gap:14px 16px;align-items:start;\}/)
+  // 窄屏降级
+  assert.match(css, /@media \(max-width:760px\)\{\.lx-config-grid\{grid-template-columns:repeat\(2/)
+  assert.match(css, /@media \(max-width:520px\)\{\.lx-config-grid\{grid-template-columns:minmax\(0,1fr\)/)
+  // 开关行独立、带分隔线
+  assert.match(css, /\.lx-config-toggles\{display:flex;flex-wrap:wrap;align-items:center;gap:8px 22px;padding-top:12px;border-top:1px solid var\(--lx-border\);\}/)
+  assert.match(css, /\.lx-config-toggles:empty\{display:none;\}/, '没有开关时不留空行')
+  // 开关项必须左对齐的 inline-flex，不能是会被拉伸的块
+  assert.match(css, /\.lx-config-check\{display:inline-flex;align-items:center;/)
+  // workDir 占两列（与 timeoutMs 凑满一行）
+  assert.match(css, /\.lx-config-field\.lx-span-2\{grid-column:span 2;\}/)
+
+  // DOM 结构：开关在 toggles 里，且网格里不含布尔
+  const byClass = (root, cls) => {
+    const stack = [root]
+    while (stack.length > 0) {
+      const node = stack.pop()
+      if (node && String(node.className || '').split(/\s+/).includes(cls)) return node
+      for (const child of (node && node.children) || []) stack.push(child)
+    }
+    return null
+  }
+  const grid = byClass(card.element, 'lx-config-grid')
+  const toggles = byClass(card.element, 'lx-config-toggles')
+  assert.ok(grid && toggles, 'grid 与 toggles 都应存在')
+  const gridKeys = (grid.children || []).map((c) => (c.children || []).find((n) => n.tagName === 'INPUT')?.name).filter(Boolean)
+  assert.equal(gridKeys.includes('dedupeFlags'), false, '布尔不应出现在网格里')
+  assert.equal(gridKeys.includes('enableWebPanel'), false, '布尔不应出现在网格里')
+  const toggleKeys = (toggles.children || []).map((c) => (c.children || []).find((n) => n.tagName === 'INPUT')?.name)
+  assert.deepEqual(toggleKeys, ['dedupeFlags', 'enableWebPanel'])
+
+  card.destroy()
 })
