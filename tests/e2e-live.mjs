@@ -145,9 +145,14 @@ check('重复 flag 被去重拦截（未打到平台）', /已提交|重复|alre
 
 // ── 8. ctf_solve_start 在无 agentTeams 时给出清晰报错 ────────────────
 console.log('\n── ctf_solve_start（无 agentTeams 服务）')
-// 设计约定：编排前置条件不满足时返回可读文本（模型能直接照做），而不是抛异常
-const solveMsg = String(await tool('ctf_solve_start').execute({ limit: 2 }, exec))
-check('缺 agentTeams 时给出可读说明', /Agent Teams|agentTeams|Lead|调用/.test(solveMsg), solveMsg.slice(0, 110))
+// 设计约定：编排类工具在前置条件不满足时**硬失败**（抛异常），错误文案必须可读可照做
+let solveMsg = ''
+try {
+  solveMsg = String(await tool('ctf_solve_start').execute({ limit: 2 }, exec))
+} catch (error) {
+  solveMsg = error?.message ?? String(error)
+}
+check('缺 agentTeams 时给出可读说明', /Agent Teams|agentTeams|orchestrator|Lead|调用/.test(solveMsg), solveMsg.slice(0, 110))
 
 // ── 9. Web 面板快照 ──────────────────────────────────────────────────
 console.log('\n── /lingxu-ctf/state 快照')
