@@ -2468,7 +2468,7 @@ test('环境模型：env 字段缺失 / 垃圾输入不崩，且 known=false（�
 })
 
 test('环境模型：limit/held/free 推导与「已满」判定', () => {
-  assert.deepEqual(normalizeEnv({ limit: 2, held: 1, free: 1 }), { known: true, limit: 2, held: 1, free: 1, full: false })
+  assert.deepEqual(normalizeEnv({ limit: 2, held: 1, free: 1 }), { known: true, limit: 2, held: 1, free: 1, full: false, blocked: false })
   assert.equal(normalizeEnv({ limit: 2, held: 2, free: 0 }).full, true)
   // free 缺失时用 limit - held 推导
   assert.equal(normalizeEnv({ limit: 3, held: 1 }).free, 2)
@@ -2802,4 +2802,25 @@ test('★ 视图组件标识必须稳定（否则宿主每次重渲染都会重�
   const second = api.reactCtfViewHost(react, {})
   assert.equal(typeof first.type, 'function', 'slot 必须返回元素（type 是组件），不是组件函数本身')
   assert.equal(first.type, second.type, '两次调用的组件类型必须同一标识')
+})
+
+test('环境配额：blocked（平台侧已满）比本地计数可信', async () => {
+  const { api } = await loadClientModule()
+
+  // 老宿主没有该字段 → blocked:false，不瞎猜
+  assert.equal(api.normalizeEnv({ limit: 2, held: 0, free: 2 }).blocked, false)
+  assert.equal(api.normalizeEnv({ limit: 2, held: 0, free: 2, blocked: true }).blocked, true)
+  assert.equal(api.normalizeEnv(null).blocked, false)
+
+  // 真实场景：本地 0/2 但平台报过超限 → chip 必须说出来，
+  // 否则用户会困惑「明明空着为什么起不来」（别的会话/人工起的实例我们看不见）
+  const state = normalizeState({
+    ok: true, configured: true,
+    connection: { key: 'k', platform: 'lingxu', baseUrl: 'https://x', eventId: 4 },
+    env: { limit: 2, held: 0, free: 2, blocked: true },
+    challenges: [], submissions: [], theory: [], leaderboard: [], stats: {},
+  })
+  const html = renderViewMetaHtml({ state, team: normalizeTeam(null), board: [], reports: normalizeReports(null) })
+  assert.match(html, /平台已满/, 'blocked 时 chip 应明说「平台已满」')
+  assert.match(html, /lx-chip-warn/, '并高亮')
 })

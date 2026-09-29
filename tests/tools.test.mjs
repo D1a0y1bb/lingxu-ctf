@@ -2102,3 +2102,20 @@ test('赛段上报：ctf_status / ctf_session 把 eventSummary 原对象交给�
   assert.match(await notFn.tools.ctf_status.execute({}), /📊 赛事总览/)
   await new Promise((resolve) => setTimeout(resolve, 10)) // 让异步 rejection 走完，确认没有 unhandled rejection 崩测试
 })
+
+
+test('isEnvLimitError：兜底识别「请释放后启动」半句文案', async () => {
+  const { isEnvLimitError } = await import('../lib/tools.js')
+  // 完整版
+  assert.equal(isEnvLimitError({ code: 'env-limit' }), true)
+  assert.equal(
+    isEnvLimitError({ platformMessage: '当前赛事限制启动2个题目环境，请释放后启动' }),
+    true,
+  )
+  // 兜底：某些平台版本可能只剩后半句 —— reviewer 指出这种文案下 agent 会卡在裸「启动失败」
+  assert.equal(isEnvLimitError({ platformMessage: '环境不足，请释放后启动' }), true)
+  assert.equal(isEnvLimitError({ message: 'please 请释放后启动 now' }), true)
+  // 不能误判
+  assert.equal(isEnvLimitError({ platformMessage: '该题目没有选择对应的环境，请联系管理员。' }), false)
+  assert.equal(isEnvLimitError(null), false)
+})
