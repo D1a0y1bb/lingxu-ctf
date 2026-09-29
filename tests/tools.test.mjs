@@ -176,10 +176,10 @@ const callsOf = (adapter, method) => adapter.calls.filter((call) => call.method 
 
 // ------------------------------------------------------------------ 规格形状
 
-test('导出 13 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
+test('导出 14 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
   const { specs, tools } = createHarness()
-  assert.equal(specs.length, 13)
-  assert.equal(TOOL_NAMES.length, 13)
+  assert.equal(specs.length, 14)
+  assert.equal(TOOL_NAMES.length, 14)
   assert.deepEqual(specs.map((spec) => spec.name), TOOL_NAMES)
   assert.deepEqual(Object.keys(tools).sort(), [...TOOL_NAMES].sort())
   for (const spec of specs) {
@@ -194,8 +194,8 @@ test('导出 13 个工具规格，名字与 TOOL_NAMES 一致且形状符合 def
 })
 
 test('buildToolSpecs() 无 deps 也能构造全部规格（执行时才需要依赖）', () => {
-  assert.equal(buildToolSpecs().length, 13)
-  assert.equal(buildToolSpecs({}).length, 13)
+  assert.equal(buildToolSpecs().length, 14)
+  assert.equal(buildToolSpecs({}).length, 14)
 })
 
 // ------------------------------------------------------------------ 连接解析失败
@@ -1234,7 +1234,7 @@ test('ctf_connect：cookie 缺 csrftoken 只提醒不拒绝', async () => {
   assert.match(out, /^✅ 已连接凌虚赛事平台/)
   assert.match(out, /建议把 csrftoken 一起带上/)
   assert.match(out, /不强制/)
-  assert.ok(specs.length === 13)
+  assert.ok(specs.length === 14)
 
   const withCsrf = await tools.ctf_connect.execute({
     baseUrl: 'https://example.com:8000',
@@ -1282,4 +1282,129 @@ test('ctf_submit_flag：非 session 的 403 仍保留「结果未知」措辞', 
     assert.doesNotMatch(error.message, /sessionid 已失效/)
     return true
   })
+})
+
+// ------------------------------------------------------------------ task-14：ctf_session 探活
+
+/** 平台 session 失效的真实回包形状（HTTP 403 + {"detail":"未登录"}）。 */
+function sessionExpiredError() {
+  return new LingxuError('凌虚 GET /event/4/info/ 未登录（HTTP 403）：未登录', {
+    httpStatus: 403,
+    code: LINGXU_CODES.SESSION_EXPIRED,
+    platformMessage: '未登录',
+  })
+}
+
+test('工具数 13 → 14：TOOL_NAMES 含 ctf_session，参数只有 connection', () => {
+  assert.equal(TOOL_NAMES.length, 14)
+  assert.ok(TOOL_NAMES.includes('ctf_session'))
+  const { tools } = createHarness()
+  assert.deepEqual(Object.keys(tools.ctf_session.parameters), ['connection'])
+  assert.match(tools.ctf_session.description, /sessionid 是否还有效/)
+  assert.match(tools.ctf_session.description, /ctf_solve_start/)
+  assert.match(tools.ctf_session.description, /403|未登录/)
+})
+
+test('ctf_session：会话有效 → 用户 / 赛事剩余时间 / Cookie 摘要', async () => {
+  const adapter = createAdapter()
+  // 真实 eventSummary 的 user 来自 /event/{id}/info/，带 username 与 number
+  adapter.eventSummary = async () => ({
+    name: '凌虚测试赛',
+    startTime: '2026-09-29T00:00:00Z',
+    endTime: '2026-09-30T00:00:00Z',
+    user: { username: 'alice', number: 42 },
+    remainingSeconds: 7200,
+  })
+  const out = await createHarness({ adapter }).tools.ctf_session.execute({})
+
+  assert.match(out, /^✅ 凌虚会话有效（sessionid 可用，平台已响应）/)
+  assert.match(out, /- 连接: lingxu:example\.com:8000:4/)
+  assert.match(out, /- 平台地址: https:\/\/example\.com:8000（赛事 ID 4）/)
+  assert.match(out, /- 登录用户: alice（编号 42）/)
+  assert.match(out, /- 赛事: 凌虚测试赛.*，剩余 2h/)
+  assert.match(out, /- Cookie: sessio…ue \(len=54\)/)
+  assert.ok(!out.includes('csrf-token-value'), '不得回显完整 Cookie')
+})
+
+test('ctf_session：session 失效 → 完整更新指引（含连接与平台返回）', async () => {
+  const adapter = createAdapter({
+    eventSummary: async () => {
+      throw sessionExpiredError()
+    },
+  })
+  const out = await createHarness({ adapter }).tools.ctf_session.execute({})
+
+  assert.match(out, /^❌ 凌虚 sessionid 已失效，请重新登录平台后复制新的 Cookie，/)
+  assert.match(out, /再用 ctf_connect \{ baseUrl, eventId, cookie \} 更新（其余配置会保留）。/)
+  assert.match(out, /- 连接: lingxu:example\.com:8000:4/)
+  assert.match(out, /- 平台返回: 未登录/)
+  assert.doesNotMatch(out, /✅/)
+})
+
+test('ctf_session：其他失败 → 可读错误（不误报 session 失效）', async () => {
+  const adapter = createAdapter({
+    eventSummary: async () => {
+      throw new Error('凌虚 GET /event/4/ HTTP 502：Bad Gateway')
+    },
+  })
+  const out = await createHarness({ adapter }).tools.ctf_session.execute({})
+  assert.match(out, /^❌ 凌虚 GET \/event\/4\/ HTTP 502/)
+  assert.doesNotMatch(out, /sessionid 已失效/)
+})
+
+test('ctf_session：适配器没有 eventSummary 时退回 validate()', async () => {
+  const adapter = createAdapter({ eventSummary: undefined })
+  const out = await createHarness({ adapter }).tools.ctf_session.execute({})
+  assert.match(out, /^✅ 凌虚会话有效/)
+  assert.match(out, /- 登录用户: alice/)
+  assert.equal(callsOf(adapter, 'validate').length, 1)
+})
+
+// ------------------------------------------------------------------ task-14：start 前置探活（跨模块，真实 orchestrate）
+
+test('跨模块集成：session 失效时 ctf_solve_start 不建任务、不 spawn', async () => {
+  const store = await makeStore()
+  await store.upsertConnection(CONNECTION)
+
+  const teamsCalls = { spawn: [], createTask: [] }
+  const teams = {
+    async spawnTeammate(caller, request) {
+      teamsCalls.spawn.push({ caller, name: request.name })
+      return { name: request.name, role: 'teammate', status: 'provisioning' }
+    },
+    async createTask(caller, request) {
+      teamsCalls.createTask.push(request)
+      return { id: `task-${teamsCalls.createTask.length}`, revision: 1, status: 'pending', ...request }
+    },
+    async listTasks() { return [] },
+    async listMembers() { return [{ name: 'lead', role: 'lead', status: 'running' }] },
+    async interrupt(caller, name) { return { previousStatus: 'running', name } },
+  }
+
+  const adapter = createAdapter({
+    validate: async () => {
+      throw sessionExpiredError()
+    },
+  })
+  const deps = {
+    config: { concurrency: 4, maxWrongAttempts: 0, dedupeFlags: true },
+    store,
+    resolveAdapter: async () => ({ adapter, connection: CONNECTION }),
+    createAdapter: () => adapter,
+    logger: { info() {}, warn() {}, error() {} },
+    now: () => Date.parse('2026-09-29T01:00:00Z'),
+    teams,
+  }
+  deps.orchestrator = createOrchestrator(deps)
+  const tools = Object.fromEntries(buildToolSpecs(deps).map((spec) => [spec.name, spec]))
+  const agent = { id: 'agent-lead', name: 'lead' }
+  const signal = new AbortController().signal
+
+  const out = await tools.ctf_solve_start.execute({ concurrency: 4 }, { agent, signal })
+  assert.match(out, /无法开始：凌虚 sessionid 已失效（平台返回「未登录」）。/)
+  assert.match(out, /再用 ctf_connect \{ baseUrl, eventId, cookie \} 更新/)
+  assert.match(out, /本次未创建任何任务、未拉起任何 agent。/)
+  assert.equal(teamsCalls.createTask.length, 0, '不得建任务')
+  assert.equal(teamsCalls.spawn.length, 0, '不得 spawn')
+  assert.equal(callsOf(adapter, 'challenges').length, 0, '探活失败就不该再拉题目列表')
 })

@@ -26,7 +26,10 @@ import {
   parseTaskSubject,
   pathSlug,
   sanitizeSlug,
+  probeSession,
   selectChallenges,
+  sessionExpiredStartText,
+  SESSION_EXPIRED_BANNER,
   taskSubjectFor,
   teammateNameFor,
   writeScopeFor,
@@ -34,6 +37,7 @@ import {
 import { CtfStore } from '../lib/store.js'
 import { slugify as indexSlugify } from '../lib/index.js'
 import { buildToolSpecs } from '../lib/tools.js'
+import { LingxuError, LINGXU_CODES } from '../lib/lingxu.js'
 
 const CONNECTION = {
   key: 'lingxu:host:8000:4',
@@ -1286,4 +1290,166 @@ test('config.concurrency 作为默认值，非法值回退 4', async () => {
   })
   await ob.orchestrator.start({ __agent: AGENT })
   assert.equal(b.calls.spawn.length, LIMITS.defaultConcurrency)
+})
+
+// ---------------------------------------------------------------- task-14：session 前置探活
+
+/** 平台 session 失效的真实回包形状（HTTP 403 + {"detail":"未登录"}）。 */
+function sessionExpiredError() {
+  return new LingxuError('凌虚 GET /event/4/info/ 未登录（HTTP 403）：未登录', {
+    httpStatus: 403,
+    code: LINGXU_CODES.SESSION_EXPIRED,
+    platformMessage: '未登录',
+  })
+}
+
+test('probeSession：区分 session-expired / 其他错误 / 无法探活', async () => {
+  assert.deepEqual(await probeSession(null), { checked: false, sessionExpired: false, error: null, warning: null })
+  assert.deepEqual(await probeSession({}), { checked: false, sessionExpired: false, error: null, warning: null })
+
+  const ok = await probeSession({ async validate() { return { ok: true } } })
+  assert.equal(ok.checked, true)
+  assert.equal(ok.sessionExpired, false)
+  assert.equal(ok.warning, null)
+
+  const expired = await probeSession({ async validate() { throw sessionExpiredError() } })
+  assert.equal(expired.checked, true)
+  assert.equal(expired.sessionExpired, true)
+  assert.equal(expired.warning, null)
+
+  const other = await probeSession({ async validate() { throw new Error('请求超时（30000ms）') } })
+  assert.equal(other.sessionExpired, false)
+  assert.match(other.warning.message, /超时/)
+
+  // 没有 validate() 时退回 eventSummary()
+  const fallback = await probeSession({ async eventSummary() { throw sessionExpiredError() } })
+  assert.equal(fallback.sessionExpired, true)
+
+  // 文案在缺 baseUrl 时也要通顺（没有多余空格）
+  assert.match(sessionExpiredStartText(''), /请重新登录平台后复制新的 Cookie/)
+  assert.match(sessionExpiredStartText('  '), /请重新登录平台后复制新的 Cookie/)
+  assert.match(sessionExpiredStartText('https://x:8000'), /请重新登录 https:\/\/x:8000 后复制新的 Cookie/)
+})
+
+test('start 前置探活：session 失效 → 不建任务、不 spawn，返回更新 Cookie 指引', async () => {
+  const store = await makeStore()
+  const { teams, calls, taskList } = makeTeams()
+  const adapter = {
+    async validate() { throw sessionExpiredError() },
+    async challenges() { throw new Error('探活已判定失效，不应再拉题目列表') },
+  }
+  const { orchestrator } = await makeOrchestrator({ teams, store, adapterOverride: adapter })
+  const out = await orchestrator.start({ __agent: AGENT })
+
+  assert.equal(calls.createTask.length, 0, '不得创建任何任务')
+  assert.equal(calls.spawn.length, 0, '不得拉起任何 agent')
+  assert.equal(taskList.length, 0)
+  assert.equal(out, sessionExpiredStartText(CONNECTION.baseUrl))
+  assert.match(out, /无法开始：凌虚 sessionid 已失效（平台返回「未登录」）。/)
+  assert.match(out, /https:\/\/host:8000/, '文案里要有平台地址，用户直接去登录')
+  assert.match(out, /ctf_connect \{ baseUrl, eventId, cookie \}/)
+  assert.match(out, /未创建任何任务、未拉起任何 agent/)
+
+  // 面板「协同交流」留痕（不写入平台，仅本地 store）
+  const messages = await store.listTeamMessages(CONNECTION.key)
+  assert.ok(messages.some((m) => /sessionid 已失效/.test(m.text ?? '')), '应有 session 失效记录')
+})
+
+test('start 前置探活：网络抖动等其他错误 → 只警告并继续编排', async () => {
+  const challenges = [makeChallenge({ id: 1, name: 'web-1' })]
+  const { teams, calls } = makeTeams()
+  const adapter = {
+    async validate() { throw new Error('凌虚 GET /event/4/info/ 请求超时（30000ms）') },
+    async challenges() { return challenges },
+  }
+  const { orchestrator } = await makeOrchestrator({
+    teams,
+    adapterOverride: adapter,
+    config: { concurrency: 1 },
+  })
+  const out = await orchestrator.start({ __agent: AGENT })
+
+  assert.match(out, /## 编排已启动/)
+  assert.match(out, /前置探活失败但已继续/)
+  assert.match(out, /请求超时/)
+  assert.equal(calls.createTask.length, 1, '抖动不应阻断编排')
+  assert.equal(calls.spawn.length, 1)
+})
+
+test('start 前置探活：优先 validate()（1 次请求），不额外拉 eventSummary', async () => {
+  const probed = { validate: 0, eventSummary: 0 }
+  const adapter = {
+    async validate() { probed.validate += 1; return { ok: true } },
+    async eventSummary() { probed.eventSummary += 1; return { name: 'x' } },
+    async challenges() { return [makeChallenge({ id: 1 })] },
+  }
+  const { teams } = makeTeams()
+  const { orchestrator } = await makeOrchestrator({ teams, adapterOverride: adapter, config: { concurrency: 1 } })
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(probed.validate, 1)
+  assert.equal(probed.eventSummary, 0)
+})
+
+test('start 前置探活：适配器没有 validate/eventSummary 时跳过探活，照常编排（回归）', async () => {
+  const { teams, calls } = makeTeams()
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [makeChallenge({ id: 1 })],
+    teams,
+    config: { concurrency: 1 },
+  })
+  const out = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 1)
+  assert.doesNotMatch(out, /前置探活失败/)
+})
+
+// ---------------------------------------------------------------- task-14：status 失效横幅
+
+test('status：session 失效 → 顶部 🛑 横幅 + 统计「⚠️ 会话失效」，且不自动中断 agent', async () => {
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    { name: 'solver-web-1', role: 'teammate', status: 'running' },
+  ]
+  const { teams, calls } = makeTeams({ members })
+  const challenges = [makeChallenge({ id: 1, name: 'web-1' })]
+  const adapter = {
+    async validate() { return { ok: true } },
+    async challenges() { return challenges },
+  }
+  const { orchestrator } = await makeOrchestrator({
+    teams,
+    adapterOverride: adapter,
+    challenges,
+    config: { concurrency: 2 }, // 已有 1 个 running teammate，留 1 个名额给本轮 spawn
+  })
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 1)
+
+  // 比赛进行中 session 失效
+  adapter.challenges = async () => { throw sessionExpiredError() }
+  const report = await orchestrator.status({ __agent: AGENT })
+
+  assert.ok(report.startsWith(SESSION_EXPIRED_BANNER), `横幅必须在最顶部：\n${report.slice(0, 120)}`)
+  assert.match(report, /所有 agent 的提交都会失败，flag 会丢失/)
+  assert.match(report, /请立即更新 Cookie（ctf_connect），然后重新 ctf_solve_start/)
+  assert.match(report, /- 平台：⚠️ 会话失效/)
+  assert.doesNotMatch(report, /- 平台：已解 0 \/ 共 1 题/, '失效时不再显示正常平台统计')
+  assert.match(report, /ctf_solve_stop/, '要在文案里明确建议怎么停手')
+  assert.equal(calls.interrupt.length, 0, '不得自动 interrupt 任何 agent')
+  // 任务板/成员数字仍然照常显示（本地数据可用）
+  assert.match(report, /任务板：共 1/)
+  assert.match(report, /running 1/)
+})
+
+test('status：session 正常的非失效错误仍走原有降级文案（回归）', async () => {
+  const { teams } = makeTeams()
+  const adapter = {
+    async validate() { return { ok: true } },
+    async challenges() { throw new Error('HTTP 502 Bad Gateway') },
+  }
+  const { orchestrator } = await makeOrchestrator({ teams, adapterOverride: adapter })
+  const report = await orchestrator.status({ __agent: AGENT })
+  assert.match(report, /^## 团队进度/)
+  assert.match(report, /平台题目列表获取失败/)
+  assert.match(report, /502/)
+  assert.doesNotMatch(report, /sessionid 已失效/)
 })

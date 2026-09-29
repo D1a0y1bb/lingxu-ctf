@@ -82,7 +82,7 @@ const ctx = {
 console.log(`平台 ${BASE}  event ${EVENT}  状态目录 ${home}\n`)
 apply(ctx, { workDir: path.join(home, 'work'), concurrency: 4 })
 
-check('插件加载并注册 13 个工具', collected.tools.length === 13, `实际 ${collected.tools.length}`)
+check('插件加载并注册 14 个工具', collected.tools.length === 14, `实际 ${collected.tools.length}`)
 check('注册系统提示词', collected.sections.length === 1)
 check('注册 Web 路由', collected.routes.some((r) => r.path === '/lingxu-ctf/state'))
 check('注册斜杠命令', collected.commands.length === 1)
@@ -99,6 +99,13 @@ const connectText = await tool('ctf_connect').execute(
 check('连接成功（返回里含用户名）', /xiyi|已连接|连接成功/.test(connectText), connectText.split('\n')[0].slice(0, 90))
 check('返回里不回显完整 cookie', !connectText.includes(cookie), '凭据已脱敏')
 check('提示 punish 扣分风险', /punish|扣分/.test(connectText))
+
+// ── 1b. ctf_session（session 探活，只读）─────────────────────────────
+console.log('\n── ctf_session')
+const sessionText = await tool('ctf_session').execute({}, exec)
+check('会话探活成功', /^✅ 凌虚会话有效/.test(sessionText), sessionText.split('\n')[0].slice(0, 90))
+check('输出含剩余时间与 Cookie 摘要', /剩余|Cookie:/.test(sessionText))
+check('探活不回显完整 cookie', !sessionText.includes(cookie), '凭据已脱敏')
 
 // ── 2. ctf_status ────────────────────────────────────────────────────
 console.log('\n── ctf_status')

@@ -106,9 +106,9 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.deepEqual(inject, ['tools'])
 
   const names = ctx._collected.tools.map((t) => t.name).sort()
-  assert.equal(names.length, 13, `应注册 13 个工具，实际 ${names.length}: ${names.join(',')}`)
+  assert.equal(names.length, 14, `应注册 14 个工具，实际 ${names.length}: ${names.join(',')}`)
   for (const expected of [
-    'ctf_connect', 'ctf_status', 'ctf_challenges', 'ctf_challenge', 'ctf_start_env',
+    'ctf_connect', 'ctf_session', 'ctf_status', 'ctf_challenges', 'ctf_challenge', 'ctf_start_env',
     'ctf_release_env', 'ctf_submit_flag', 'ctf_leaderboard', 'ctf_theory',
     'ctf_solve_start', 'ctf_solve_status', 'ctf_solve_stop', 'ctf_writeup',
   ]) {
@@ -148,13 +148,13 @@ test('apply: enableWebPanel=false 时不注册路由', () => {
   apply(ctx, { workDir: '/tmp/lingxu-test', enableWebPanel: false })
   assert.equal(ctx._collected.routes.length, 0)
   assert.equal(ctx._collected.taps.length, 0)
-  assert.equal(ctx._collected.tools.length, 13, '工具不受面板开关影响')
+  assert.equal(ctx._collected.tools.length, 14, '工具不受面板开关影响')
 })
 
 test('apply: 无 agentTeams 服务时仍能加载（编排工具给出清晰报错）', () => {
   const ctx = mockCtx() // services 里没有 agentTeams
   apply(ctx, { workDir: '/tmp/lingxu-test' })
-  assert.equal(ctx._collected.tools.length, 13)
+  assert.equal(ctx._collected.tools.length, 14)
 })
 
 /**
@@ -188,7 +188,7 @@ test('apply: 在 Cordis 严格 Proxy 上下文下不触碰未 inject 的 service
   // 真实场景：插件行挂在 profile 层，没有 ambient agent / systemPrompt / webServer 等
   const ctx = strictCordisCtx({}) // 所有 service 都缺失
   assert.doesNotThrow(() => apply(ctx, {}), '不得因读取未声明的 service 而炸掉加载')
-  assert.equal(ctx._collected.tools.length, 13, '工具仍应全部注册')
+  assert.equal(ctx._collected.tools.length, 14, '工具仍应全部注册')
 })
 
 test('apply: 严格 Proxy + 完整 service 时正常装配', () => {
@@ -259,7 +259,7 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   const ctx = injectAwareCtx({}) // 一开始什么服务都没有
   apply(ctx, { workDir: '/tmp/lingxu-test' })
 
-  assert.equal(ctx._collected.tools.length, 13, '工具只依赖 tools，立即可用')
+  assert.equal(ctx._collected.tools.length, 14, '工具只依赖 tools，立即可用')
   assert.deepEqual(
     ctx._collected.injected.map((d) => d[0]).sort(),
     ['agentTeams', 'commands', 'systemPrompt', 'webServer'],
@@ -323,7 +323,7 @@ test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延�
 test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替身兼容）', () => {
   const ctx = mockCtx({ agentTeams: { spawnTeammate() {}, createTask() {}, listTasks() {}, listMembers() {} } })
   assert.doesNotThrow(() => apply(ctx, { workDir: '/tmp/lingxu-test' }))
-  assert.equal(ctx._collected.tools.length, 13)
+  assert.equal(ctx._collected.tools.length, 14)
   assert.equal(ctx._collected.sections.length, 1)
   assert.equal(ctx._collected.routes.some((r) => r.path === '/lingxu-ctf/state'), true)
 })
@@ -331,7 +331,7 @@ test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替�
 test('apply: 工具可通过 dispose 注销', () => {
   const ctx = mockCtx()
   apply(ctx, { workDir: '/tmp/lingxu-test' })
-  assert.equal(ctx._collected.tools.length, 13)
+  assert.equal(ctx._collected.tools.length, 14)
   ctx._disposeAll()
   assert.equal(ctx._collected.tools.length, 0)
 })

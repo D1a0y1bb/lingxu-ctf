@@ -9,14 +9,14 @@
 | 平台支持 | **只支持凌虚赛事平台**（`sessionid` Cookie 认证） |
 | 依赖 | 零第三方依赖：只用 Node 内置能力 + DSH 官方 `@deepseek-ai/schemastery`（配置表单 schema），无构建步骤 |
 | 安装 | 用 `plugin_manager` 装 bundle：本地目录 `file:<你的插件目录>` / tarball / npm 包名 |
-| 提供 | 13 个 `ctf_*` 工具 · 「CTF 解题模式」agent 预设 · Web 界面（顶部「CTF」视图 tab + 设置页配置卡片；右下角浮动面板可选，默认关闭） |
+| 提供 | 14 个 `ctf_*` 工具 · 「CTF 解题模式」agent 预设 · Web 界面（顶部「CTF」视图 tab + 设置页配置卡片；右下角浮动面板可选，默认关闭） |
 
 ## 目录
 
 - [功能一览](#功能一览)
 - [安装](#安装)
 - [怎么用（5 步跑起来）](#怎么用5-步跑起来)
-- [工具清单（13 个）](#工具清单13-个)
+- [工具清单（14 个）](#工具清单14-个)
 - [「CTF 解题模式」预设](#ctf-解题模式预设)
 - [配置项（11 项）](#配置项11-项)
 - [Web 界面](#web-界面)
@@ -85,7 +85,7 @@ profile 的 **bundle 列表在启动时读取**，安装后不会热生效：
 列出你当前可用的 ctf_* 工具
 ```
 
-应能看到 13 个 `ctf_*` 工具；设置页里也会多出 `dsh-lingxu-ctf` 的配置卡片
+应能看到 14 个 `ctf_*` 工具；设置页里也会多出 `dsh-lingxu-ctf` 的配置卡片
 （见 [怎么用](#怎么用5-步跑起来) 第 2 步）。
 
 ---
@@ -187,13 +187,14 @@ sessionid=你的值; csrftoken=你的值
 
 ---
 
-## 工具清单（13 个）
+## 工具清单（14 个）
 
 这些工具由插件注册，agent 会自动调用；你也可以在会话里直接点名要求。
 
 | 工具名 | 作用 | 参数 |
 |---|---|---|
 | `ctf_connect` | 保存平台连接（多赛事切换时用；设置页填过可省） | `baseUrl`、`eventId`、`cookie`、`label` |
+| `ctf_session` | **探活**：检查 sessionid 是否还有效（开赛前 / 提交报 403 后先跑这个） | `connection` |
 | `ctf_status` | 赛事总览：名称 / 时间 / 我的分数排名 / 已解 / 待解 / 理论题状态 | `connection` |
 | `ctf_challenges` | 题目列表，按分类 / 状态 / 分值过滤 | `category`、`solved`、`minScore`、`limit`、`connection` |
 | `ctf_challenge` | 单题详情：题面 Markdown + 附件下载 + 连接信息 | `id`、`download`、`connection` |
@@ -464,7 +465,7 @@ lib/lingxu.js      平台客户端（纯 fetch，零依赖）
 lib/platforms.js   平台适配器注册表（只注册 lingxu）
 lib/store.js       连接配置 + 提交审计 + 解题进度持久化
 lib/toolkit.js     零依赖的 defineTool 兼容实现（参数 DSL → JSON Schema + 校验）
-lib/tools.js       13 个模型可见工具
+lib/tools.js       14 个模型可见工具
 lib/orchestrate.js Agent Teams 并发编排
 lib/writeup.js     WP 生成与提交
 lib/client.js      Web 界面（浏览器半：顶部「CTF」视图 tab + 配置卡片 + 浮动面板）
