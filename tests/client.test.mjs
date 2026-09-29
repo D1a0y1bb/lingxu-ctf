@@ -2832,20 +2832,29 @@ test('★ 门控：sessions 服务迟到 → 先始终显示，上线后自动�
   assert.deepEqual(disposed, ['ctf', 'ctf'])
 })
 
-test('★ package.json：dsh.client.inject 必须含 ui-conversation（门控失效的根因）', async () => {
-  // 背景（task-24 真实事故）：inject 里少了 @deepseek-ai/dsh-client-ui-conversation，
-  // 客户端 boot graph 就不会组装那一行 → `sessions` 服务不存在 → registerCtfView 走
-  // 「拿不到 sessions → 始终注册」的降级 → **CTF tab 在任何模式下都出现**。
-  // 这个用例专门防止「清理未使用依赖」时把它删掉（它看起来没被 import 使用）。
+test('★ package.json：dsh.client.inject 必须是「真实存在的」graph 行（门控失效的根因）', async () => {
+  // 背景（两次真实事故）：
+  //   ① task-24：inject 里少了 ui-conversation → boot graph 不组装那一行 → `sessions` 不存在
+  //      → registerCtfView 走「拿不到 sessions → 始终注册」→ **CTF tab 在任何模式下都出现**；
+  //   ② 上游 issue：曾写了 **@deepseek-ai/dsh-client-runtime**，但该包在 DSH 0.2.0-rc.1
+  //      **根本不存在**（正确名是 @deepseek-ai/dsh-client-modules）。而 dsh-client-modules 对
+  //      解析不到的包名是 `if (dependency !== undefined)` **直接跳过、不警告也不抛错**
+  //      → 等于没声明，门控照样静默降级。**包名写错和漏写一样致命，但更难发现。**
+  //
+  // 所以这条用例断言：① 三个必需的包都在；② **不得残留已知不存在的包名**。
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   const inject = pkg?.dsh?.client?.inject
   assert.ok(Array.isArray(inject), 'dsh.client.inject 必须是数组')
   for (const required of [
-    '@deepseek-ai/dsh-client-runtime',
+    '@deepseek-ai/dsh-client-modules',
     '@deepseek-ai/dsh-client-ui-conversation',
     '@deepseek-ai/dsh-client-locale',
   ]) {
     assert.ok(inject.includes(required), `inject 必须包含 ${required}（否则会话门控会静默降级）`)
+  }
+  // 已知在 DSH 0.2.0-rc.1 不存在的包名 —— 写进去等于没写，且不会有任何报错
+  for (const bogus of ['@deepseek-ai/dsh-client-runtime']) {
+    assert.ok(!inject.includes(bogus), `inject 不得包含 ${bogus}：该包在目标宿主不存在，声明了也会被静默忽略`)
   }
   // 必须留下「为什么不能删」的说明
   const why = String(pkg?.dsh?.client?.injectWhy ?? '')
@@ -3490,4 +3499,29 @@ test('环境配额：blocked（平台侧已满）比本地计数可信', async (
   const html = renderViewMetaHtml({ state, team: normalizeTeam(null), board: [], reports: normalizeReports(null) })
   assert.match(html, /平台已满/, 'blocked 时指标行应明说「平台已满」')
   assert.match(html, /lx-vmetric-warn/, '并高亮')
+})
+
+test('★ 回归：createConfigCard 必须自行注入样式表（不依赖视图/悬浮面板的 mount）', async () => {
+  // 真实事故（v1.0.3 及之前）：配置卡片的三个入口（React slot / 纯 DOM 回退 / 直接调用）
+  // 都不经过 CTF 视图或悬浮面板的 mount()，而样式原先只在那两处 ensureStyles()。
+  // 结果「设置 → 内置插件 → dsh-lingxu-ctf」的表单是裸 DOM：栅格塌陷、标签与输入框重叠。
+  //
+  // 为什么旧测试没抓到：全文件 18 处引用 panelCss() 全是「把 CSS 当字符串检查」，
+  // 从来没有断言它**进入了 DOM**。这条补上那个缺口。
+  const dom = createDom()
+  const { api } = await loadClientModule()
+  const card = api.createConfigCard({ doc: dom.document, fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, fields: [], values: {}, secretsSet: {} }) }) })
+
+  const styles = [...dom.document.head.children].filter((n) => n.tagName === 'STYLE' && (n.attrs?.['data-plugin-css'] || n.dataset?.pluginCss))
+  assert.equal(styles.length, 1, `配置卡片必须注入自己的样式表，实际 ${styles.length} 个 <style>`)
+  const css = styles[0].textContent || ''
+  assert.ok(css.includes('.lx-config-grid{display:grid'), '注入的样式里必须有配置卡片的栅格规则')
+  assert.ok(css.length > 10000, `样式表应有实质内容，实际 ${css.length} 字节`)
+
+  // 幂等：再建一张卡片，<head> 里仍只有 1 个 <style data-plugin-css>
+  const card2 = api.createConfigCard({ doc: dom.document, fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, fields: [], values: {}, secretsSet: {} }) }) })
+  const again = [...dom.document.head.children].filter((n) => n.tagName === 'STYLE' && (n.attrs?.['data-plugin-css'] || n.dataset?.pluginCss))
+  assert.equal(again.length, 1, 'ensureStyles 必须幂等，不能重复注入')
+
+  for (const c of [card, card2]) { try { c.destroy?.() } catch { /* ignore */ } }
 })
