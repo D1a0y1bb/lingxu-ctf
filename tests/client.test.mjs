@@ -521,7 +521,7 @@ test('渲染片段：头部 / 统计 / 看板 / 排行榜 / 审计 / 理论题',
   assert.match(meta, /剩余 1小时1分/)
   assert.match(meta, /得分 120/)
   assert.match(meta, /排名 4\/12/)
-  assert.match(meta, /错误提交扣分中/)
+  assert.match(meta, /处罚公示中/)
 
   const stats = renderStatsHtml(state)
   assert.match(stats, /总数/)
@@ -703,7 +703,7 @@ test('成功路径：渲染赛事名、统计、题目卡片、排行榜与提�
 
 test('契约对齐：宿主 buildPanelState 真实输出形状可直接渲染', () => {
   // 形状取自 lib/index.js 的 buildPanelState()：含 ok / configured / updatedAt，
-  // rank 可能为 null、event.user 可能为 null、flag 已由宿主 maskFlag 脱敏。
+  // rank 可能为 null、event.user 可能为 null；flag 现在是明文（宿主不再脱敏，便于核对）。
   const hostPayload = {
     ok: true,
     configured: true,
@@ -724,7 +724,7 @@ test('契约对齐：宿主 buildPanelState 真实输出形状可直接渲染', 
   assert.equal(state.configured, true)
   // rank:null 与 event.user:null 不得让渲染崩溃，也不应凭空造出排名
   assert.equal(renderHeaderMetaHtml(state).includes('排名'), false)
-  assert.match(renderHeaderMetaHtml(state), /错误提交扣分中/)
+  assert.match(renderHeaderMetaHtml(state), /处罚公示中/)
   assert.equal(renderStatusHtml(state, { loading: false, loaded: true }), '')
   assert.match(renderBoardHtml(state, {}), /solver-web-01/)
   assert.match(renderSubmissionsHtml(state), /正确/)
@@ -2128,7 +2128,7 @@ test('视图：协同通信时间线按时间升序并带 from → to / kind 标
   assert.ok(first > 0 && last > first, '时间线应从早到晚')
 })
 
-test('视图：提交审计渲染状态徽章与脱敏 flag；报告可展开正文', () => {
+test('视图：提交审计渲染状态徽章与明文 flag；报告可展开正文', () => {
   const state = normalizeState(fullSnapshot())
   const model = { state, team: normalizeTeam(null), board: [], reports: normalizeReports(reportsPayload()) }
   const subs = renderViewSubmissionsHtml(model)

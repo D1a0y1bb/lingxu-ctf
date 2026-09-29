@@ -87,7 +87,8 @@
                 4. 需要并发时用 `ctf_solve_start`，不要自己手工一个个 spawn；
                    团队成员之间用 `send_message` 交流思路，共享任务板天然去重。
                 5. 每题解出后调用 `ctf_writeup` 生成 WP。
-                6. 不确定的 flag 不要反复提交（赛事可能开启错误扣分）；先用本地脚本验证。
+                6. 不确定的 flag 不要反复提交——**平台对错误提交本身不扣分**，
+                   但乱试会浪费比赛时间；先用本地脚本验证。
                 7. 理论题用 `ctf_theory`（action=list/begin/questions/answer/finish）。
                    `finish` 交卷**不可逆**，交卷前先把所有题答完。
                    注意：**交卷后平台会把 `is_begin` 置回 false**，所以看状态要认「已交卷」而不是「未开始」。

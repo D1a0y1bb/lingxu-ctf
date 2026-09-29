@@ -610,7 +610,7 @@ test('ctf_submit_flag：dedupeFlags 命中时直接返回 already_submitted，�
   assert.match(out, /already_submitted/)
   assert.match(out, /未重复请求平台/)
   assert.equal(callsOf(adapter, 'submitFlag').length, 0)
-  assert.ok(!out.includes('flag{dup}'), '输出中 flag 应脱敏')
+  assert.ok(out.includes('flag{dup}'), 'flag 应明文展示便于核对（用户要求：没必要藏住）')
 })
 
 test('ctf_submit_flag：dedupeFlags=false 时忽略去重', async () => {
