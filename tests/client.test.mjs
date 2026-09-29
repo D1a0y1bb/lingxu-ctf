@@ -14,6 +14,8 @@
 import test, { afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import vm from 'node:vm'
 
 // ────────────────────────────────────────────────────────────── 最小 DOM stub
@@ -3117,6 +3119,43 @@ test('★ tab 文案：用户要的长名字（凌虚竞赛平台 CTF Agent 模�
   assert.match(tab[1], /white-space:nowrap/)
   assert.equal(tab[1].includes('text-overflow:ellipsis'), false, '不截断用户要的名字')
   assert.match(css, /\.lx-vtabs\{[^}]*overflow-x:auto/)
+})
+
+test('★ 预览假数据防漂移：配置项必须与宿主 describeConfigFields() 完全一致', async (t) => {
+  // 教训（task-25）：**预览页的假数据本身就是漂移源** —— 配置项从 11 涨到 14、
+  // 面板假数据缺 leaderboard，都是「手抄」过期造成的。
+  // 现在预览页的 config payload 由宿主 schema **生成**，这条用例守住它别再手抄回去。
+  const previewPath = join(homedir(), 'Desktop', 'lingxu-ctf-view-preview.html')
+  if (!existsSync(previewPath)) {
+    t.skip('本机没有预览页（~/Desktop/lingxu-ctf-view-preview.html），跳过')
+    return
+  }
+  const html = readFileSync(previewPath, 'utf8')
+  const match = /^\s*window\.__LX_CONFIG__ = (\{.*\});\s*$/m.exec(html)
+  assert.ok(match, '预览页里应有 window.__LX_CONFIG__ 假数据')
+  const payload = JSON.parse(match[1])
+
+  const host = await import('../lib/index.js')
+  const authoritative = host.describeConfigFields()
+  assert.deepEqual(
+    payload.fields.map((field) => field.key),
+    authoritative.map((field) => field.key),
+    '预览的配置项必须与宿主 schema 同步（禁止手抄；旧版缺 envLimit/reuseAgents/envAutoDelay 就是这样漂的）',
+  )
+  // label / type 也要一致（它们决定用户在表单里看到什么）
+  for (const field of authoritative) {
+    const got = payload.fields.find((item) => item.key === field.key)
+    assert.ok(got, `预览缺少配置项 ${field.key}`)
+    assert.equal(got.label, field.label, `${field.key} 的中文标签不一致`)
+    assert.equal(got.type, field.type, `${field.key} 的控件类型不一致`)
+  }
+  // 值：布尔项必须给 true/false（否则表单勾选态会漂），secret 项要有 secretsSet
+  for (const field of payload.fields) {
+    if (field.type === 'boolean') {
+      assert.equal(typeof payload.values[field.key], 'boolean', `${field.key} 的假值应是布尔`)
+    }
+  }
+  assert.equal(payload.secretsSet.cookie, true, 'cookie 是 secret，预览要展示「已设置」')
 })
 
 test('理论题状态：交卷后必须显示「已交卷」，不能显示「未开始」', () => {
