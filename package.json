@@ -1,0 +1,43 @@
+{
+  "name": "dsh-lingxu-ctf",
+  "version": "0.1.0",
+  "description": "DSH 凌虚竞赛平台 CTF 解题插件：自动枚举赛题/理论题/排行榜，并发 agent 团队协同解题，自动提交 flag 与生成 writeup。",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./lingxu": "./lib/lingxu.js",
+    "./platforms": "./lib/platforms.js",
+    "./store": "./lib/store.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "docs",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "smoke": "node tests/smoke-live.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "ctf",
+    "lingxu",
+    "cordis",
+    "plugin",
+    "security"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
