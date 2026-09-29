@@ -215,3 +215,26 @@ test('团队消息：at 认不出来时回退为当前时间；跨实例可读�
   assert.deepEqual((await legacy.listTeamMessages('k')).map((m) => m.text), ['after-upgrade'])
 })
 
+
+test('getActiveConnection：只看活动连接（供 ctf_connect 新鲜度判断）', async () => {
+  const dir = await tempDir()
+  let clock = Date.parse('2026-09-29T02:00:00Z')
+  const store = new CtfStore({ dir, now: () => (clock += 1000) }) // 时钟递增 → updatedAt 可比
+  assert.equal(await store.getActiveConnection(), undefined, '空 store 返回 undefined')
+
+  await store.upsertConnection({ platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 4, cookie: 'a' })
+  await store.upsertConnection({ platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 7, cookie: 'b' })
+  const active = await store.getActiveConnection()
+  assert.equal(active.eventId, 7, 'upsert 会把新连接设为活动连接')
+
+  // 手动把活动连接切回 4
+  await store.setActive('lingxu:h:8000:4')
+  assert.equal((await store.getActiveConnection()).eventId, 4)
+  assert.equal((await store.resolveConnection()).eventId, 4)
+
+  // activeConnection 指向不存在的 key（历史遗留/手工改坏）→ 退化为「最近更新的一条」
+  store.state.activeConnection = 'lingxu:h:8000:999'
+  const fallback = await store.getActiveConnection()
+  assert.equal(fallback.eventId, 7, '退化时取 updatedAt 最新的一条')
+  assert.ok(dir)
+})

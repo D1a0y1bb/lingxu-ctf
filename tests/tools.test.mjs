@@ -14,7 +14,10 @@ import { promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { buildToolSpecs, TOOL_NAMES, SESSION_EXPIRED_TEXT } from '../lib/tools.js'
+import {
+  buildToolSpecs, TOOL_NAMES, SESSION_EXPIRED_TEXT,
+  connectionOriginLines,
+} from '../lib/tools.js'
 import { AWD_TOOL_NAMES, CFS_TOOL_NAMES, buildAwdToolSpecs, buildCfsToolSpecs, recommendStageTools } from '../lib/stage-tools.js'
 import { CtfStore } from '../lib/store.js'
 import { createOrchestrator, pathSlug } from '../lib/orchestrate.js'
@@ -153,7 +156,7 @@ function createAdapter(overrides = {}) {
   return adapter
 }
 
-function createHarness({ adapter = createAdapter(), store, config = {}, deps = {} } = {}) {
+function createHarness({ adapter = createAdapter(), store, config = {}, deps = {}, connection = CONNECTION } = {}) {
   const specs = buildToolSpecs({
     config: {
       concurrency: 4,
@@ -163,14 +166,14 @@ function createHarness({ adapter = createAdapter(), store, config = {}, deps = {
       ...config,
     },
     store,
-    resolveAdapter: async () => ({ adapter, connection: CONNECTION }),
+    resolveAdapter: async () => ({ adapter, connection }),
     createAdapter: () => adapter,
     logger: { info() {}, warn() {}, error() {} },
     now: () => Date.parse('2026-09-29T01:00:00Z'),
     ...deps,
   })
   const tools = Object.fromEntries(specs.map((spec) => [spec.name, spec]))
-  return { specs, tools, adapter }
+  return { specs, tools, adapter, store }
 }
 
 const callsOf = (adapter, method) => adapter.calls.filter((call) => call.method === method)
@@ -2208,4 +2211,78 @@ test('ctf_solve_start / ctf_solve_status 的描述写清 Agent 池（复用闲�
   const status = tools.ctf_solve_status.description
   assert.match(status, /Agent 池/)
   assert.match(status, /闲置可复用/)
+})
+
+// ────────────────────────────────────────────── 设置页同步与来源提示（task-27）
+
+test('ctf_connect：成功后回写设置页，且**只写非 secret 字段**（绝不动 cookie）', async () => {
+  const adapter = createAdapter()
+  const synced = []
+  const created = createHarness({
+    adapter,
+    store: await makeStore(),
+    deps: {
+      syncSettings: async (patch) => { synced.push(patch); return { ok: true, ns: 'lingxu-ctf' } },
+    },
+  })
+  const out = await created.tools.ctf_connect.execute({
+    baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=abc; csrftoken=x', label: '数信杯 Agent 测试赛',
+  })
+  assert.match(out, /✅ 已连接凌虚赛事平台/)
+  assert.equal(synced.length, 1)
+  assert.deepEqual(synced[0], { baseUrl: 'https://h:8000', eventId: 7, label: '数信杯 Agent 测试赛' })
+  assert.equal('cookie' in synced[0], false, '⚠️ cookie 是 secret，绝不能回写（脱敏值会覆盖真实 Cookie）')
+  assert.match(out, /- 设置页已同步: baseUrl\/eventId\/label → lingxu-ctf（Cookie 保持设置页原值，不回写 secret）/)
+
+  // store 里记下同步结果（解析连接时要用）
+  const conn = await created.store.getActiveConnection()
+  assert.equal(conn.settingsSync, 'ok')
+  assert.equal(conn.eventId, 7)
+})
+
+test('ctf_connect：设置页同步失败时明确告知（并标记 settingsSync=failed）', async () => {
+  const adapter = createAdapter()
+  const created = createHarness({
+    adapter,
+    store: await makeStore(),
+    deps: { syncSettings: async () => ({ ok: false, reason: 'settings 服务不可用（未安装 dsh-settings？）', ns: null }) },
+  })
+  const out = await created.tools.ctf_connect.execute({ baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=abc' })
+  assert.match(out, /⚠️ 未能回写设置页（settings 服务不可用/)
+  assert.match(out, /本次连接已保存到本地，并以「本地已存连接」优先/)
+  assert.equal((await created.store.getActiveConnection()).settingsSync, 'failed')
+
+  // 宿主没提供 syncSettings（老组合）也不能崩
+  const plain = createHarness({ adapter: createAdapter() })
+  const plainOut = await plain.tools.ctf_connect.execute({ baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=abc' })
+  assert.match(plainOut, /宿主未提供设置页同步能力/)
+})
+
+test('connectionOriginLines：来源 + Cookie 来源 + 不一致提示', () => {
+  const lines = connectionOriginLines({
+    platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 7, originText: '设置页配置', cookieFrom: '设置页',
+    mismatch: { settingsKey: 'lingxu:h:8000:7', storeKey: 'lingxu:h:8000:4', fields: ['eventId'] },
+  })
+  assert.equal(lines.length, 3)
+  assert.match(lines[0], /- 连接来源: 设置页配置｜Cookie 来源: 设置页/)
+  assert.match(lines[1], /⚠️ 设置页与本地连接不一致：设置页 lingxu:h:8000:7（eventId 不同），本地还存着 lingxu:h:8000:4/)
+  assert.match(lines[2], /改完立即生效/)
+
+  assert.deepEqual(connectionOriginLines({ platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 4 }), [])
+  assert.deepEqual(connectionOriginLines(null), [])
+})
+
+test('ctf_status / ctf_session / ctf_connect 输出里带上连接来源', async () => {
+  const adapter = createAdapter()
+  const connection = {
+    platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 7, key: 'lingxu:h:8000:7',
+    originText: '设置页配置', cookieFrom: '本地连接 lingxu:h:8000:7',
+    mismatch: { settingsKey: 'lingxu:h:8000:7', storeKey: 'lingxu:h:8000:4', fields: ['eventId'] },
+  }
+  const { tools } = createHarness({ adapter, connection })
+  const status = await tools.ctf_status.execute({})
+  assert.match(status, /- 连接来源: 设置页配置｜Cookie 来源: 本地连接 lingxu:h:8000:7/)
+  assert.match(status, /⚠️ 设置页与本地连接不一致/)
+  const session = await tools.ctf_session.execute({})
+  assert.match(session, /- 连接来源: 设置页配置/)
 })

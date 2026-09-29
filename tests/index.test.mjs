@@ -10,7 +10,9 @@ import {
   name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
   describeConfigFields, readJsonBody,
   createStageToolRegistry,
+  pickConnection, createResolveAdapter, cookieLooksUsable, CONNECTION_ORIGIN_TEXT,
 } from '../lib/index.js'
+import { CtfStore } from '../lib/store.js'
 
 /** 最小 Cordis Context 替身：收集注册项，effect 立即执行并记录 disposer。 */
 function mockCtx(services = {}) {
@@ -263,10 +265,10 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(ctx._collected.tools.length, 16, '工具只依赖 tools，立即可用')
   assert.deepEqual(
     ctx._collected.injected.map((d) => d[0]).sort(),
-    ['agentTeams', 'commands', 'systemPrompt', 'webServer'],
-    '四个可选服务都应通过 ctx.inject 声明',
+    ['agentTeams', 'commands', 'settings', 'systemPrompt', 'webServer'],
+    '五个可选服务都应通过 ctx.inject 声明（settings 用于 ctf_connect 回写设置页，task-27）',
   )
-  assert.equal(ctx._collected.pending.length, 4, '依赖未就绪时应挂起而不是失败')
+  assert.equal(ctx._collected.pending.length, 5, '依赖未就绪时应挂起而不是失败（含 settings）')
 
   // 逐个交付服务
   const sections = []
@@ -281,6 +283,13 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(routes.some((r) => r.path === '/lingxu-ctf/state'), true, 'webServer 就绪后应注册面板路由')
 
   ctx._collected_deliver('commands', { register: () => () => {} })
+  assert.equal(ctx._collected.pending.length, 2, '只剩 agentTeams 与 settings 未就绪')
+
+  // settings 就绪 → deps.settings 被填上（ctf_connect 要用它回写设置页）
+  ctx._collected_deliver('settings', {
+    describe: () => [{ ns: 'lingxu-ctf', revision: 3 }],
+    update: async () => {},
+  })
   assert.equal(ctx._collected.pending.length, 1, '只剩 agentTeams 未就绪')
 })
 
@@ -1141,4 +1150,188 @@ test('接线守卫：apply 暴露 deps.syncStageTools，ctf_connect 换赛事时
   const tools = readFileSync(new URL('../lib/tools.js', import.meta.url), 'utf8')
   assert.match(tools, /ctx\.syncStageTools/, 'ctf_connect 必须在连接成功后调用 syncStageTools')
   assert.match(tools, /hasAwd/, 'ctf_connect 必须把 hasAwd 传下去')
+})
+
+// ────────────────────────────────────────────── 连接解析：设置页 vs 本地连接（task-27）
+
+test('cookieLooksUsable：脱敏占位符不能当 Cookie 用（否则平台一直 403）', () => {
+  assert.equal(cookieLooksUsable('sessionid=abc; csrftoken=x'), true)
+  assert.equal(cookieLooksUsable('***'), false)
+  assert.equal(cookieLooksUsable('sessionid=***'), false, 'dsh-settings 给远程调用者的脱敏值')
+  assert.equal(cookieLooksUsable(''), false)
+  assert.equal(cookieLooksUsable(null), false)
+  assert.equal(cookieLooksUsable('  '), false)
+})
+
+test('pickConnection：设置页 eventId=7 + 本地还存着 event 4 → **用 7**（复现用户报的 bug）', () => {
+  const settings = { key: 'lingxu:host:8000:7', baseUrl: 'https://host:8000', eventId: 7, cookie: 'sessionid=new' }
+  const stored = { key: 'lingxu:host:8000:4', baseUrl: 'https://host:8000', eventId: 4, cookie: 'sessionid=old' }
+
+  const picked = pickConnection({ settings, stored })
+  assert.equal(picked.connection.eventId, 7, '设置页是用户明确声明，必须压过历史遗留的 store 记录')
+  assert.equal(picked.connection.key, 'lingxu:host:8000:7')
+  assert.equal(picked.origin, 'settings')
+  assert.equal(picked.connection.originText, CONNECTION_ORIGIN_TEXT.settings)
+  assert.ok(picked.mismatch, '不一致时要能提示用户')
+  assert.equal(picked.mismatch.settingsKey, 'lingxu:host:8000:7')
+  assert.equal(picked.mismatch.storeKey, 'lingxu:host:8000:4')
+  assert.deepEqual(picked.mismatch.fields, ['eventId'])
+})
+
+test('pickConnection：只有设置页 / 只有 store / 都没有', () => {
+  const settings = { key: 'k7', baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=x' }
+  const stored = { key: 'k4', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=y' }
+
+  // 回归：只填设置页、从不 ctf_connect 的老用户
+  const onlySettings = pickConnection({ settings })
+  assert.equal(onlySettings.connection.eventId, 7)
+  assert.equal(onlySettings.origin, 'settings')
+  assert.equal(onlySettings.mismatch, null)
+
+  const onlyStore = pickConnection({ stored })
+  assert.equal(onlyStore.connection.eventId, 4)
+  assert.equal(onlyStore.origin, 'store')
+  assert.equal(onlyStore.connection.originText, CONNECTION_ORIGIN_TEXT.store)
+
+  assert.equal(pickConnection({}), null, '两个来源都没有 → 调用方报错')
+})
+
+test('pickConnection：显式参数最优先；显式 key 等于设置页那条时也用设置页', () => {
+  const settings = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=s' }
+  const stored = { key: 'lingxu:h:8000:4', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=t' }
+  const requested = { key: 'lingxu:h:8000:4' }
+  const explicitMatch = { ...stored }
+
+  const byArgs = pickConnection({ requested, explicitMatch, settings, stored })
+  assert.equal(byArgs.connection.key, 'lingxu:h:8000:4', '显式参数必须赢过设置页')
+  assert.equal(byArgs.origin, 'args')
+
+  // 显式 key 正好是设置页那条（store 里没有）→ 用设置页
+  const settingsOnly = pickConnection({ requested: { key: 'lingxu:h:8000:7' }, settings, stored })
+  assert.equal(settingsOnly.connection.eventId, 7)
+  assert.equal(settingsOnly.origin, 'args')
+
+  // 显式指定了一个谁都没有的 key → null（调用方报错，绝不静默换平台）
+  assert.equal(pickConnection({ requested: { key: 'nope' }, settings, stored }), null)
+})
+
+test('pickConnection：Cookie 取值（设置页不存 secret → 用同 key 本地连接的 Cookie）', () => {
+  const settings = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: '' }
+  const stored = { key: 'lingxu:h:8000:4', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=old' }
+  const storedById = {
+    'lingxu:h:8000:7': { key: 'lingxu:h:8000:7', cookie: 'sessionid=from-store-7' },
+    'lingxu:h:8000:4': stored,
+  }
+
+  const picked = pickConnection({
+    settings, stored,
+    getStoredByKey: (key) => storedById[key] ?? null,
+  })
+  assert.equal(picked.connection.eventId, 7, '赛事仍按设置页')
+  assert.equal(picked.connection.cookie, 'sessionid=from-store-7', 'Cookie 用同 key 的本地连接（ctf_connect 存过）')
+  assert.match(picked.cookieFrom, /本地连接 lingxu:h:8000:7/)
+
+  // 设置页自己有 Cookie → 用设置页的
+  const own = pickConnection({ settings: { ...settings, cookie: 'sessionid=own' }, stored, getStoredByKey: () => null })
+  assert.equal(own.connection.cookie, 'sessionid=own')
+  assert.equal(own.cookieFrom, '设置页')
+})
+
+test('pickConnection：ctf_connect 连过但设置页回写失败 → 以本次连接为准（避免"刚连就被旧设置页压掉"）', () => {
+  const settings = { key: 'lingxu:h:8000:4', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=settings' }
+  const stored = {
+    key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=connected',
+    settingsSync: 'failed',
+  }
+  const picked = pickConnection({ settings, stored })
+  assert.equal(picked.connection.eventId, 7)
+  assert.equal(picked.origin, 'store')
+  assert.ok(picked.mismatch)
+
+  // 回写成功（settingsSync='ok'）时反过来：以设置页为准
+  const ok = pickConnection({ settings, stored: { ...stored, settingsSync: 'ok' } })
+  assert.equal(ok.connection.eventId, 4)
+  assert.equal(ok.origin, 'settings')
+})
+
+test('createResolveAdapter：真实 store + 设置页配置 → 解析到设置页的赛事，并带上来源/差异', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-resolve-'))
+  const store = new CtfStore({ dir, now: () => Date.parse('2026-09-29T02:00:00Z') })
+  // 历史遗留：store 里只有 event 4（用户上次 ctf_connect 的）
+  await store.upsertConnection({
+    platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=old', label: '数信杯测试赛',
+  })
+  const seen = []
+  const resolveAdapter = createResolveAdapter({
+    store,
+    config: { baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=new', label: '数信杯 Agent 测试赛', timeoutMs: 30000 },
+    createAdapter: (connection) => { seen.push(connection); return { marker: 'adapter' } },
+  })
+
+  const { adapter, connection, connKey } = await resolveAdapter({})
+  assert.equal(connection.eventId, 7, '设置页改成 7 必须立刻生效')
+  assert.equal(connection.label, '数信杯 Agent 测试赛')
+  assert.equal(connKey, 'lingxu:h:8000:7')
+  assert.equal(seen[0].eventId, 7, '适配器就是用这条连接造的')
+  assert.equal(seen[0].timeoutMs, 30000, 'config.timeoutMs 要透传给适配器')
+  assert.equal(connection.origin, 'settings')
+  assert.equal(connection.mismatch.storeKey, 'lingxu:h:8000:4')
+
+  // 显式参数仍然最优先
+  const explicit = await resolveAdapter({ connection: 'lingxu:h:8000:4' })
+  assert.equal(explicit.connection.eventId, 4)
+  assert.equal(explicit.connection.origin, 'args')
+
+  // 显式指定不存在的连接 → 报错（不静默换平台）
+  await assert.rejects(() => resolveAdapter({ connection: 'lingxu:h:8000:99' }), /未找到匹配的连接/)
+
+  // 回归：老用户（store 无连接、只填设置页）
+  const freshStore = new CtfStore({ dir: await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-resolve2-')) })
+  const onlySettings = createResolveAdapter({
+    store: freshStore,
+    config: { baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=new' },
+    createAdapter: () => ({ marker: 'adapter' }),
+  })
+  const resolved = await onlySettings({})
+  assert.equal(resolved.connection.eventId, 7)
+  assert.equal(resolved.connection.origin, 'settings')
+
+  // 脱敏 Cookie（设置页显示 ***）不能当凭据用 → 退回本地连接
+  const redacted = createResolveAdapter({
+    store,
+    config: { baseUrl: 'https://h:8000', eventId: 4, cookie: '***' },
+    createAdapter: () => ({ marker: 'adapter' }),
+  })
+  const fallback = await redacted({})
+  assert.equal(fallback.connection.cookie, 'sessionid=old', '脱敏 Cookie 时用本地已存连接')
+  assert.equal(fallback.connection.origin, 'store')
+})
+
+test('createResolveAdapter：设置页改了 eventId → **立刻生效**（不重启、不需要 reload）', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-live-'))
+  const store = new CtfStore({ dir })
+  await store.upsertConnection({
+    platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=old',
+  })
+  // Cordis 的 config 是响应式对象：改设置页 = 就地改这些字段（rawConfig 读的是同一个对象）
+  const rawConfig = { baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=settings', label: '旧的' }
+  const config = normalizeConfig(rawConfig)
+  const resolveAdapter = createResolveAdapter({
+    store, config, rawConfig, createAdapter: () => ({ marker: 'adapter' }),
+  })
+
+  assert.equal((await resolveAdapter({})).connection.eventId, 4, '一开始设置页也是 4（与 store 一致）')
+
+  // 用户在设置页把 eventId 改成 7
+  rawConfig.eventId = 7
+  rawConfig.label = '数信杯 Agent 测试赛'
+  const after = await resolveAdapter({})
+  assert.equal(after.connection.eventId, 7, '改设置页后必须立刻用 7，无需重启 DSH')
+  assert.equal(after.connection.label, '数信杯 Agent 测试赛')
+  assert.equal(after.connection.key, 'lingxu:h:8000:7')
+
+  // 归一化：设置页 baseUrl 带尾斜杠不影响 key 与「是否不一致」的判断
+  rawConfig.baseUrl = 'https://h:8000/'
+  const normalized = await resolveAdapter({})
+  assert.equal(normalized.connection.key, 'lingxu:h:8000:7')
 })
