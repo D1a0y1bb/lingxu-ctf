@@ -1335,3 +1335,42 @@ test('createResolveAdapter：设置页改了 eventId → **立刻生效**（不�
   const normalized = await resolveAdapter({})
   assert.equal(normalized.connection.key, 'lingxu:h:8000:7')
 })
+
+test('★ 回归：设置页活配置必须拆 volatile 包装（否则 eventId 变 {} → 切赛事后一片空白）', async () => {
+  // 真实事故：settingsSnapshot() 直接读 rawConfig[field]，而 Config 字段全是 .volatile() 包装，
+  // 于是 baseUrl 变成 "[object Object]"、eventId 变成 {}，拿去请求平台必然失败 →
+  // 面板显示「剩余 已结束」+「暂无题目数据」。这里钉住拆包行为。
+  const { createResolveAdapter, plainConfigValue } = await import('../lib/index.js')
+
+  const vol = (v) => ({ get: () => v })   // volatile 包装的典型形态
+  const rawConfig = {
+    baseUrl: vol('https://example.com:8000'),
+    eventId: vol(7),
+    cookie: vol('sessionid=abc123'),
+    label: vol('测试赛事'),
+  }
+  const store = {
+    resolveConnection: async () => null,
+    listConnections: async () => [],
+    getConnectionByKey: async () => null,
+    getActiveConnection: async () => null,
+  }
+  let seen = null
+  const resolve = createResolveAdapter({
+    store,
+    config: { baseUrl: '', eventId: 0, cookie: '', label: '' }, // 快照是空的，逼它必须读活配置
+    rawConfig,
+    createAdapter: (conn) => { seen = conn; return { ping: async () => true } },
+    logger: { info() {}, warn() {} },
+  })
+
+  const out = await resolve({})
+  assert.equal(out.connection.eventId, 7, 'eventId 必须是数字 7，不能是 {}')
+  assert.equal(out.connection.baseUrl, 'https://example.com:8000', 'baseUrl 不能是 [object Object]')
+  assert.doesNotMatch(String(out.connection.key), /object Object/, '连接 key 里不得出现 [object Object]')
+  assert.equal(seen?.eventId, 7, '传给适配器的 eventId 必须是 7')
+
+  // 拆包工具本身的契约
+  assert.equal(plainConfigValue(vol(7)), 7)
+  assert.deepEqual(plainConfigValue({ a: vol(1), b: vol('x') }), { a: 1, b: 'x' })
+})
