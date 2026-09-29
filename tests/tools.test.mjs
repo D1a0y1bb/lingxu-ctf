@@ -2286,3 +2286,15 @@ test('ctf_status / ctf_session / ctf_connect 输出里带上连接来源', async
   const session = await tools.ctf_session.execute({})
   assert.match(session, /- 连接来源: 设置页配置/)
 })
+
+test('connectionOriginLines：Cookie 来自同平台连接时解释一句（且只显示来源标签、不显示 cookie 值）', () => {
+  const lines = connectionOriginLines({
+    platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 7,
+    originText: '设置页配置', cookieFrom: '同平台连接 lingxu:h:8000:4',
+    cookie: 'sessionid=super-secret-value',
+  })
+  const text = lines.join('\n')
+  assert.match(text, /- 连接来源: 设置页配置｜Cookie 来源: 同平台连接 lingxu:h:8000:4/)
+  assert.match(text, /Cookie 是\*\*平台级\*\*会话凭据，与具体赛事无关，所以复用了同平台的 lingxu:h:8000:4/)
+  assert.equal(text.includes('super-secret-value'), false, '⚠️ 绝不能把 cookie 值写进输出')
+})

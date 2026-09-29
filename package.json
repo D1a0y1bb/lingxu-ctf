@@ -1,6 +1,6 @@
 {
   "name": "dsh-lingxu-ctf",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "DSH 凌虚竞赛平台 CTF 解题插件：自动枚举赛题/理论题/排行榜，并发 agent 团队协同解题，自动提交 flag 与生成 writeup。",
   "type": "module",
   "main": "./lib/index.js",

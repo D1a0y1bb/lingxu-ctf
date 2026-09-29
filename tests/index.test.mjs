@@ -10,7 +10,8 @@ import {
   name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
   describeConfigFields, readJsonBody,
   createStageToolRegistry,
-  pickConnection, createResolveAdapter, cookieLooksUsable, CONNECTION_ORIGIN_TEXT,
+  pickConnection, createResolveAdapter, cookieLooksUsable, normalizeCookie, settingsHasPlatform,
+  CONNECTION_ORIGIN_TEXT,
 } from '../lib/index.js'
 import { CtfStore } from '../lib/store.js'
 
@@ -1303,8 +1304,10 @@ test('createResolveAdapter：真实 store + 设置页配置 → 解析到设置�
     createAdapter: () => ({ marker: 'adapter' }),
   })
   const fallback = await redacted({})
+  // 设置页仍然声明平台/赛事（origin=settings），只是 Cookie 取同 key 的本地连接（task-28 语义）
   assert.equal(fallback.connection.cookie, 'sessionid=old', '脱敏 Cookie 时用本地已存连接')
-  assert.equal(fallback.connection.origin, 'store')
+  assert.equal(fallback.connection.origin, 'settings')
+  assert.equal(fallback.connection.cookieFrom, '本地连接 lingxu:h:8000:4')
 })
 
 test('createResolveAdapter：设置页改了 eventId → **立刻生效**（不重启、不需要 reload）', async () => {
@@ -1373,4 +1376,110 @@ test('★ 回归：设置页活配置必须拆 volatile 包装（否则 eventId 
   // 拆包工具本身的契约
   assert.equal(plainConfigValue(vol(7)), 7)
   assert.deepEqual(plainConfigValue({ a: vol(1), b: vol('x') }), { a: 1, b: 'x' })
+})
+
+// ────────────────────────────────────────────── Cookie 是平台级的（task-28）
+
+test('★ 设置页 eventId=7 + 设置页无 cookie + store 只有 …:4（cookie 可用）→ 用 7 且 cookie 来自 …:4', () => {
+  // 用户真实现场：设置页写了 event 7，但 store 里只有上次 ctf_connect 的 event 4 连接，
+  // 且设置页的 cookie 拿不到真值（DSH 对非 owner 读是空/脱敏）→ 旧实现会「无可用 Cookie」→ 403 未登录 → 空数据。
+  const settings = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: '' }
+  const stored4 = {
+    key: 'lingxu:h:8000:4', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=realsession',
+    updatedAt: '2026-09-29T01:00:00.000Z',
+  }
+  const picked = pickConnection({
+    settings,
+    stored: stored4,
+    getStoredByKey: (key) => (key === stored4.key ? stored4 : null),
+    listStored: () => [stored4],
+  })
+  assert.equal(picked.connection.eventId, 7, '赛事按设置页')
+  assert.equal(picked.connection.cookie, 'sessionid=realsession', 'Cookie 是平台级的 → 复用同平台连接的 cookie')
+  assert.equal(picked.cookieFrom, '同平台连接 lingxu:h:8000:4')
+  assert.equal(picked.origin, 'settings')
+})
+
+test('Cookie 取值顺序：同 key 优先于同平台回退；跨 baseUrl 绝不复用', () => {
+  const settings = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: '' }
+  const byKey = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: 'sessionid=bykey' }
+  const other = { key: 'lingxu:h:8000:4', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=other' }
+  const otherHost = { key: 'lingxu:evil:8000:7', baseUrl: 'https://evil:8000', eventId: 7, cookie: 'sessionid=evil' }
+
+  // ① 同 key 有可用 cookie → 用它（不被同平台回退抢走）
+  const sameKey = pickConnection({
+    settings, stored: other,
+    getStoredByKey: (key) => (key === byKey.key ? byKey : null),
+    listStored: () => [other, byKey],
+  })
+  assert.equal(sameKey.connection.cookie, 'sessionid=bykey')
+  assert.equal(sameKey.cookieFrom, '本地连接 lingxu:h:8000:7')
+
+  // ③ 只有别的平台的连接 → 不得复用（凭据不通用）
+  const crossHost = pickConnection({
+    settings, stored: null, getStoredByKey: () => null, listStored: () => [otherHost],
+  })
+  assert.equal(crossHost.connection.cookie, '', '跨 baseUrl 不能复用 cookie')
+  assert.equal(crossHost.cookieFrom, '（无可用 Cookie）')
+})
+
+test('Cookie 取值：尾斜杠视为同平台；同平台多条时取 updatedAt 最新的一条', () => {
+  const settings = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: '' }
+  const older = {
+    key: 'lingxu:h:8000:3', baseUrl: 'https://h:8000/', eventId: 3, cookie: 'sessionid=old',
+    updatedAt: '2026-09-28T01:00:00.000Z',
+  }
+  const newer = {
+    key: 'lingxu:h:8000:4', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=new',
+    updatedAt: '2026-09-29T01:00:00.000Z',
+  }
+  const picked = pickConnection({ settings, stored: null, getStoredByKey: () => null, listStored: () => [older, newer] })
+  assert.equal(picked.connection.cookie, 'sessionid=new', '取最近更新的连接（登录最新鲜）')
+  assert.match(picked.cookieFrom, /同平台连接 lingxu:h:8000:4/)
+  assert.equal(picked.connection.baseUrl, 'https://h:8000', '尾斜杠差异算同平台（归一化比较）')
+})
+
+test('normalizeCookie：设置页存的是裸 sessionid 值 → 补 sessionid= 前缀（实测 32 字符串就是 sessionid）', () => {
+  assert.equal(normalizeCookie('7mlmrl83xe0tihxxxxxxxxxxxxxxxxxx'), 'sessionid=7mlmrl83xe0tihxxxxxxxxxxxxxxxxxx')
+  assert.equal(normalizeCookie('sessionid=abc; csrftoken=x'), 'sessionid=abc; csrftoken=x', '完整 Cookie 串原样')
+  assert.equal(normalizeCookie('  '), '')
+  assert.equal(normalizeCookie(null), '')
+
+  // 设置页只有裸 token 时也能用（② 这条路是通的 —— 实测补前缀后平台返回 200）
+  const settings = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: 'baretoken123' }
+  const picked = pickConnection({ settings, stored: null, getStoredByKey: () => null, listStored: () => [] })
+  assert.equal(picked.connection.cookie, 'sessionid=baretoken123')
+  assert.equal(picked.cookieFrom, '设置页')
+})
+
+test('Cookie 取值：全都没有 → 「无可用 Cookie」，并且不把脱敏值当真值', () => {
+  const settings = { key: 'lingxu:h:8000:7', baseUrl: 'https://h:8000', eventId: 7, cookie: '***' }
+  const redactedStore = { key: 'lingxu:h:8000:4', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=***' }
+  const picked = pickConnection({
+    settings, stored: redactedStore,
+    getStoredByKey: () => redactedStore, listStored: () => [redactedStore],
+  })
+  assert.equal(picked.cookieFrom, '（无可用 Cookie）')
+  assert.equal(cookieLooksUsable(picked.connection.cookie), false)
+})
+
+test('createResolveAdapter：同平台 cookie 回退走真实 store（切赛事不再 403）', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-cookie-'))
+  const store = new CtfStore({ dir, now: () => Date.parse('2026-09-29T02:00:00Z') })
+  // store 里只有旧赛事（event 4）的连接
+  await store.upsertConnection({
+    platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=platform-level', label: '旧赛事',
+  })
+  const seen = []
+  const resolveAdapter = createResolveAdapter({
+    store,
+    // 设置页：eventId=7，但 cookie 为空（DSH 不给真值）
+    config: { baseUrl: 'https://h:8000', eventId: 7, cookie: '', label: '数信杯 Agent 测试赛' },
+    createAdapter: (connection) => { seen.push(connection); return { marker: 'adapter' } },
+  })
+  const { connection } = await resolveAdapter({})
+  assert.equal(connection.eventId, 7)
+  assert.equal(connection.cookie, 'sessionid=platform-level', 'Cookie 来自同平台的 store 连接')
+  assert.equal(connection.cookieFrom, '同平台连接 lingxu:h:8000:4')
+  assert.equal(seen[0].cookie, 'sessionid=platform-level', '适配器真的拿到了可用 cookie')
 })
