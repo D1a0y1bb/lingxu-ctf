@@ -277,7 +277,9 @@ const {
   renderSubmissionsHtml,
   renderTheoryHtml,
   renderStatsHtml,
-  renderHeaderMetaHtml,
+  renderMetricsLineHtml,
+  renderSubmissionCardsHtml,
+  renderFlagBlockHtml,
   findHostContainer,
   normalizeConfig,
   configFieldKind,
@@ -302,6 +304,7 @@ const {
   VIEW_CLASS,
   VIEW_TABS,
   VIEW_LOCALE_NS,
+  VIEW_LABEL_FALLBACK,
   TEAM_URL,
   REPORTS_URL,
   createCtfView,
@@ -517,9 +520,12 @@ test('groupChallenges 分组并统计已解数', () => {
 test('渲染片段：头部 / 统计 / 看板 / 排行榜 / 审计 / 理论题', () => {
   const state = normalizeState(fullSnapshot())
 
-  const meta = renderHeaderMetaHtml(state)
-  assert.match(meta, /lingxu/)
-  assert.match(meta, /赛事 #4/)
+  const meta = renderMetricsLineHtml(state)
+  // 用户点名删掉的噪音：平台名 / 赛事 ID / URL / 更新时间
+  assert.equal(meta.includes('lingxu'), false)
+  assert.equal(meta.includes('赛事 #'), false)
+  assert.equal(meta.includes('http'), false)
+  assert.equal(meta.includes('更新于'), false)
   assert.match(meta, /剩余 1小时1分/)
   assert.match(meta, /得分 120/)
   assert.match(meta, /排名 4\/12/)
@@ -584,7 +590,7 @@ test('渲染片段标签闭合平衡（innerHTML 结构不会破损）', () => {
 
   const state = normalizeState(fullSnapshot())
   const fragments = {
-    meta: renderHeaderMetaHtml(state),
+    meta: renderMetricsLineHtml(state),
     stats: renderStatsHtml(state),
     board: renderBoardHtml(state, {}),
     boardFiltered: renderBoardHtml(state, { category: 'Web' }),
@@ -725,8 +731,8 @@ test('契约对齐：宿主 buildPanelState 真实输出形状可直接渲染', 
   const state = normalizeState(hostPayload)
   assert.equal(state.configured, true)
   // rank:null 与 event.user:null 不得让渲染崩溃，也不应凭空造出排名
-  assert.equal(renderHeaderMetaHtml(state).includes('排名'), false)
-  assert.match(renderHeaderMetaHtml(state), /处罚公示中/)
+  assert.equal(renderMetricsLineHtml(state).includes('排名'), false)
+  assert.match(renderMetricsLineHtml(state), /处罚公示中/)
   assert.equal(renderStatusHtml(state, { loading: false, loaded: true }), '')
   assert.match(renderBoardHtml(state, {}), /solver-web-01/)
   assert.match(renderSubmissionsHtml(state), /正确/)
@@ -1789,7 +1795,9 @@ test('视图：registerCtfView 注册 conversation.view，id=ctf / order=20 / la
   // 无 locale 服务时必须不带 locale 字段（ui-renderer 会因缺 face 抛 SlotAssemblyError）
   assert.equal('locale' in options, false)
   assert.equal(typeof options.label, 'function', 'label 必须是 thunk（跟随语言）')
-  assert.equal(options.label(), 'CTF')
+  // 用户明确要的长名字（tab：凌虚竞赛平台 CTF Agent 模式），别再简写成 CTF
+  assert.equal(options.label(), '凌虚竞赛平台 CTF Agent 模式')
+  assert.equal(options.label(), VIEW_LABEL_FALLBACK)
   assert.equal(typeof render, 'function')
 })
 
@@ -1826,7 +1834,7 @@ test('视图：locale.register 抛错 / 键缺失时 label thunk 仍可用（兜
   }
   registerCtfView(ctx)
   assert.equal(registered[0].locale, VIEW_LOCALE_NS)
-  assert.equal(registered[0].label(), 'CTF', '拿不到译文时兜底成 CTF，而不是显示 view.ctf')
+  assert.equal(registered[0].label(), VIEW_LABEL_FALLBACK, '拿不到译文时兜底成长名字，而不是显示 view.ctf')
 })
 
 test('视图：拿不到 slots 服务时安全返回 null（不抛）', () => {
@@ -2939,6 +2947,176 @@ test('★ 提交审计：70 字符 flag 完整显示（等宽 / break-all / 不�
   assert.equal(flagBlock[1].includes('text-overflow:ellipsis'), false)
   assert.equal(flagBlock[1].includes('white-space:nowrap'), false)
   assert.match(flagBlock[1], /background:var\(--dsw-alias-markdown-code-block\)/)
+})
+
+// ══════════════════════════════════════ 13. 防漂移：面板 vs 视图（task-25）
+
+/**
+ * 背景（task-25 真实事故）：`lib/client.js` 里有**两套平行的渲染族**
+ * （悬浮面板 `render*Html` / 顶部视图 `renderView*Html`）。
+ * task-24 只改了视图那套，用户截图打回来 —— 面板还在显示
+ * `lingxu · https://…`、`lingxu` chip、`赛事 #4`、刷新按钮、截断的 flag。
+ *
+ * 下面这组用例是**结构性防线**：两族的公共片段必须共用
+ * （`renderMetricsLineHtml` / `renderSubmissionCardsHtml` / `renderFlagBlockHtml`），
+ * 只改一边就会立刻红。
+ */
+const LONG_FLAG = 'flag{BB4400B4318B3C8E9D19AFB22B8929C56B421FDAAEF2D440CB91DCA0A0A1B85F}'
+
+/** 构造「面板 + 视图」两族都能吃的快照。 */
+function driftSnapshot() {
+  return {
+    ok: true,
+    configured: true,
+    connection: { key: 'lingxu:h:4', platform: 'lingxu', baseUrl: 'https://shuxinbei.clsadp.com:8000', eventId: 4 },
+    event: { name: '题目测试', remainingSeconds: 125434, user: { username: 'xiyi' }, punish: true },
+    stats: { total: 78, solved: 42, working: 15, pending: 21, totalScore: 4200 },
+    rank: { rank: 1, total: 4, self: { id: 7, username: 'xiyi', score: 5200 } },
+    env: { limit: 2, held: 1, free: 1 },
+    challenges: [{ id: 1, name: 'NeuroSign', category: 'Crypto', score: 100, solved: true }],
+    leaderboard: [
+      { rank: 1, id: 7, username: 'xiyi', score: 5200, testScore: 1000, ctfScore: 4200, awdScore: 0, solved: 42, firstBloods: 42, isSelf: true },
+      { rank: 2, id: 9, username: 'bob', score: 800, testScore: 0, ctfScore: 800, awdScore: 0, solved: 6, firstBloods: 1, isSelf: false },
+    ],
+    submissions: [
+      { at: '2026-09-29T04:56:52Z', challengeId: '1', challengeName: 'NeuroSign', status: 'correct', flag: LONG_FLAG },
+      { at: '2026-09-29T05:36:20Z', challengeId: '9', challengeName: '理论题 · 单选', status: 'correct', flag: '' },
+    ],
+    theory: [],
+  }
+}
+
+/** 两族的头部/审计/排行榜产物。 */
+async function driftFragments() {
+  const { api } = await loadClientModule()
+  const state = normalizeState(driftSnapshot())
+  const model = {
+    state,
+    team: normalizeTeam(null),
+    board: mergeChallengeBoard(state.challenges, normalizeTeam(null)),
+    reports: normalizeReports(null),
+    stats: viewStats(state, [], null),
+  }
+  return {
+    api,
+    state,
+    // 面板族
+    panelMeta: api.renderMetricsLineHtml(state),
+    panelSubs: api.renderSubmissionsHtml(state),
+    panelRank: api.renderLeaderboardHtml(state),
+    // 视图族
+    viewMeta: api.renderViewMetaHtml(model),
+    viewSubs: api.renderViewSubmissionsHtml(model),
+  }
+}
+
+test('★ 防漂移：两族头部都不含平台名 / 赛事 ID / URL / 更新时间 / 刷新', async () => {
+  const { panelMeta, viewMeta } = await driftFragments()
+  for (const [name, html] of [['面板', panelMeta], ['视图', viewMeta]]) {
+    assert.equal(html.includes('lingxu'), false, `${name}头部不该出现平台名`)
+    assert.equal(html.includes('赛事 #'), false, `${name}头部不该出现赛事 ID`)
+    assert.equal(html.includes('http'), false, `${name}头部不该出现 URL`)
+    assert.equal(html.includes('更新于'), false, `${name}头部不该出现更新时间`)
+    assert.equal(html.includes('刷新'), false, `${name}头部不该出现刷新`)
+    assert.equal(html.includes('lx-chip'), false, `${name}头部不该是 chip 排（用 · 分隔的指标行）`)
+  }
+  // 有用的信息两边都要有
+  for (const [name, html] of [['面板', panelMeta], ['视图', viewMeta]]) {
+    for (const label of ['得分 4200', '排名 1/4', '剩余 ', '环境 1/2']) {
+      assert.ok(html.includes(label), `${name}头部应含「${label}」`)
+    }
+  }
+  // 两族共用同一个实现：基础指标部分必须**逐字相同**
+  assert.equal(panelMeta, viewMeta, '面板与视图的指标行应完全一致（共用 renderMetricsLineHtml）')
+})
+
+test('★ 防漂移：面板骨架里没有平台/URL 行，也没有刷新按钮；收起必须保留', async () => {
+  const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // subEl（平台 · URL · 更新于）整行删除：源码里不该再有这段拼接
+  assert.equal(source.includes('lx-panel-sub'), false, '面板副标题（平台 · URL）应已删除')
+  assert.equal(/regions\.subEl/.test(source), false, 'patch() 不该再写 subEl')
+  assert.equal(/filter\(Boolean\)\.join\(' · '\)/.test(source), false, '不该再拼「平台 · URL」')
+  // 刷新按钮删除（但轮询仍在）
+  assert.equal(source.includes('lx-refresh'), false, '面板刷新按钮应已删除')
+  // 收起按钮保留（面板停靠交互）
+  assert.match(source, /lx-collapse/)
+  assert.match(source, /collapseBtn\.textContent = '收起'/)
+  assert.match(source, /setCollapsed\(true\)/)
+
+  // 渲染级：面板头部只有赛事名，没有副标题行
+  const env = installGlobals(async () => jsonResponse(driftSnapshot()))
+  try {
+    const panel = track(floatingApply())
+    await panel.refresh()
+    const text = collectText(panel.root())
+    assert.match(text, /题目测试/)
+    assert.equal(text.includes('shuxinbei'), false, '面板不该显示 URL')
+    assert.equal(text.includes('凌虚 ·'), false, '面板不该显示平台名前缀')
+  } finally {
+    env.restore()
+  }
+})
+
+test('★ 防漂移：两族对同一条 70 字符 flag 都完整输出（共用 renderFlagBlockHtml）', async () => {
+  const { api, panelSubs, viewSubs } = await driftFragments()
+  for (const [name, html] of [['面板', panelSubs], ['视图', viewSubs]]) {
+    assert.ok(html.includes(LONG_FLAG), `${name}必须完整显示 70 字符 flag`)
+    assert.equal(html.includes('…'), false, `${name}不该出现省略号截断`)
+    assert.match(html, /class="lx-vflag"/, `${name}要用共用的 flag 容器`)
+    assert.match(html, /lx-vsub-row/, `${name}要用共用的卡片式布局`)
+    // 空 flag（check 模式）优雅处理
+    assert.match(html, /无 flag · check 模式/)
+  }
+  // 两族的卡片片段逐字一致（同一批数据、同一实现）
+  assert.equal(panelSubs, viewSubs, '面板与视图的提交卡片应完全一致（共用 renderSubmissionCardsHtml）')
+  // 样式合同：等宽 + break-all（两族共用同一条 CSS）
+  const css = api.panelCss()
+  const flagBlock = /\.lx-vflag\{([^}]*)\}/.exec(css)
+  assert.match(flagBlock[1], /word-break:break-all/)
+  assert.match(flagBlock[1], /ui-monospace/)
+})
+
+test('★ 防漂移：排行榜空态区分「未连接」与「平台返回为空」', async () => {
+  const { api } = await loadClientModule()
+  const connected = normalizeState({ connection: { key: 'k' }, leaderboard: [] })
+  assert.match(api.renderLeaderboardHtml(connected), /平台返回为空/)
+  const unconfigured = normalizeState({ connection: null, leaderboard: [] })
+  assert.match(api.renderLeaderboardHtml(unconfigured), /尚未连接/)
+  // 有数据时正常渲染
+  const withRows = normalizeState(driftSnapshot())
+  const html = api.renderLeaderboardHtml(withRows)
+  assert.match(html, /xiyi/)
+  assert.match(html, /lx-you/)
+})
+
+test('★ 防漂移：源码里必须有「改一族时检查另一族」的提示注释', async () => {
+  const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(source, /改任一族时\*\*必须检查另一族\*\*/, '两族说明注释不能被删（防漂移的第一道防线）')
+  assert.match(source, /renderMetricsLineHtml/)
+  assert.match(source, /renderSubmissionCardsHtml/)
+})
+
+test('★ tab 文案：用户要的长名字（凌虚竞赛平台 CTF Agent 模式）', async () => {
+  const { api } = await loadClientModule()
+  assert.equal(api.VIEW_LABEL_FALLBACK, '凌虚竞赛平台 CTF Agent 模式')
+  // 注册时 label thunk 返回长名字
+  const registered = []
+  const ctx = {
+    slots: {
+      register(options) { registered.push(options); return () => {} },
+      inject(slot, fn) { fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+  }
+  api.registerCtfView(ctx)
+  assert.equal(registered[0].label(), '凌虚竞赛平台 CTF Agent 模式')
+  // 长文案不许被压缩/省略：tab 不收缩，tab 条横向滚动兜底
+  const css = api.panelCss()
+  const tab = /\.lx-vtab\{([^}]*)\}/.exec(css)
+  assert.match(tab[1], /flex:0 0 auto/, 'tab 不许被压缩（长名字要完整显示）')
+  assert.match(tab[1], /white-space:nowrap/)
+  assert.equal(tab[1].includes('text-overflow:ellipsis'), false, '不截断用户要的名字')
+  assert.match(css, /\.lx-vtabs\{[^}]*overflow-x:auto/)
 })
 
 test('理论题状态：交卷后必须显示「已交卷」，不能显示「未开始」', () => {
