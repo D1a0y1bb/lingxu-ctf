@@ -146,7 +146,7 @@ test('LingxuClient: challenges 翻页合并并归一化字段', async () => {
     const c = new LingxuClient({ baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })
     const rows = await c.challenges()
     assert.equal(rows.length, 3)
-    assert.deepEqual(rows[0], { id: 1, name: 'A', category: 'Web', score: 100, ctfId: undefined, solved: false, parseCount: 0, begun: true, messages: [] })
+    assert.deepEqual(rows[0], { id: 1, name: 'A', category: 'Web', score: 100, ctfId: undefined, solved: false, parseCount: 0, begun: true, messages: [], testList: {} })
     assert.equal(rows[1].solved, true)
     assert.equal(calls.length, 2)
   } finally { restore() }
@@ -335,4 +335,163 @@ test('createAdapter：显式 platform 为 lingxu 时正常构造', () => {
   assert.equal(a.id, 'lingxu')
   assert.equal(typeof a.submitFlag, 'function')
   assert.equal(typeof a.downloadAttachment, 'function')
+})
+
+// ────────────────────────────────────────────── task-16：适配器接口同步
+
+test('LingxuAdapter: 新增平台方法全部转发（接口完整性）', () => {
+  const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })
+  for (const method of [
+    'getEnvironmentAddress', 'delayEnvironment', 'checkFlag',
+    'eventChart', 'eventPunish', 'ctfTime', 'ctfNames', 'noticeCount',
+  ]) {
+    assert.equal(typeof a[method], 'function', `适配器缺少 ${method}`)
+  }
+})
+
+test('LingxuAdapter: 环境地址 / 延时 / check / 新端点 的调用形状', async () => {
+  const seen = []
+  const [restore] = withFetch((url, init) => {
+    seen.push({ url, method: init.method })
+    if (url.endsWith('/addr/')) return jsonResponse({ ext_id: '1.2.3.4:80', end_second: 60, run_time: 'a', release_time: 'b' })
+    if (url.endsWith('/delayed/')) return jsonResponse({ status: 2, msg: '成功延时30分钟' })
+    if (url.endsWith('/check/')) return jsonResponse({ status: 1, detail: 'check已触发' })
+    if (url.includes('/chart/')) return jsonResponse({ start_time: 1, end_time: 2, data: [] })
+    if (url.includes('/punish/')) return jsonResponse({ count: 0, next: null, results: [] })
+    if (url.endsWith('/ctf/time/')) return jsonResponse({ status: 0, start_seconds: 0, end_seconds: 100 })
+    if (url.endsWith('/ctf/name/')) return jsonResponse([{ id: 1, name: 'x' }])
+    if (url.endsWith('/notice/count/')) return jsonResponse({ count: 2 })
+    return jsonResponse({})
+  })
+  try {
+    const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })
+    const addr = await a.getEnvironmentAddress(9)
+    assert.equal(addr.remainingSeconds, 60)
+    assert.equal(addr.connectionInfo, 'nc 1.2.3.4 80')
+
+    const delayed = await a.delayEnvironment(9)
+    assert.equal(delayed.kind, 'delayed')
+
+    const checked = await a.checkFlag(11, 'flag{x}')
+    assert.equal(checked.ok, true)
+
+    assert.equal((await a.eventChart()).type, 2)
+    assert.deepEqual(await a.eventPunish({ type: 1 }), [])
+    assert.equal((await a.ctfTime()).endSeconds, 100)
+    assert.deepEqual(await a.ctfNames(), [{ id: 1, name: 'x' }])
+    assert.equal((await a.noticeCount()).count, 2)
+
+    const paths = seen.map((entry) => entry.url.replace('https://x.com', ''))
+    assert.deepEqual(paths, [
+      '/event/4/ctf/9/addr/',
+      '/event/4/ctf/9/delayed/',
+      '/event/4/ctf/11/check/',
+      '/event/4/chart/?type=2',
+      '/event/4/punish/?type=1&page=1&size=100',
+      '/event/4/ctf/time/',
+      '/event/4/ctf/name/',
+      '/event/4/notice/count/',
+    ])
+    assert.equal(seen[1].method, 'POST', 'delayed 必须是 POST')
+    assert.equal(seen[2].method, 'POST', 'check 必须是 POST')
+  } finally { restore() }
+})
+
+// ────────────────────────────────────────────── task-18：AWD / CFS + test_type
+
+test('LingxuAdapter: AWD/CFS 方法全部转发（接口完整性）', () => {
+  const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })
+  for (const method of [
+    'awdRoundInfo', 'awdChallenges', 'awdChallengeDetail', 'awdRank', 'awdDynamic', 'awdDynamicInfo',
+    'awdDynamicTests', 'awdDynamicUsers', 'awdFlagApi', 'awdGetOwnFlag', 'awdSubmitFlag', 'awdResetKvm',
+    'awdReferee', 'cfsRoundInfo', 'cfsChallenges', 'cfsChallengeDetail', 'cfsSubmitFlag', 'cfsRank',
+    'cfsChart', 'cfsDynamic', 'eventType',
+  ]) {
+    assert.equal(typeof a[method], 'function', `适配器缺少 ${method}`)
+  }
+})
+
+test('LingxuAdapter: eventSummary 解析 test_type（1理论/2CTF/3AWD/4CFS）', async () => {
+  const [restore] = withFetch((url) => {
+    if (url.endsWith('/info/')) {
+      return jsonResponse({
+        status: 0,
+        start_seconds: 0,
+        end_seconds: 3600,
+        user: { username: 'xiyi', number: 'lx_1' },
+        test_type: { 1: { name: '理论题', size: 30 }, 2: { name: '实操题', size: 30 }, 3: { name: 'AWD', size: 10 } },
+        punish: true,
+      })
+    }
+    return jsonResponse({ name: '测试赛', start_time: 'a', end_time: 'b' })
+  })
+  try {
+    const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })
+    const summary = await a.eventSummary()
+    assert.deepEqual(summary.testTypes.map((t) => [t.id, t.name, t.size]), [
+      [1, '理论题', 30],
+      [2, '实操题', 30],
+      [3, 'AWD', 10],
+    ])
+    assert.equal(summary.hasTheory, true)
+    assert.equal(summary.hasCtf, true)
+    assert.equal(summary.hasAwd, true)
+    assert.equal(summary.hasCfs, false, '这场没有 CFS 赛段')
+    assert.deepEqual(Object.keys(summary.testTypeMap).sort(), ['1', '2', '3'])
+    assert.equal(summary.remainingSeconds, 3600)
+  } finally { restore() }
+})
+
+test('LingxuAdapter: AWD/CFS 调用形状（路径与 query 参数）', async () => {
+  const seen = []
+  const [restore] = withFetch((url, init) => {
+    seen.push(`${init.method} ${url.replace('https://x.com', '')}`)
+    if (url.includes('/awd/info/')) return jsonResponse({ status: 0, info_dict: { token: 't' } })
+    if (url.includes('/awd/flag/')) return jsonResponse({ status: 1, data: 'Flag提交成功！' })
+    if (url.includes('/awd/rank/')) return jsonResponse({ count: 0, next: null, results: [] })
+    if (url.includes('/awd/dynamic/info/')) return jsonResponse({ count: 0, next: null, results: [] })
+    if (url.includes('/awd/dynamic/')) return jsonResponse([])
+    if (url.includes('/awd/')) return jsonResponse({ count: 0, next: null, results: [] })
+    if (url.includes('/kvm/')) return jsonResponse({ status: 1, message: '重置成功' })
+    if (url.includes('/cfs/info/')) return jsonResponse({ status: 1, start_seconds: 60, end_seconds: 0 })
+    if (url.includes('/cfs/rank/')) return jsonResponse({ count: 0, next: null, results: [] })
+    if (url.includes('/cfs/chart/')) return jsonResponse({ start_time: 1, end_time: 2, data: [] })
+    if (url.includes('/cfs/dynamic/')) return jsonResponse([])
+    if (url.includes('/cfs/')) return jsonResponse({ count: 0, next: null, results: [] })
+    if (url.includes('/type/')) return jsonResponse(['1', '2'])
+    return jsonResponse({})
+  })
+  try {
+    const a = createAdapter({ platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })
+    await a.awdRoundInfo()
+    await a.awdChallenges({ classify: 'Web' })
+    await a.awdRank()
+    await a.awdDynamic()
+    await a.awdDynamicInfo({ status: [1, 2] })
+    await a.awdSubmitFlag('tok', 'flag{x}')
+    await a.awdResetKvm(77, { type: 2 })
+    await a.cfsRoundInfo()
+    await a.cfsRank()
+    await a.cfsChart()
+    await a.cfsDynamic()
+    await a.cfsSubmitFlag(5, 'flag{y}')
+    const type = await a.eventType()
+    assert.deepEqual(type.codes, ['1', '2'])
+
+    assert.deepEqual(seen, [
+      'GET /event/4/awd/info/',
+      'GET /event/4/awd/?classify=Web&page=1&size=100',
+      'GET /event/4/awd/rank/?page=1&size=100',
+      'GET /event/4/awd/dynamic/',
+      'GET /event/4/awd/dynamic/info/?status=1&status=2&page=1&size=100',
+      'POST /event/4/awd/flag/?token=tok&flag=flag%7Bx%7D',
+      'POST /event/4/kvm/77/reset/?type=2',
+      'GET /event/4/cfs/info/',
+      'GET /event/4/cfs/rank/?page=1&size=100',
+      'GET /event/4/cfs/chart/',
+      'GET /event/4/cfs/dynamic/',
+      'POST /event/4/cfs/5/flag/',
+      'GET /event/4/type/',
+    ])
+  } finally { restore() }
 })

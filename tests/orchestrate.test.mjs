@@ -119,8 +119,8 @@ function makeTeams({ members = [], spawnImpl = null, createTaskImpl = null } = {
   return { teams, calls, taskList }
 }
 
-function makeAdapter(challenges, { releaseImpl = null } = {}) {
-  const calls = { release: [] }
+function makeAdapter(challenges, { releaseImpl = null, details = null } = {}) {
+  const calls = { release: [], detail: [] }
   const adapter = {
     async challenges() {
       return challenges
@@ -130,6 +130,16 @@ function makeAdapter(challenges, { releaseImpl = null } = {}) {
       if (releaseImpl) return await releaseImpl(id)
       return { released: true }
     },
+  }
+  // 详情探测（taskType 只有详情接口有）：只有显式给了 details 才挂这个方法，
+  // 没给时编排层应把它当成「无法探测」→ 一律按非环境题处理（不改变老测试的行为）。
+  if (details) {
+    adapter.challengeDetail = async (id) => {
+      calls.detail.push(String(id))
+      const found = typeof details === 'function' ? details(id) : details[String(id)] ?? details[Number(id)]
+      if (!found) throw new Error(`no detail for ${id}`)
+      return found
+    }
   }
   return { adapter, calls }
 }
@@ -142,8 +152,9 @@ async function makeOrchestrator({
   releaseImpl = null,
   adapterOverride = null,
   resolveError = null,
+  details = null,
 } = {}) {
-  const { adapter, calls } = makeAdapter(challenges, { releaseImpl })
+  const { adapter, calls } = makeAdapter(challenges, { releaseImpl, details })
   const resolved = { fail: Boolean(resolveError) }
   const deps = {
     config: { concurrency: 4, ...config },
@@ -533,10 +544,11 @@ test('start：建任务 + 按 concurrency 拉起 agent + 摘要', async () => {
 
   // 摘要
   assert.match(summary, /编排已启动/)
-  assert.match(summary, /创建 4 个任务/)
+  assert.match(summary, /新建 4 个任务/)
   assert.match(summary, /本轮拉起 2 个/)
   assert.match(summary, /solver-pwn-hard-2/)
   assert.match(summary, /排队中（2 题/)
+  assert.match(summary, /环境调度：同时最多 2 个环境/)
 
   // store 落盘（面板 / stop 释放环境要用）
   const work = await store.listChallengeWork(CONNECTION.key)
@@ -805,7 +817,7 @@ test('start：createTask 全失败 → 返回失败摘要而不是抛异常', as
   assert.match(summary, /Team task limit/)
 })
 
-test('start 幂等：已在任务板上的题目跳过；force=true 强制重跑', async () => {
+test('start 幂等：已有 agent 的题目跳过；force=true 强制重跑', async () => {
   const store = await makeStore()
   const { teams, calls, taskList } = makeTeams()
   const { orchestrator } = await makeOrchestrator({
@@ -821,8 +833,8 @@ test('start 幂等：已在任务板上的题目跳过；force=true 强制重跑
 
   const second = await orchestrator.start({ __agent: AGENT })
   assert.equal(calls.createTask.length, 2, '第二次调用不应重复建任务')
-  assert.equal(calls.spawn.length, 2, '第二次调用不应重复起 agent')
-  assert.match(second, /已在任务板上/)
+  assert.equal(calls.spawn.length, 2, '第二次调用不应重复起 agent（已在跑的不重复派）')
+  assert.match(second, /已有 agent 在做/)
 
   // 任务完成后可以再次编排（completed 不算占用）
   for (const task of taskList) task.status = 'completed'
@@ -903,7 +915,7 @@ test('status：任务板 + 平台对照表 + 统计', async () => {
   taskList[1].ownerName = 'solver-web-1'
 
   const report = await orchestrator.status({ __agent: AGENT })
-  assert.match(report, /\| 题目 \| 分类 \| 分值 \| 任务 \| 任务状态 \| owner \| 平台 \|/)
+  assert.match(report, /\| 题目 \| 分类 \| 分值 \| 题型 \| 任务 \| 任务状态 \| owner \| 平台 \| 环境 \|/)
   assert.match(report, /pwn-2 \(#2\)/)
   assert.match(report, /进行中/)
   assert.match(report, /已完成/)
@@ -911,6 +923,7 @@ test('status：任务板 + 平台对照表 + 统计', async () => {
   assert.match(report, /已解 1 \/ 共 3 题/)
   assert.match(report, /进行中 1，待认领 0，已完成 1/)
   assert.match(report, /running 1，inactive 1，provisioning 0，failed 1/)
+  assert.match(report, /- 环境占用：0\/2（上限来源：平台默认 2/)
 })
 
 test('status：平台不可用时降级为任务板视图（不抛异常）', async () => {
@@ -981,8 +994,8 @@ test('status：进行中可见 —— 任务 in_progress 与「已拉起未认�
   assert.match(report, /\| web-1 \(#1\) .*未解/, '没起 agent 的题仍是未解')
   assert.match(report, /- 进行中（agent 正在做）：2 题/)
   assert.match(report, /### 进行中（agent 正在做）/)
-  assert.match(report, /- misc-3 \(#3\)｜misc｜300分｜任务 task-1｜owner=solver-misc-3｜平台未解/)
-  assert.match(report, /- pwn-2 \(#2\)｜pwn｜200分｜任务 task-2｜owner=未认领｜平台未解/)
+  assert.match(report, /- misc-3 \(#3\)｜misc｜300分｜-｜任务 task-1｜owner=solver-misc-3｜平台未解/)
+  assert.match(report, /- pwn-2 \(#2\)｜pwn｜200分｜-｜任务 task-2｜owner=未认领｜平台未解/)
 
   // 平台侧已解时不再进「进行中」清单
   challenges.find((c) => c.id === 3).solved = true
@@ -1452,4 +1465,257 @@ test('status：session 正常的非失效错误仍走原有降级文案（回归
   assert.match(report, /平台题目列表获取失败/)
   assert.match(report, /502/)
   assert.doesNotMatch(report, /sessionid 已失效/)
+})
+
+// ---------------------------------------------------------------- 环境感知调度（task-17 核心）
+
+/** 造一道题 + 它的详情（taskType：1 环境型 / 2 外链型 / 3 附件型）。 */
+function envChallenge(id, score, taskType, name) {
+  return makeChallenge({ id, name: name || `ch-${id}`, category: 'Pwn', score, taskTypeHint: taskType })
+}
+function detailsFor(entries) {
+  const labels = { 1: '环境型', 2: '外链型', 3: '附件型' }
+  return Object.fromEntries(
+    entries.map(([id, taskType]) => [String(id), { id: Number(id), taskType, taskTypeLabel: labels[taskType] }]),
+  )
+}
+
+test('环境调度：envLimit 只约束环境题，非环境题不受限（10 环境 + 4 非环境，并发 6）', async () => {
+  const store = await makeStore()
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const { teams, calls } = makeTeams({ members })
+  // 分值降序：非环境题在前 4 个 → 探测窗口内可见
+  const flat = [0, 1, 2, 3].map((i) => makeChallenge({ id: 300 + i, name: `flat-${i}`, category: 'Misc', score: 900 - i }))
+  const envs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) =>
+    makeChallenge({ id: 400 + i, name: `env-${i}`, category: 'Pwn', score: 800 - i }),
+  )
+  const details = detailsFor([
+    ...[0, 1, 2, 3].map((i) => [300 + i, 3]), // 附件型
+    ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => [400 + i, 1]), // 环境型
+  ])
+  const { orchestrator, adapterCalls } = await makeOrchestrator({
+    challenges: [...flat, ...envs],
+    teams,
+    store,
+    details,
+    config: { concurrency: 6, envLimit: 2 },
+  })
+
+  const summary = await orchestrator.start({ __agent: AGENT })
+  const spawnedNames = calls.spawn.map((c) => c.request.name)
+  const spawnedEnvs = spawnedNames.filter((name) => name.includes('env-'))
+  const spawnedFlat = spawnedNames.filter((name) => name.includes('flat-'))
+
+  assert.equal(spawnedEnvs.length, 2, `环境题必须被 envLimit=2 限制住，实际 ${spawnedEnvs.length}: ${spawnedNames}`)
+  assert.equal(spawnedFlat.length, 4, '非环境题不受 envLimit 限制，应把剩余并发槽填满')
+  assert.equal(calls.spawn.length, 6, '总并发 = 6')
+  assert.match(summary, /环境调度：同时最多 2 个环境/)
+  assert.match(summary, /本轮环境题配额 2 个/)
+  assert.match(summary, /环境排队（2 题：环境配额 2\/2 已满/)
+  assert.match(summary, /题型探测：本轮按需探测 \d+ 题/)
+  // 每道环境题的 prompt 都要写清「环境稀缺、解完立刻释放」
+  const envPrompt = calls.spawn.find((c) => c.request.name.includes('env-')).request.prompt.map((b) => b.text).join('\n')
+  assert.match(envPrompt, /环境是稀缺资源/)
+  assert.match(envPrompt, /ctf_release_env/)
+  assert.match(envPrompt, /ctf_delay_env/)
+  const flatPrompt = calls.spawn.find((c) => c.request.name.includes('flat-')).request.prompt.map((b) => b.text).join('\n')
+  assert.match(flatPrompt, /附件型/)
+  assert.doesNotMatch(flatPrompt, /环境是稀缺资源/)
+  assert.equal(adapterCalls.detail.length <= 12, true, '探测有上限（maxEnvProbes）')
+})
+
+test('环境调度：题型从 work 记录缓存读取，不再重复探测（探测结果回写）', async () => {
+  const store = await makeStore()
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const { teams } = makeTeams({ members })
+  const challenges = [makeChallenge({ id: 501, name: 'pwn-a', score: 100 })]
+  const details = detailsFor([[501, 1]])
+  const first = await makeOrchestrator({ challenges, teams, store, details, config: { concurrency: 1 } })
+  await first.orchestrator.start({ __agent: AGENT })
+  assert.equal(first.adapterCalls.detail.length, 1, '首次要探测一次详情')
+
+  const work = await store.getChallengeWork(CONNECTION.key, '501')
+  assert.equal(work.taskType, 1, '探测结果要回写 work 记录（列表接口没有 task_type）')
+  assert.match(work.taskTypeLabel ?? '', /环境型/)
+
+  // 第二轮（新编排器实例，模拟进程重启）：命中 work 缓存，零探测
+  const second = await makeOrchestrator({ challenges, teams, store, details, config: { concurrency: 1 } })
+  await second.orchestrator.start({ __agent: AGENT, force: true })
+  assert.equal(second.adapterCalls.detail.length, 0, '有缓存时不应再探测')
+})
+
+test('环境调度：envLimit=0（自学习）→ 用平台实测值；配置值优先', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const envs = [0, 1, 2, 3, 4].map((i) => makeChallenge({ id: 600 + i, name: `e-${i}`, score: 100 - i }))
+  const details = detailsFor([0, 1, 2, 3, 4].map((i) => [600 + i, 1]))
+
+  // 1) envLimit=0 → 自学习：work 记录里的 envLimitObserved=3（ctf_start_env 撞上限时写入）
+  const store = await makeStore()
+  await store.upsertChallengeWork(CONNECTION.key, '999', { envLimitObserved: 3, envLimitHitAt: '2026-09-29T01:00:00Z' })
+  const { teams, calls } = makeTeams({ members })
+  const learned = await makeOrchestrator({ challenges: envs, teams, store, details, config: { concurrency: 5, envLimit: 0 } })
+  const learnedSummary = await learned.orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 3, `自学习到 3 就应该放 3 个环境题，实际 ${calls.spawn.length}`)
+  assert.match(learnedSummary, /同时最多 3 个环境（平台实测/)
+
+  // 2) 显式配置优先于实测值与默认值
+  const configuredStore = await makeStore()
+  await configuredStore.upsertChallengeWork(CONNECTION.key, '999', { envLimitObserved: 3 })
+  const second = makeTeams({ members })
+  const configured = await makeOrchestrator({
+    challenges: envs, teams: second.teams, store: configuredStore, details,
+    config: { concurrency: 5, envLimit: 1 },
+  })
+  const configuredSummary = await configured.orchestrator.start({ __agent: AGENT })
+  assert.equal(second.calls.spawn.length, 1, '配置 envLimit=1 时只能放 1 个')
+  assert.match(configuredSummary, /同时最多 1 个环境（config.envLimit/)
+
+  // 3) 都没有 → 平台默认 2
+  const third = makeTeams({ members })
+  const fallback = await makeOrchestrator({
+    challenges: envs, teams: third.teams, store: await makeStore(), details, config: { concurrency: 5 },
+  })
+  await fallback.orchestrator.start({ __agent: AGENT })
+  assert.equal(third.calls.spawn.length, 2, '默认值 = 平台源码 default 2')
+})
+
+test('环境调度：已占用的环境要扣配额，过期的不占', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const envs = [0, 1, 2].map((i) => makeChallenge({ id: 700 + i, name: `e-${i}`, score: 100 - i }))
+  const details = detailsFor([[700, 1], [701, 1], [702, 1]])
+
+  // 已占满 2 个（envStarted 且未释放）→ 本轮环境配额 0
+  const store = await makeStore()
+  await store.upsertChallengeWork(CONNECTION.key, '900', { envStarted: true, envReleased: false, connectionInfo: 'nc 1.1.1.1 1' })
+  await store.upsertChallengeWork(CONNECTION.key, '901', { envStarted: true, envReleased: false, connectionInfo: 'nc 1.1.1.1 2' })
+  const { teams, calls } = makeTeams({ members })
+  const busy = await makeOrchestrator({ challenges: envs, teams, store, details, config: { concurrency: 3 } })
+  const busySummary = await busy.orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 0, '配额已满，不该再起环境题')
+  assert.match(busySummary, /环境配额已满（占用 2\/2）/)
+  assert.match(busySummary, /环境排队（3 题/)
+
+  // 环境到期（releaseTime 已过）→ 平台已自动释放，配额还回来
+  const releasedStore = await makeStore()
+  await releasedStore.upsertChallengeWork(CONNECTION.key, '900', {
+    envStarted: true, envReleased: false, envReleaseTime: '2023-01-01T00:00:00Z',
+  })
+  const second = makeTeams({ members })
+  const back = await makeOrchestrator({ challenges: envs, teams: second.teams, store: releasedStore, details, config: { concurrency: 3 } })
+  const backSummary = await back.orchestrator.start({ __agent: AGENT })
+  assert.equal(second.calls.spawn.length, 2, '过期环境不再占配额')
+  assert.match(backSummary, /当前已占用 0/)
+})
+
+test('环境调度：释放后下一轮能补派已建任务的题（不重复建任务）', async () => {
+  const store = await makeStore()
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const envs = [0, 1, 2, 3].map((i) => makeChallenge({ id: 800 + i, name: `e-${i}`, score: 100 - i }))
+  const details = detailsFor([0, 1, 2, 3].map((i) => [800 + i, 1]))
+  const { teams, calls, taskList } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({ challenges: envs, teams, store, details, config: { concurrency: 2 } })
+
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.createTask.length, 4, '任务板是完整队列（4 道都建任务）')
+  assert.equal(calls.spawn.length, 2, 'envLimit=2 只派 2 个')
+
+  // 模拟：两个 agent 解完（平台标记已解）+ 释放环境 → 剩下的环境题应该被补派
+  for (const task of taskList.slice(0, 2)) task.status = 'completed'
+  envs[0].solved = true
+  envs[1].solved = true
+  await store.upsertChallengeWork(CONNECTION.key, '800', { envReleased: true, envStarted: false })
+  await store.upsertChallengeWork(CONNECTION.key, '801', { envReleased: true, envStarted: false })
+
+  const again = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.createTask.length, 4, '补派不能重复建任务（复用已有任务）')
+  assert.equal(calls.spawn.length, 4, '释放后应补派下一批（e-2 / e-3）')
+  assert.match(again, /复用已有任务 2 个/)
+  assert.deepEqual(calls.spawn.slice(2).map((c) => c.request.name), ['solver-e-2-802', 'solver-e-3-803'])
+})
+
+test('环境调度：已 spawn 且在跑的题，下一轮绝不能再派（安全网）', async () => {
+  const store = await makeStore()
+  // 一个 teammate 已拉起（inactive 也算在册），任务是 pending（还没 claim）
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    { name: 'solver-pwn-1', role: 'teammate', status: 'inactive' },
+  ]
+  const { teams, calls, taskList } = makeTeams({ members })
+  const challenges = [makeChallenge({ id: 901, name: 'pwn-1', category: 'Pwn', score: 300 })]
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, store, config: { concurrency: 4 } })
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 1)
+  assert.equal(taskList[0].status, 'pending', '还没 claim')
+
+  // 第二轮：同一道题（agent 还在册，任务未完成）→ 不能再派一次
+  for (const attempt of [1, 2]) {
+    const report = await orchestrator.start({ __agent: AGENT })
+    assert.equal(calls.spawn.length, 1, `第 ${attempt + 1} 轮不应重复派同一道题`)
+    assert.equal(calls.createTask.length, 1, '也不应重复建任务')
+    assert.match(report, /已有 agent 在做/)
+  }
+
+  // 任务完成后才允许重跑
+  taskList[0].status = 'completed'
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 2, '任务完成后可重跑（新任务）')
+})
+
+test('环境调度：ctf_solve_status 显示题型 / 环境剩余 / 环境占用 / 环境排队', async () => {
+  const store = await makeStore()
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    // inactive = 手里的 turn 已结束，不占并发槽（否则 slots=0，本轮不会探测题型）
+    { name: 'solver-pwn-1', role: 'teammate', status: 'inactive' },
+  ]
+  const challenges = [
+    makeChallenge({ id: 101, name: 'pwn-a', category: 'Pwn', score: 300, solved: false }),
+    makeChallenge({ id: 102, name: 'misc-b', category: 'Misc', score: 200, solved: true }),
+  ]
+  const { teams, taskList } = makeTeams({ members })
+  const details = detailsFor([[101, 1], [102, 3]])
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, store, details, config: { concurrency: 1 } })
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(taskList.length, 1, '已解出的题不参与编排（只建未解题的任务）')
+  taskList[0].status = 'in_progress'
+  taskList[0].ownerName = 'solver-pwn-1'
+
+  // 模拟 101 起了环境（剩余 25 分钟 → 距释放 ~1500s），已解出的 102 也占着环境
+  await store.upsertChallengeWork(CONNECTION.key, '101', {
+    envStarted: true, envReleased: false, envReleaseTime: new Date(1700000000000 + 1500 * 1000).toISOString(),
+  })
+  await store.upsertChallengeWork(CONNECTION.key, '102', {
+    envStarted: true, envReleased: false, envReleaseTime: new Date(1700000000000 + 1700 * 1000).toISOString(),
+  })
+
+  const report = await orchestrator.status({ __agent: AGENT })
+  assert.match(report, /\| 题目 \| 分类 \| 分值 \| 题型 \| 任务 \| 任务状态 \| owner \| 平台 \| 环境 \|/)
+  assert.match(report, /\| pwn-a \(#101\) .*\| 环境型 \|/)
+  assert.match(report, /剩余 25m/)
+  assert.match(report, /- 环境占用：2\/2（上限来源：平台默认 2/)
+  assert.match(report, /### ♻️ 已解出但仍在占用环境/)
+  assert.match(report, /ctf_release_env id=102/)
+})
+
+test('环境调度：纯环境题池（10 道 / envLimit=2 / 并发 6）→ 只派 2 个，其余明确排队', async () => {
+  const store = await makeStore()
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const { teams, calls } = makeTeams({ members })
+  const envs = Array.from({ length: 10 }, (_, i) =>
+    makeChallenge({ id: 1000 + i, name: `only-env-${i}`, category: 'Pwn', score: 500 - i }),
+  )
+  const details = detailsFor(envs.map((c, i) => [1000 + i, 1]))
+  const { orchestrator } = await makeOrchestrator({
+    challenges: envs, teams, store, details, config: { concurrency: 6, envLimit: 2 },
+  })
+
+  const summary = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 2, '纯环境题池时只派 envLimit=2 个（不因并发 6 就派 6 个）')
+  assert.equal(calls.createTask.length, 10, '任务板仍是完整队列')
+  assert.match(summary, /环境调度：同时最多 2 个环境（config.envLimit），当前已占用 0 → 本轮环境题配额 2 个/)
+  // 纯环境题池：探测会一直做到「找不到非环境题」为止 → 8 道全部明确归类为环境排队
+  assert.match(summary, /环境排队（8 题：环境配额 2\/2 已满/)
+  assert.match(summary, /challengeId=1009，题型=环境型/)
+  assert.doesNotMatch(summary, /### 排队中/, '都探明了就不用再列「未探测题型」的排队段')
+  assert.match(summary, /题型探测：本轮按需探测 10 题/)
 })

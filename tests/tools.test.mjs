@@ -176,10 +176,10 @@ const callsOf = (adapter, method) => adapter.calls.filter((call) => call.method 
 
 // ------------------------------------------------------------------ 规格形状
 
-test('导出 14 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
+test('导出 15 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
   const { specs, tools } = createHarness()
-  assert.equal(specs.length, 14)
-  assert.equal(TOOL_NAMES.length, 14)
+  assert.equal(specs.length, 15)
+  assert.equal(TOOL_NAMES.length, 15)
   assert.deepEqual(specs.map((spec) => spec.name), TOOL_NAMES)
   assert.deepEqual(Object.keys(tools).sort(), [...TOOL_NAMES].sort())
   for (const spec of specs) {
@@ -194,8 +194,8 @@ test('导出 14 个工具规格，名字与 TOOL_NAMES 一致且形状符合 def
 })
 
 test('buildToolSpecs() 无 deps 也能构造全部规格（执行时才需要依赖）', () => {
-  assert.equal(buildToolSpecs().length, 14)
-  assert.equal(buildToolSpecs({}).length, 14)
+  assert.equal(buildToolSpecs().length, 15)
+  assert.equal(buildToolSpecs({}).length, 15)
 })
 
 // ------------------------------------------------------------------ 连接解析失败
@@ -1234,7 +1234,7 @@ test('ctf_connect：cookie 缺 csrftoken 只提醒不拒绝', async () => {
   assert.match(out, /^✅ 已连接凌虚赛事平台/)
   assert.match(out, /建议把 csrftoken 一起带上/)
   assert.match(out, /不强制/)
-  assert.ok(specs.length === 14)
+  assert.ok(specs.length === 15)
 
   const withCsrf = await tools.ctf_connect.execute({
     baseUrl: 'https://example.com:8000',
@@ -1295,8 +1295,9 @@ function sessionExpiredError() {
   })
 }
 
-test('工具数 13 → 14：TOOL_NAMES 含 ctf_session，参数只有 connection', () => {
-  assert.equal(TOOL_NAMES.length, 14)
+test('工具数 14 → 15：TOOL_NAMES 含 ctf_session 与 ctf_delay_env', () => {
+  assert.equal(TOOL_NAMES.length, 15)
+  assert.ok(TOOL_NAMES.includes('ctf_delay_env'))
   assert.ok(TOOL_NAMES.includes('ctf_session'))
   const { tools } = createHarness()
   assert.deepEqual(Object.keys(tools.ctf_session.parameters), ['connection'])
@@ -1407,4 +1408,276 @@ test('跨模块集成：session 失效时 ctf_solve_start 不建任务、不 spa
   assert.equal(teamsCalls.createTask.length, 0, '不得建任务')
   assert.equal(teamsCalls.spawn.length, 0, '不得 spawn')
   assert.equal(callsOf(adapter, 'challenges').length, 0, '探活失败就不该再拉题目列表')
+})
+
+// ────────────────────────────────────────────── task-17：环境延时 / 限量 / 附件型 / check 模式
+
+test('ctf_delay_env：五分类渲染（成功 / 太早 / 正在延时 / 不存在 / 已过期）', async () => {
+  const cases = [
+    ['delayed', { ok: true, kind: 'delayed', addedSeconds: 1800, message: '成功延时30分钟' }, /⏱️ 已延时 30 分钟/, /成功延时30分钟/],
+    ['too-early', { ok: false, kind: 'too-early', message: '剩余半小时后才能延时' }, /现在还不能延时/, /剩余半小时后才能延时/],
+    ['busy', { ok: false, kind: 'busy', message: '该环境正在延时' }, /正在延时，请稍后重试/, /Redis 锁/],
+    ['missing', { ok: false, kind: 'missing', message: '不存在的环境' }, /没有运行中的环境/, /ctf_start_env id=102/],
+    ['expired', { ok: false, kind: 'expired', message: '逻辑错误' }, /环境已过期/, /重新起环境/],
+  ]
+  for (const [kind, result, ...patterns] of cases) {
+    const store = await makeStore()
+    const adapter = createAdapter({ delayEnvironment: async () => result })
+    const { tools } = createHarness({ adapter, store })
+    const out = await tools.ctf_delay_env.execute({ id: 102 })
+    for (const pattern of patterns) assert.match(out, pattern, `${kind} 的渲染不对：${out}`)
+    assert.equal(callsOf(adapter, 'delayEnvironment').length, 1)
+    const work = await store.getChallengeWork(CONNECTION.key, '102')
+    if (kind === 'delayed') {
+      assert.equal(work.envDelayCount, 1, '成功延时才累计次数')
+      assert.equal(typeof work.envDelayedAt, 'string')
+    } else {
+      assert.equal(work.envDelayLastKind, kind, '失败类别也要留痕（便于排查）')
+    }
+  }
+})
+
+test('ctf_delay_env：适配器没给 kind 时用平台文案兜底；缺 id / 无实现有清晰提示', async () => {
+  const adapter = createAdapter({ delayEnvironment: async () => ({ status: 3, msg: '剩余半小时后才能延时' }) })
+  const { tools } = createHarness({ adapter })
+  assert.match(await tools.ctf_delay_env.execute({ id: 102 }), /现在还不能延时/)
+
+  assert.match(await tools.ctf_delay_env.execute({}), /缺少题目 id/)
+
+  const noImpl = createHarness({ adapter: createAdapter({ delayEnvironment: undefined }) })
+  assert.match(await noImpl.tools.ctf_delay_env.execute({ id: 1 }), /不支持环境延时/)
+})
+
+test('ctf_delay_env：描述里写清了「为什么需要它」（环境会过期 + 30 分钟窗口）', () => {
+  const { tools } = createHarness()
+  const description = tools.ctf_delay_env.description
+  assert.match(description, /每次 \+30 分钟/)
+  assert.match(description, /剩余 <30 分钟/)
+  assert.match(description, /默认时长由平台决定/)
+  assert.doesNotMatch(description, /默认 60 分钟过期/, '实测本赛事是 30 分钟，不能写死 60')
+})
+
+test('ctf_start_env：env-limit 错误渲染成可操作文案，并把学到的 N 写进 store', async () => {
+  const store = await makeStore()
+  const error = new LingxuError('启动环境失败：当前赛事限制启动3个题目环境，请释放后启动', {
+    httpStatus: 400,
+    code: LINGXU_CODES.ENV_LIMIT,
+    envLimit: 3,
+    platformMessage: '当前赛事限制启动3个题目环境，请释放后启动',
+    payload: { error: '当前赛事限制启动3个题目环境，请释放后启动' },
+  })
+  const adapter = createAdapter({ startEnvironment: async () => { throw error } })
+  const { tools } = createHarness({ adapter, store })
+  const out = await tools.ctf_start_env.execute({ id: 102 })
+
+  assert.match(out, /平台限制了同时运行的环境数（本赛事最多 3 个）/)
+  assert.match(out, /请先用 ctf_release_env 释放不再需要的环境/)
+  assert.match(out, /环境是稀缺资源/)
+  assert.match(out, /当前赛事限制启动3个题目环境/)
+  assert.doesNotMatch(out, /^❌/, '不该渲染成裸失败')
+
+  const work = await store.getChallengeWork(CONNECTION.key, '102')
+  assert.equal(work.envLimitObserved, 3, '编排层靠这条自学习真实上限')
+  assert.equal(typeof work.envLimitHitAt, 'string')
+})
+
+test('ctf_start_env：只有文案（没有 envLimit 字段）时也能解析出 N', async () => {
+  const store = await makeStore()
+  const adapter = createAdapter({
+    startEnvironment: async () => {
+      throw new Error('HTTP 400：当前赛事限制启动2个题目环境，请释放后启动')
+    },
+  })
+  const { tools } = createHarness({ adapter, store })
+  const out = await tools.ctf_start_env.execute({ id: 102 })
+  assert.match(out, /最多 2 个/)
+  assert.equal((await store.getChallengeWork(CONNECTION.key, '102')).envLimitObserved, 2)
+})
+
+test('ctf_start_env：返回剩余时间；剩余 <10 分钟时主动提醒延时', async () => {
+  const store = await makeStore()
+  const adapter = createAdapter({
+    startEnvironment: async () => ({
+      connectionInfo: 'nc 1.2.3.4 9999',
+      targets: ['nc 1.2.3.4 9999'],
+      hasPrivateOnly: false,
+      remainingSeconds: 420, // 7 分钟
+      releaseTime: '2026-09-29T01:07:00.000Z',
+    }),
+  })
+  const { tools } = createHarness({ adapter, store })
+  const out = await tools.ctf_start_env.execute({ id: 102 })
+  assert.match(out, /- 环境剩余: 约 7 分钟/)
+  assert.match(out, /2026-09-29T01:07:00.000Z 释放/)
+  assert.match(out, /⚠️ 环境将在 7 分钟后释放，长题请用 ctf_delay_env id=102 延时/)
+
+  const work = await store.getChallengeWork(CONNECTION.key, '102')
+  assert.equal(work.envRemainingSeconds, 420)
+  assert.equal(work.taskType, 1, '起过环境就说明是环境型（编排层免探测）')
+})
+
+test('ctf_start_env：envAutoDelay 默认开 —— 剩余 <30 分钟自动延一次（实测本赛事只有 30 分钟）', async () => {
+  const store = await makeStore()
+  const adapter = createAdapter({
+    startEnvironment: async () => ({
+      connectionInfo: 'nc 1.2.3.4 9999',
+      targets: ['nc 1.2.3.4 9999'],
+      remainingSeconds: 1799,
+      releaseTime: '2026-09-29T01:30:00.000Z',
+    }),
+    delayEnvironment: async () => ({ ok: true, kind: 'delayed', addedSeconds: 1800, message: '成功延时30分钟' }),
+  })
+  const { tools } = createHarness({ adapter, store })
+  const out = await tools.ctf_start_env.execute({ id: 102 })
+  assert.equal(callsOf(adapter, 'delayEnvironment').length, 1, '剩余不足 30 分钟就该自动延一次')
+  assert.match(out, /已自动延时 30 分钟/)
+  assert.match(out, /- 环境剩余: 约 59 分钟/, '延时后要把剩余时间算进去')
+  assert.doesNotMatch(out, /⚠️ 环境将在/, '已经延时了就不该再警告')
+  assert.equal((await store.getChallengeWork(CONNECTION.key, '102')).envAutoDelayed, true)
+
+  // envAutoDelay=false：不调用延时接口，剩余时间为准
+  const off = createAdapter({
+    startEnvironment: async () => ({ connectionInfo: 'nc 1.2.3.4 9999', targets: ['nc 1.2.3.4 9999'], remainingSeconds: 1799 }),
+    delayEnvironment: async () => ({ ok: true, kind: 'delayed', addedSeconds: 1800 }),
+  })
+  const offHarness = createHarness({ adapter: off, store: await makeStore(), config: { envAutoDelay: false } })
+  const offOut = await offHarness.tools.ctf_start_env.execute({ id: 102 })
+  assert.equal(callsOf(off, 'delayEnvironment').length, 0)
+  assert.match(offOut, /- 环境剩余: 约 29 分钟/)
+})
+
+test('ctf_submit_flag：answer_mode=2（check 模式）走 /check/，不走 /flag/', async () => {
+  const store = await makeStore()
+  const adapter = createAdapter({
+    challengeDetail: async (id) => ({
+      id: Number(id), name: 'check 题', taskType: 3, taskTypeLabel: '附件型', answerMode: 2, answerModeLabel: 'check',
+    }),
+    checkFlag: async () => ({ ok: true, status: 1, detail: 'check已触发', message: 'check已触发' }),
+  })
+  const { tools } = createHarness({ adapter, store })
+  const out = await tools.ctf_submit_flag.execute({ id: 102, flag: 'whatever' })
+
+  assert.equal(callsOf(adapter, 'checkFlag').length, 1, '必须走 check 端点')
+  assert.equal(callsOf(adapter, 'submitFlag').length, 0, '绝不能走 /flag/（平台会拒绝）')
+  assert.match(out, /🧪 平台已触发 check — 题目 #102/)
+  assert.match(out, /check已触发/)
+  assert.match(out, /不返回判定结果/)
+  assert.match(out, /不等于\*\*已得分|不等于.*已得分/)
+  assert.match(out, /不计入错误提交次数/)
+
+  const audit = await store.recentSubmissions(5)
+  assert.equal(audit[0].status, 'check')
+  assert.equal(audit[0].challengeId, '102')
+  // check 结果不参与 flag 去重、也不算错误提交
+  assert.equal(await store.hasSubmittedFlag(CONNECTION.key, 102, 'whatever'), false)
+  assert.equal(await store.wrongAttemptCount(CONNECTION.key, 102), 0)
+})
+
+test('ctf_submit_flag：详情探测失败但平台回「此题目为check模式」→ 改走 check，不误记账', async () => {
+  const store = await makeStore()
+  const adapter = createAdapter({
+    challengeDetail: async () => { throw new Error('网络抖动') },
+    submitFlag: async () => {
+      throw new LingxuError('提交未成功：此题目为check模式，请点击check进行得分', {
+        httpStatus: 400,
+        code: LINGXU_CODES.ANSWER_MODE_MISMATCH,
+        platformMessage: '此题目为check模式，请点击check进行得分',
+        payload: { error: '此题目为check模式，请点击check进行得分' },
+      })
+    },
+    checkFlag: async () => ({ ok: true, status: 1, detail: 'check已触发' }),
+  })
+  const { tools } = createHarness({ adapter, store })
+  const out = await tools.ctf_submit_flag.execute({ id: 102, flag: 'flag{x}' })
+  assert.equal(callsOf(adapter, 'checkFlag').length, 1)
+  assert.match(out, /平台已触发 check/)
+  const audit = await store.recentSubmissions(5)
+  assert.equal(audit.length, 1)
+  assert.equal(audit[0].status, 'check', '不能把「模式探错」记成错误提交')
+})
+
+test('ctf_submit_flag：check 模式但适配器没有 checkFlag → 本地拦截，不再撞 /flag/', async () => {
+  const adapter = createAdapter({
+    challengeDetail: async (id) => ({ id: Number(id), name: 'check 题', answerMode: 2 }),
+  })
+  const { tools } = createHarness({ adapter })
+  const out = await tools.ctf_submit_flag.execute({ id: 102, flag: 'flag{x}' })
+  assert.match(out, /check 模式/)
+  assert.match(out, /还没有 checkFlag 实现/)
+  assert.match(out, /不要\*\*继续用 \/flag\/|不要.*\/flag\//)
+  assert.equal(callsOf(adapter, 'submitFlag').length, 0)
+  assert.equal(callsOf(adapter, 'checkFlag').length, 0)
+})
+
+test('ctf_challenge：taskType=3 附件型必须下载附件并显示题型标签', async () => {
+  const workDir = await makeTmpDir()
+  const adapter = createAdapter({
+    challengeDetail: async (id) => ({
+      id: Number(id),
+      name: '附件题',
+      description: '# 附件题\n看附件',
+      attachment: 'https://example.com:8000/media/x/file.zip',
+      attachmentName: 'file.zip',
+      score: 150,
+      solves: 2,
+      taskType: 3,
+      taskTypeLabel: '附件型',
+      answerMode: 1,
+      requiresEnv: false,
+      downloadable: true,
+    }),
+  })
+  const store = await makeStore()
+  const { tools } = createHarness({ adapter, store, config: { workDir } })
+  const out = await tools.ctf_challenge.execute({ id: 105 })
+
+  assert.match(out, /- 题型: 附件型/)
+  assert.match(out, /需要环境: 否/)
+  assert.match(out, /附件（file\.zip）/)
+  assert.match(out, /下一步: 附件型题目/)
+  const dirs = await fsp.readdir(path.join(workDir, 'challenges'))
+  const files = await fsp.readdir(path.join(workDir, 'challenges', dirs[0], 'distfiles'))
+  assert.deepEqual(files, ['file.zip'], '附件型必须真的落盘')
+  const metadata = JSON.parse(await fsp.readFile(path.join(workDir, 'challenges', dirs[0], 'metadata.json'), 'utf8'))
+  assert.equal(metadata.taskType, 3)
+  assert.equal(metadata.taskTypeLabel, '附件型')
+  assert.equal(metadata.downloadable, true)
+  // 题型回写 work 记录（编排层免探测）
+  assert.equal((await store.getChallengeWork(CONNECTION.key, '105')).taskType, 3)
+})
+
+test('ctf_challenge：外链型显示 link_path；动态 flag 标注；附件型缺附件要警告', async () => {
+  const workDir = await makeTmpDir()
+  const adapter = createAdapter({
+    challengeDetail: async (id) => ({
+      id: Number(id),
+      name: '外链题',
+      description: '题面',
+      attachment: '',
+      taskType: 2,
+      taskTypeLabel: '外链型',
+      flagType: 2,
+      flagTypeLabel: '动态 flag',
+      answerMode: 1,
+      externalLink: 'https://pan.example.com/s/abc',
+      secondaryPath: '/data/sec',
+      manual: '手册第一行',
+    }),
+  })
+  const { tools } = createHarness({ adapter, config: { workDir } })
+  const out = await tools.ctf_challenge.execute({ id: 106 })
+  assert.match(out, /- 题型: 外链型｜动态 flag/)
+  assert.match(out, /- 外链: https:\/\/pan\.example\.com\/s\/abc/)
+  assert.match(out, /- 二级路径: \/data\/sec/)
+  assert.match(out, /手册第一行/)
+  assert.match(out, /下一步: 按外链获取题目材料后/)
+
+  // 附件型但平台没给附件链接 → 明确警告（否则 agent 会去空目录找附件）
+  const noFile = createAdapter({
+    challengeDetail: async (id) => ({
+      id: Number(id), name: '缺附件', description: 'x', attachment: '', taskType: 3, taskTypeLabel: '附件型', answerMode: 1,
+    }),
+  })
+  const out2 = await createHarness({ adapter: noFile, config: { workDir } }).tools.ctf_challenge.execute({ id: 107 })
+  assert.match(out2, /平台未返回附件链接/)
 })
