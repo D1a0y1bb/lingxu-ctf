@@ -86,20 +86,19 @@ profile 的 **bundle 列表在启动时读取**，安装后不会热生效：
 
 ### 3.1 在设置页配置（推荐，一次配好）
 
-打开 **设置 → 插件 → 插件配置 → 凌虚 CTF**，按 schema 生成的表单填写：
+打开 **设置 → 内置插件 → 插件列表 → `dsh-lingxu-ctf`**，展开区里就是配置表单：
 
 | 字段 | 填什么 |
 |---|---|
-| `platform` | `lingxu`（凌虚）/ `ctfd` |
-| `baseUrl` | 平台根地址，如 `https://shuxinbei.clsadp.com:8000`（**不要**带前端 `#/...` 路由） |
-| `eventId` | URL 里 `/event/<id>/` 的那个数字（凌虚必填） |
-| `cookie` | 浏览器复制的完整 Cookie（见 3.2）；这是**只写输入框**，DSH 会在跨线前结构化脱敏 |
-| `concurrency` | 并发解题 agent 数，默认 4（1–8） |
-| `workDir` | 附件与 WP 落盘目录；留空 = 工作区下的 `lingxu-ctf-work/` |
+| `平台地址` | 平台根地址，如 `https://shuxinbei.clsadp.com:8000`（**不要**带前端 `#/...` 路由） |
+| `赛事 ID` | URL 里 `/event/<id>/` 的那个数字（必填） |
+| `Cookie（sessionid）` | 浏览器复制的完整 Cookie（见 3.2）；**只写输入框**，DSH 会在跨线前结构化脱敏，前端拿不到明文 |
+| `并发解题 Agent 数` | 默认 4（1–8） |
+| `工作目录` | 附件与 WP 落盘目录；留空 = 工作区下的 `lingxu-ctf-work/` |
 
-其余字段（`maxWrongAttempts` / `dedupeFlags` / `timeoutMs` / `enableWebPanel`）都有合理默认值，可不改。
+其余字段（单题错误提交上限 / flag 本地去重 / 请求超时 / 显示 Web 控制面板）都有合理默认值，可不改。
 
-> 凭据只存本机，不会写进插件目录、不会进 git；`cookie` / `token` 标了 `role('secret')`，
+> 凭据只存本机，不会写进插件目录、不会进 git；`cookie` 标了 `role('secret')`，
 > 设置页渲染成**只写输入框**，前端拿不到明文。
 
 ### 3.2 从浏览器拿 `sessionid`
@@ -154,7 +153,7 @@ sessionid=你的值; csrftoken=你的值
 
 | 工具名 | 作用 | 典型参数 |
 |---|---|---|
-| `ctf_connect` | 配置平台地址 + sessionid，校验连通性并持久化 | `platform`(`lingxu`\|`ctfd`)、`baseUrl`、`eventId`、`cookie`、`token`（CTFd）、`label` |
+| `ctf_connect` | 配置平台地址 + sessionid，校验连通性并持久化 | `baseUrl`、`eventId`、`cookie`、`label` |
 | `ctf_status` | 赛事总览：名称/时间/我的分数排名/已解/待解/理论题状态 | `connection`（可选，默认当前激活连接） |
 | `ctf_challenges` | 题目列表，支持按分类/状态/分值过滤 | `category`、`solved`、`minScore`、`limit`、`connection` |
 | `ctf_challenge` | 单题详情（题面 Markdown + 附件下载 + 连接信息） | `id`（题目 ID）、`download`、`connection` |
@@ -192,16 +191,14 @@ bundle 自带一个 agent 预设 `ctf`（名称「CTF 解题模式」，`order: 
 
 ## 6. 配置项
 
-**推荐在「设置 → 插件 → 插件配置 → 凌虚 CTF」里改**（表单由插件导出的 `Config` schema 自动生成，
-带字段说明）。也可以直接改 `cordis.patch.yml` 的 `lingxu-ctf` 行 `config:`（profile 层实时重载）。
+**推荐在「设置 → 内置插件 → 插件列表 → `dsh-lingxu-ctf`」里改**（表单由插件自带的配置卡片渲染）。
+也可以直接改 `cordis.patch.yml` 的 `lingxu-ctf` 行 `config:`（profile 层实时重载）。
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `platform` | `lingxu` | `lingxu`（凌虚）/ `ctfd` |
 | `baseUrl` | `''` | 平台根地址，如 `https://shuxinbei.clsadp.com:8000` |
 | `eventId` | `0` | 赛事 ID（凌虚必填，URL 里 `/event/<id>/`） |
-| `cookie` | `''` | 完整 Cookie（**secret**，只写输入）。凌虚必须含 `sessionid=` |
-| `token` | `''` | CTFd API Token（**secret**，与 cookie 二选一） |
+| `cookie` | `''` | 完整 Cookie（**secret**，只写输入）。必须含 `sessionid=` |
 | `label` | `''` | 连接备注名，便于多赛事识别 |
 | `concurrency` | `4` | 并发解题 agent 数，取值 1–8（硬上限 8） |
 | `maxWrongAttempts` | `0` | 每题 flag 最大错误提交次数；`0` = 不限制。`punish: true` 的赛事建议设为 `3` 左右 |
@@ -210,8 +207,8 @@ bundle 自带一个 agent 预设 `ctf`（名称「CTF 解题模式」，`order: 
 | `timeoutMs` | `30000` | 单次平台请求超时（毫秒） |
 | `enableWebPanel` | `true` | 是否注册 Web 控制面板路由 `/lingxu-ctf/state` 与客户端 bundle |
 
-> 只要 `baseUrl` + `eventId` + `cookie`（或 CTFd 的 `token`）齐了，工具就会**直接用配置连平台**，
-> 不需要先跑 `ctf_connect`。显式调用 `ctf_connect` 会额外把连接存进本地状态，并支持多赛事切换。
+> 只要 `baseUrl` + `eventId` + `cookie` 齐了，工具就会**直接用配置连平台**，
+> 不需要先跑 `ctf_connect`。显式调用 `ctf_connect` 会额外把连接存进本地状态，并支持多场赛事切换。
 
 目录约定（`workDir` 下）：
 
@@ -251,25 +248,25 @@ lingxu-ctf-work/
 
 ---
 
-## 8. 多赛事（lingxu / ctfd）
+## 8. 多场赛事（只支持凌虚）
 
-| 适配器 | 认证 | 环境题 | 理论题 | 平台侧 WP |
-|---|---|---|---|---|
-| `lingxu`（凌虚，已实测） | `sessionid` Cookie（写操作带 `csrftoken`） | ✅ `begin→run→addr` | ✅ 全自动答题 + 交卷 | ✅ 列表 / 提交 |
-| `ctfd`（CTFd API v1，未实测） | `token` 或 Cookie | ❌ 平台无统一环境接口 | ❌ 不支持 | ❌ 仅本地导出 |
+**本插件只适配凌虚赛事平台**，不提供其他平台的适配器。
+
+| 能力 | 支持 | 说明 |
+|---|---|---|
+| 认证 | ✅ | `sessionid` Cookie（写操作带 `csrftoken`） |
+| 环境题 | ✅ | `begin → run → addr` |
+| 理论题 | ✅ | 全自动答题 + 交卷 |
+| 平台侧 WP | ✅ | 列表 / 提交 |
 
 **切换方式**：每次 `ctf_connect` 都会把该连接设为激活连接，连接 key 形如
-`<platform>:<host>:<eventId>`；之后不带 `connection` 的工具都走激活连接。
+`<host>:<eventId>`；之后不带 `connection` 的工具都走激活连接。
 
 ```
-# 凌虚
-ctf_connect { platform: "lingxu", baseUrl: "https://shuxinbei.clsadp.com:8000", eventId: 4, cookie: "sessionid=..." }
-
-# CTFd（用 API Token，避免 CSRF 麻烦）
-ctf_connect { platform: "ctfd", baseUrl: "https://ctf.example.com", token: "ctfd_xxx" }
+ctf_connect { baseUrl: "https://shuxinbei.clsadp.com:8000", eventId: 4, cookie: "sessionid=..." }
 ```
 
-要同时保留多场比赛，就多次 `ctf_connect`（每次都会保存），再用 `connection` 参数显式指定；
+要同时打多场比赛，就多次 `ctf_connect`（每次都会保存），再用 `connection` 参数显式指定；
 `ctf_status` 会显示当前生效的连接。
 
 ---
@@ -330,8 +327,9 @@ node --check lib/writeup.js
   `apt install gdb-multiarch`，或按题目要求装对应版本的解释器 / JDK。
 - **理论题交卷不可逆**：平台没有撤回接口，`finish` 之后无法重来。
 - **`answer_mode == 2`（check 模式）不支持自动判题**：插件保留该标记并照常展示题面，需要人工确认。
-- **CTFd 适配器未实测**：按官方 API v1 实现，环境题 / 理论题 / 平台侧 WP 均不支持。
 - **平台可能只返回内网地址**：连接信息优先公网地址；只有内网时原样返回并给出提示。
 - **并发上限**：插件 `concurrency` 上限 8，同时受 DSH `agentTeams.maxMembers`（默认 16）约束。
-- **Web 面板是自托管 bundle**：第三方 profile 插件无法依赖 DSH 的 client-modules 解析，
-  面板通过 `/lingxu-ctf/client.js` + index 注入加载；升级 DSH 后如面板失效，先重启再看宿主注入锚点是否变化。
+- **浏览器半走官方 `dsh.client` 机制**：`package.json` 声明 `dsh.client` + `exports["./client"]`，
+  由 DSH 的 client-modules 宿主半自动组装 boot graph 条目（服务在 `/plugins/`），
+  **不要**改用 `tapIndex` 手工注入 —— 宿主会用权威 graph 覆盖删除非官方条目。
+  升级 DSH 后如面板或配置卡片失效，先重启再看该机制是否有变。
