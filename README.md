@@ -1,214 +1,257 @@
 # dsh-lingxu-ctf
 
-> 把[凌虚竞赛平台](https://shuxinbei.clsadp.com)（Lingxu event CTF）接进 DeepSeek Harness：
-> 给一个平台地址 + `sessionid`，就能自动枚举赛题 / 理论题 / 排行榜，拉起并发解题 agent 团队，
-> 自动提交 flag，并自动生成、提交 writeup。
+> 把**凌虚竞赛平台**（Lingxu event CTF）接进 DeepSeek Harness：**配置一次，之后在会话里说一句「开始」**，
+> 就能自动摸清赛题与排名、拉起并发解题 agent 团队、自动提交 flag、自动生成 writeup。
 
-- 宿主版本基线：DSH Desktop `0.2.0-rc.1`（Cordis `4.0.4`）
-- 纯 ESM、零 npm 依赖（只用 Node 内置 `fetch` / `fs`），无构建步骤
-- 目标 profile：`desktop`
+| 项目 | 说明 |
+|---|---|
+| 适用版本 | DSH Desktop `0.2.0-rc.1`（Cordis `4.0.4`），目标 profile `desktop` |
+| 平台支持 | **只支持凌虚赛事平台**（`sessionid` Cookie 认证） |
+| 依赖 | 零第三方依赖：只用 Node 内置能力 + DSH 官方 `@deepseek-ai/schemastery`（配置表单 schema），无构建步骤 |
+| 安装 | 用 `plugin_manager` 装 bundle：本地目录 `file:<你的插件目录>` / tarball / npm 包名 |
+| 提供 | 13 个 `ctf_*` 工具 · 「CTF 解题模式」agent 预设 · Web 控制面板（设置页配置卡片 + 浮动看板） |
+
+## 目录
+
+- [功能一览](#功能一览)
+- [安装](#安装)
+- [怎么用（5 步跑起来）](#怎么用5-步跑起来)
+- [工具清单（13 个）](#工具清单13-个)
+- [「CTF 解题模式」预设](#ctf-解题模式预设)
+- [配置项（10 项）](#配置项10-项)
+- [Web 控制面板](#web-控制面板)
+- [多场赛事](#多场赛事)
+- [注意事项](#注意事项)
+- [开发](#开发)
+- [已知限制](#已知限制)
 
 ---
 
-## 1. 它能做什么
+## 功能一览
 
 | 能力 | 说明 |
 |---|---|
-| 平台接入 | `ctf_connect` 保存平台地址 + `sessionid`，校验连通性，多赛事可切换 |
-| 赛事总览 | `ctf_status`：名称 / 时间 / 我的分数与排名 / 已解 / 待解 / 理论题状态 |
-| 赛题枚举 | `ctf_challenges` 按分类 / 状态 / 分值过滤；`ctf_challenge` 拉题面（HTML→Markdown）、下载附件、给出连接信息 |
-| 环境题 | `ctf_start_env` 自动走平台的 `begin → run → addr` 三步拿到 `nc host port`；`ctf_release_env` 释放 |
-| 自动交 flag | `ctf_submit_flag`：同题同 flag 去重 + 审计日志 + 每题错误次数统计（可选上限） |
-| 排行榜 | `ctf_leaderboard`：个人 / 战队 / AWD / CFS |
-| 理论题 | `ctf_theory`：列试卷 / 开始 / 拉题 / 逐题作答 / 交卷 |
-| 并发解题 | `ctf_solve_start` 拉起 Agent Teams 解题团队（默认 4 并发），建共享任务板；`ctf_solve_status` 看进度；`ctf_solve_stop` 中断并释放环境 |
-| WP | `ctf_writeup` 生成 Markdown WP（题面 + 元信息 + 解题思路 + 关键步骤 + flag + 复现脚本），可提交回平台 |
-| Web 面板 | 题目看板 / 进度 / 排行榜 / 提交审计，路由 `/lingxu-ctf/state` |
-| 预设 | 内置「CTF 解题模式」，一键进入解题纪律模式 |
+| 赛事总览 | 赛事名 / 起止时间 / 剩余时间 / 我的分数与排名 / 已解 / 待解 / 理论题状态 |
+| 赛题枚举 | 按分类 / 状态 / 分值过滤；单题题面（HTML→Markdown）+ 附件自动下载到工作区 |
+| 环境题 | 自动走平台 `begin → run → addr` 三步，返回可直连的 `nc host port`；用完可释放 |
+| 自动交 flag | 同题同 flag 本地去重 + 提交审计日志 + 每题错误次数统计（可设上限，防错误扣分） |
+| 并发解题 | 拉起 agent 团队（默认 4 个，1–8），建共享任务板自动去重，每个 agent 独立解一道题 |
+| 排行榜 | 个人 / 战队 / AWD / CFS |
+| 理论题 | 列试卷 → 开始考试 → 拉题 → 逐题作答 → 交卷（交卷**不可逆**） |
+| writeup | 自动生成 Markdown WP（题面 + 元信息 + 解题思路 + 关键步骤 + flag + 复现脚本），可提交回平台 |
+| Web 面板 | 设置页配置卡片 + 浮动看板（题目看板 / 进度 / 排行榜 / 提交审计 / 理论题） |
+| 预设 | 内置「CTF 解题模式」，选它就能直接说「开始」，不用每次交代流程 |
 
 ---
 
-## 2. 安装
+## 安装
 
-插件以 **bundle** 形式安装：`plugin_manager` 会把它写进 `desktop` profile 的 `package.json`
-依赖与 `dsh.profile.bundles`，`cordis.patch.yml` 自动并入工具行与「CTF 解题模式」预设行。
+插件以 **bundle** 形式安装：`plugin_manager` 会把它写进 `desktop` profile 的 `package.json` 依赖与
+`dsh.profile.bundles`，仓库里的 `cordis.patch.yml` 会同时并入宿主插件行与「CTF 解题模式」预设行。
 
-### 方式 A：本地目录（开发态推荐）
-
-直接对 DSH 会话说（把路径换成你的实际路径）：
+对 DSH 说一句话就能装（把 `<...>` 换成你的实际情况）：
 
 ```
-用 plugin_manager 安装这个 bundle：file:/Users/d1a0y1bb/Desktop/lingxu-ctf
+用 plugin_manager 安装这个 bundle：<target>
 ```
 
-对应调用是 `plugin_manager` 的 `install_bundle`，`target` 支持 npm 包名 / `file:` 路径 / tarball / URL：
+`<target>` 支持三种写法：
 
-| 场景 | target 写法 |
-|---|---|
-| 本地目录 | `file:/Users/d1a0y1bb/Desktop/lingxu-ctf` |
-| 打包分发 | `npm pack` 得到 `dsh-lingxu-ctf-0.1.0.tgz`，target 填该 tgz 的绝对路径 |
-| 已发布包 | `dsh-lingxu-ctf` |
+| 场景 | `<target>` 怎么写 | 说明 |
+|---|---|---|
+| 本地目录（开发态） | `file:<你的插件目录>` | 例如插件在 `~/dsh-lingxu-ctf`，就填 `file:~/dsh-lingxu-ctf`（建议用绝对路径） |
+| 分发包（tarball） | 指向 `dsh-lingxu-ctf-0.1.0.tgz` 的路径 | 在插件目录执行 `npm pack` 生成 tgz，再把 tgz 路径交给 `install_bundle` |
+| npm 包名 | `dsh-lingxu-ctf` | 该包已发布到 npm（或你配置的 registry）时可用 |
 
-### 方式 B：tarball
+打包成 tarball 分发：
 
 ```bash
-cd /Users/d1a0y1bb/Desktop/lingxu-ctf
+cd <你的插件目录>
 npm pack            # 产出 dsh-lingxu-ctf-0.1.0.tgz
 ```
-
-然后把 tgz 路径交给 `plugin_manager install_bundle`。
 
 ### ⚠️ 装完必须重启 DSH
 
 profile 的 **bundle 列表在启动时读取**，安装后不会热生效：
 
-1. 关闭 DSH Desktop，重新打开（或按 DSH 的提示重启）；
-2. 重启后新开会话，`ctf_*` 工具才会出现，「CTF 解题模式」才会出现在模式选择里。
-
-> 提示：`~/.dsh/profiles/desktop/cordis.patch.yml` 是**实时重载**的，迭代调试期可以直接往里加行做临时验证；
-> 但正式安装仍以 `plugin_manager` 为准。
+1. 关闭 DSH Desktop，重新打开；
+2. 重启后新开一个会话，`ctf_*` 工具才会出现，「CTF 解题模式」才会出现在模式选择里。
 
 ### 验证安装
 
-重启后新开一个会话，问 agent：
+重启后新开一个会话，对 agent 说：
 
 ```
 列出你当前可用的 ctf_* 工具
 ```
 
-应能看到 13 个工具；若还配置过平台，`/lingxu-ctf/state` 会返回面板 JSON。
+应能看到 13 个 `ctf_*` 工具；设置页里也会多出 `dsh-lingxu-ctf` 的配置卡片
+（见 [怎么用](#怎么用5-步跑起来) 第 2 步）。
 
 ---
 
-## 3. 快速开始
+## 怎么用（5 步跑起来）
 
-推荐流程是**先在设置页配置一次，之后每次开赛只要：新建工作区 → 选预设 → 说「开始」**。
+一句话总览：**装好插件 → 配置一次 → 之后每场比赛只要「新建工作区 → 选预设 → 说开始」**。
 
-### 3.1 在设置页配置（推荐，一次配好）
+### 第 1 步：装插件并重启 DSH
 
-打开 **设置 → 内置插件 → 插件列表 → `dsh-lingxu-ctf`**，展开区里就是配置表单：
+按上面的[安装](#安装)章节装好并重启。装完不用再做别的，工具和预设都会自动就位。
+
+### 第 2 步：在设置里填 4 项
+
+打开 **设置 → 内置插件 → 插件列表 → `dsh-lingxu-ctf`**，展开配置卡片，填这 4 项：
 
 | 字段 | 填什么 |
 |---|---|
-| `平台地址` | 平台根地址，如 `https://shuxinbei.clsadp.com:8000`（**不要**带前端 `#/...` 路由） |
-| `赛事 ID` | URL 里 `/event/<id>/` 的那个数字（必填） |
-| `Cookie（sessionid）` | 浏览器复制的完整 Cookie（见 3.2）；**只写输入框**，DSH 会在跨线前结构化脱敏，前端拿不到明文 |
-| `并发解题 Agent 数` | 默认 4（1–8） |
-| `工作目录` | 附件与 WP 落盘目录；留空 = 工作区下的 `lingxu-ctf-work/` |
+| `平台地址` | 平台根地址，例如 `https://shuxinbei.clsadp.com:8000`（**不要**带前端 `#/...` 路由） |
+| `赛事 ID` | 浏览器地址栏 `/event/<id>/` 里的那个数字 |
+| `Cookie（sessionid）` | 浏览器复制的完整 Cookie，**必须含 `sessionid=`**（怎么拿见下方） |
+| `并发解题 Agent 数` | 同时解几道题，默认 4，可填 1–8 |
 
-其余字段（单题错误提交上限 / flag 本地去重 / 请求超时 / 显示 Web 控制面板）都有合理默认值，可不改。
+其余字段（错误提交上限 / flag 去重 / 工作目录 / 请求超时 / Web 面板开关）都有合理默认值，先不用管，
+需要时看[配置项](#配置项10-项)。
 
-> 凭据只存本机，不会写进插件目录、不会进 git；`cookie` 标了 `role('secret')`，
-> 设置页渲染成**只写输入框**，前端拿不到明文。
+> `Cookie` 是 **secret 字段**：只写不读，保存后设置页只显示「已设置」，留空表示「不修改」。
+> 凭据只落在本机 `~/.dsh/storages/lingxu-ctf/`，不会进插件目录、不会进 git。
 
-### 3.2 从浏览器拿 `sessionid`
+#### 附：怎么拿 `sessionid`
 
-平台的登录接口带验证码（`/api/captcha/verify/`），**插件不做自动登录**，因此只支持 Cookie 认证：
+平台的登录接口带验证码，**插件不做自动登录**，所以只能用 Cookie：
 
-1. 浏览器登录凌虚平台，进入目标赛事页面；
-2. 按 `F12` 打开开发者工具 → **Application（应用）** → 左侧 **Cookies** → 选中平台域名；
-3. 找到 `sessionid`，复制它的值；如果有 `csrftoken`，**一起带上**（写操作会用它做 `X-CSRFToken`）；
-4. 拼成一行 Cookie：
+1. 浏览器登录凌虚平台，打开目标赛事页面；
+2. 按 `F12` → **Application（应用）** → 左侧 **Cookies** → 选中平台域名；
+3. 复制 `sessionid` 的值；如果有 `csrftoken`，**一起带上**（写操作会用它做 `X-CSRFToken`）；
+4. 拼成一行，粘进设置页的 `Cookie` 字段：
 
 ```
 sessionid=你的值; csrftoken=你的值
 ```
 
-### 3.3 开一局：新建工作区 → 选预设 → 说「开始」
+### 第 3 步：新建一个工作区
 
-1. **新建一个文件夹当工作区**（附件、解题脚本、WP 都落在这里）；
-2. 新建会话，模式选 **「CTF 解题模式」**；
-3. 直接说：
+在 DSH 里新建一个工作区（选一个空文件夹）。**为什么要新建**：题面元数据、附件、解题脚本、
+生成的 writeup 全部落在这个工作区下的 `lingxu-ctf-work/` 里，**一场比赛一个目录**，好找也好清理。
+
+### 第 4 步：新建会话时选「CTF 解题模式」
+
+在新建会话（工作区）时，把 agent 模式/预设选成 **「CTF 解题模式」**。
+这个预设已经写好了完整工作流和解题纪律，选它就够了。
+
+### 第 5 步：说「开始」
+
+在工作区里新建会话（已选预设），直接说：
 
 ```
 开始
 ```
 
-就这一句。预设里的工作流会驱动 agent：
+**就这一句。** 预设已经让 agent 知道该干什么：
 
-- `ctf_status` 确认连接（设置页填过就不用再传凭据）
-- `ctf_solve_start` 拉起并发团队：拉未解题 → 建共享任务板 → 按 `concurrency` spawn solver
-- 每个 solver 自己摸题面 → 开环境 → 解题 → 交 flag → 写 WP
-- 想看进度说「看下进度」（`ctf_solve_status`）；喊「停」（`ctf_solve_stop`，默认释放环境）
+- 它会先用 `ctf_status` 确认连接、看清赛事名 / 剩余时间 / 题目分布 / 我的排名；
+- 再用 `ctf_solve_start` 拉起并发解题团队（按设置里的并发数），自动建共享任务板并分派题目；
+- **不需要再报一遍平台地址和 Cookie** —— 第 2 步已经配置好了，agent 直接用。
 
-要缩小范围就直接说，例如：
+想缩小范围就直接把条件说出来，例如：
 
 ```
 开始，只做 Web 和 Misc、分值 ≥ 100 的题，并发 6
 ```
 
-> 也可以不用预设、在任意会话里手动驱动（工具都在）。此时先 `ctf_connect` 传一次凭据即可；
-> 设置页填过的话这一步也能省。
+### 说这些话就能用
 
-### 3.4 agent 会依次做什么
+| 你说 | 发生什么 |
+|---|---|
+| `开始` | `ctf_status` 摸底 → `ctf_solve_start` 按并发拉 agent 团队、建共享任务板 |
+| `看下进度` | `ctf_solve_status`：任务板 + 平台侧题目/排名对照 |
+| `只做 Web 分类` / `只做 300 分以上的` | 带 `category` / `minScore` 的编排 |
+| `停` | `ctf_solve_stop`：中断 agent 并释放环境 |
+| `给这题写个 writeup` | `ctf_writeup` 生成 Markdown 落盘，可选提交平台 |
+| `做理论题` | `ctf_theory`：列试卷 → 开始 → 逐题作答 → 交卷（**交卷不可逆**） |
+| `看看排行榜` | `ctf_leaderboard` |
+| `这题环境先放掉` | `ctf_release_env` 释放靶机，避免占满环境配额 |
+| `这题题面给我看看` | `ctf_challenge` 拉题面（Markdown）+ 下载附件 + 给出连接信息 |
 
-1. `ctf_status` — 确认连接、摸清题目分布与自身排名；
-2. `ctf_solve_start` — 过滤未解题 → 按分值降序 → 建共享任务板 → 按 `concurrency` 拉起 `solver-*` teammate；
-3. 每个 teammate：`ctf_challenge` 拉题面 →（环境题）`ctf_start_env` → 本地解题 → `ctf_submit_flag` → `ctf_writeup` 生成 WP（用 `body` 传自己总结的思路正文）→ 完成共享任务；
-4. `ctf_solve_status` 对照「任务板 / 平台状态」汇报进度；`ctf_solve_stop` 可随时中断并释放环境。
+### 它自己会做什么
+
+选好预设说「开始」之后，每个解题 agent 会自动跑完这一串，**你不用盯着**：
+
+1. `ctf_challenge` —— 拉题面（HTML 已转 Markdown）、下载附件到工作区；
+2. 环境题自动 `ctf_start_env`（平台需要 `begin → run → addr` 三步），拿到 `nc host port` 连接信息；
+3. 在工作区里动手解题（写脚本、跑 exp、必要时联网查资料），保留复现脚本；
+4. 拿到 flag 立刻 `ctf_submit_flag` 提交（本地去重 + 审计；错误次数超限会拒提交，防扣分）；
+5. `ctf_writeup` 生成 Markdown WP 落到 `lingxu-ctf-work/writeups/`；
+6. 解完释放环境、把共享任务标记完成，并向 lead 汇报。
+
+你随时可以用 `看下进度` 查看团队状态，用 `停` 收工。
 
 ---
 
-## 4. 工具清单（13 个）
+## 工具清单（13 个）
 
-| 工具名 | 作用 | 典型参数 |
+这些工具由插件注册，agent 会自动调用；你也可以在会话里直接点名要求。
+
+| 工具名 | 作用 | 参数 |
 |---|---|---|
-| `ctf_connect` | 配置平台地址 + sessionid，校验连通性并持久化 | `baseUrl`、`eventId`、`cookie`、`label` |
-| `ctf_status` | 赛事总览：名称/时间/我的分数排名/已解/待解/理论题状态 | `connection`（可选，默认当前激活连接） |
-| `ctf_challenges` | 题目列表，支持按分类/状态/分值过滤 | `category`、`solved`、`minScore`、`limit`、`connection` |
-| `ctf_challenge` | 单题详情（题面 Markdown + 附件下载 + 连接信息） | `id`（题目 ID）、`download`、`connection` |
-| `ctf_start_env` | 环境题 `begin→run→addr`，返回连接信息 | `id`、`connection` |
-| `ctf_release_env` | 释放环境 | `id`、`connection` |
-| `ctf_submit_flag` | 提交 flag（去重 + 审计 + 错误计数） | `id`、`flag`、`connection` |
-| `ctf_leaderboard` | 个人/战队/AWD/CFS 排行榜 | `kind`(`user`\|`team`\|`awd`\|`cfs`)、`size`、`connection` |
-| `ctf_theory` | 理论题：列出试卷 / 开始 / 拉题 / 作答 / 交卷 | `action`(`list`\|`begin`\|`questions`\|`answer`\|`time`\|`finish`)、`testId`、`questionId`、`option`、`limit`、`connection` |
-| `ctf_solve_start` | 拉起并发解题 agent 团队（默认 4），建共享任务板 | `category`、`minScore`、`limit`、`onlyUnsolved`、`concurrency`、`connection` |
-| `ctf_solve_status` | 团队进度：任务板 + 平台状态对照 | `connection`（可选） |
-| `ctf_solve_stop` | 中断所有解题 agent、释放环境 | `reason`、`connection` |
-| `ctf_writeup` | 生成 / 提交 WP | `id`（题目 ID，省略 = 按已解题目批量生成；旧别名 `challengeId` 仍可用）、`body`（解题思路正文，建议由解题 agent 填写）、`submit`（默认 false，只生成本地文件）、`title`、`connection` |
+| `ctf_connect` | 保存平台连接（多赛事切换时用；设置页填过可省） | `baseUrl`、`eventId`、`cookie`、`label` |
+| `ctf_status` | 赛事总览：名称 / 时间 / 我的分数排名 / 已解 / 待解 / 理论题状态 | `connection` |
+| `ctf_challenges` | 题目列表，按分类 / 状态 / 分值过滤 | `category`、`solved`、`minScore`、`limit`、`connection` |
+| `ctf_challenge` | 单题详情：题面 Markdown + 附件下载 + 连接信息 | `id`、`download`、`connection` |
+| `ctf_start_env` | 环境题开题并起环境（`begin→run→addr`），返回连接信息 | `id`、`connection` |
+| `ctf_release_env` | 释放环境（幂等，重复释放也算成功） | `id`、`connection` |
+| `ctf_submit_flag` | 提交 flag：本地去重 + 审计 + 错误次数护栏 | `id`、`flag`、`connection` |
+| `ctf_leaderboard` | 排行榜：个人 / 战队 / AWD / CFS | `kind`、`size`、`connection` |
+| `ctf_theory` | 理论题一站式：list / begin / questions / answer / time / finish | `action`、`testId`、`questionId`、`option`、`limit`、`connection` |
+| `ctf_solve_start` | 拉起并发解题 agent 团队并建共享任务板 | `category`、`minScore`、`limit`、`onlyUnsolved`、`concurrency`、`connection` |
+| `ctf_solve_status` | 团队进度：任务板 + 平台状态对照 | `connection` |
+| `ctf_solve_stop` | 中断所有解题 agent，并（默认）释放它们拉起的环境 | `reason`、`releaseEnvs`、`connection` |
+| `ctf_writeup` | 生成 / 提交 WP（`id` 省略 = 按已解题目批量生成；`submit` 默认 false） | `id`、`body`、`submit`、`title`、`connection` |
 
-> 需要指定赛事时，绝大多数工具都接受可选的 `connection`（连接 key，形如 `lingxu:host:4`）；
-> 不传就用当前激活连接。
+说明：
 
----
-
-## 5. 「CTF 解题模式」预设
-
-bundle 自带一个 agent 预设 `ctf`（名称「CTF 解题模式」，`order: 5`），它：
-
-- 注入解题 persona：先 `ctf_connect` 摸全局、优先做高分且已解人数多的题；
-- 环境题必须走 `ctf_start_env`，解完用 `ctf_release_env` 释放；
-- 拿到 flag 立刻提交，不攒着；不确定的 flag 不反复提交（防扣分）；
-- 需要并发时用 `ctf_solve_start`，而不是手工 spawn；
-- 每题解出后调用 `ctf_writeup` 生成 WP；
-- 附带标准工具链：bash / fs / jobs / skill / todo / web / ask-user / present / 压缩。
-
-**怎么用**：重启 DSH 后新建会话，在模式（预设）选择里选「CTF 解题模式」，然后直接说
-「接入凌虚平台：地址 xxx，eventId xxx，Cookie xxx」。若要改 persona 文案或子插件清单，
-编辑仓库根目录的 `cordis.patch.yml` 里 `preset-ctf` 行后重装/重启。
+- `kind` 取值 `user` / `team` / `awd` / `cfs`；`action` 取值 `list` / `begin` / `questions` / `answer` / `time` / `finish`；
+  `id` 可以是数字或字符串。
+- 所有工具都接受可选的 `connection`（连接 key，形如 `lingxu:<host>:<赛事ID>`）；
+  不传就用设置页配置的连接。
+- 一般**不需要手写这些调用**——预设里的工作流会自己用。工具描述里写了每个工具的用法与副作用。
 
 ---
 
-## 6. 配置项
+## 「CTF 解题模式」预设
 
-**推荐在「设置 → 内置插件 → 插件列表 → `dsh-lingxu-ctf`」里改**（表单由插件自带的配置卡片渲染）。
-也可以直接改 `cordis.patch.yml` 的 `lingxu-ctf` 行 `config:`（profile 层实时重载）。
+bundle 自带一个 agent 预设 `ctf`（名称「CTF 解题模式」，`order: 5`），它做了三件事：
+
+1. **注入解题 persona**：优先做高分且已解人数多的题；拿到 flag 立刻提交，不攒着；
+   不确定的 flag 不反复提交（防扣分）；需要并发时用 `ctf_solve_start`，不手工一个个 spawn。
+2. **写死默认工作流**：用户说「开始」就直接 `ctf_status` → `ctf_solve_start`，
+   **不反问配置、不索要凭据**（配置在设置页里）。
+3. **附带标准工具链**：bash / fs / jobs / skill / todo / web / ask-user / present / 上下文压缩。
+
+**怎么用**：新建会话时选「CTF 解题模式」，然后说「开始」即可（见[怎么用](#怎么用5-步跑起来)）。
+若想改 persona 文案或子插件清单，编辑 `cordis.patch.yml` 里的 `preset-ctf` 行后重装/重启。
+
+---
+
+## 配置项（10 项）
+
+**推荐在设置页改**：**设置 → 内置插件 → 插件列表 → `dsh-lingxu-ctf`**（表单由插件自带的配置卡片渲染）。
+也可以直接改 profile 里 `cordis.patch.yml` 的 `lingxu-ctf` 行 `config:`（profile 层实时重载）。
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `baseUrl` | `''` | 平台根地址，如 `https://shuxinbei.clsadp.com:8000` |
-| `eventId` | `0` | 赛事 ID（凌虚必填，URL 里 `/event/<id>/`） |
-| `cookie` | `''` | 完整 Cookie（**secret**，只写输入）。必须含 `sessionid=` |
-| `label` | `''` | 连接备注名，便于多赛事识别 |
-| `concurrency` | `4` | 并发解题 agent 数，取值 1–8（硬上限 8） |
-| `maxWrongAttempts` | `0` | 每题 flag 最大错误提交次数；`0` = 不限制。`punish: true` 的赛事建议设为 `3` 左右 |
-| `dedupeFlags` | `true` | 提交前做「同题同 flag」去重，重复的正确 flag 不再请求平台 |
-| `workDir` | `''` | 附件、题目元数据、WP 的落盘根目录；留空 = 会话 cwd 下的 `lingxu-ctf-work/` |
+| `baseUrl` | `''` | 平台根地址，如 `https://shuxinbei.clsadp.com:8000`（不要带 `#/` 路由） |
+| `eventId` | `0` | 赛事 ID，URL 里 `/event/<id>/` 的数字 |
+| `cookie` | `''` | 完整 Cookie，必须含 `sessionid=`；**secret 字段，只写不读** |
+| `label` | `''` | 连接备注名，多场比赛时便于识别 |
+| `concurrency` | `4` | 并发解题 agent 数，1–8（硬上限 8） |
+| `maxWrongAttempts` | `0` | 每题 flag 最大错误提交次数；`0` = 不限制，`punish: true` 的赛事建议设 3 左右 |
+| `dedupeFlags` | `true` | 提交前做「同题同 flag」去重，已成功提交过的 flag 不再请求平台 |
+| `workDir` | `''` | 附件 / 元数据 / WP 的落盘根目录；留空 = 当前工作区下的 `lingxu-ctf-work/` |
 | `timeoutMs` | `30000` | 单次平台请求超时（毫秒） |
-| `enableWebPanel` | `true` | 是否注册 Web 控制面板路由 `/lingxu-ctf/state` 与客户端 bundle |
+| `enableWebPanel` | `true` | 是否启用 Web 控制面板与设置页配置卡片 |
 
-> 只要 `baseUrl` + `eventId` + `cookie` 齐了，工具就会**直接用配置连平台**，
-> 不需要先跑 `ctf_connect`。显式调用 `ctf_connect` 会额外把连接存进本地状态，并支持多场赛事切换。
+> 只要 `baseUrl` + `eventId` + `cookie` 齐了，工具就会**直接用配置连平台**，不需要先跑 `ctf_connect`。
+> 显式调用 `ctf_connect` 会额外把连接存进本地状态，适合**多场比赛切换**。
 
 目录约定（`workDir` 下）：
 
@@ -219,117 +262,115 @@ lingxu-ctf-work/
 └── writeups/<slug>-<id>.md     # 生成的 WP
 ```
 
-> `<slug>` 由题名清洗而来：**保留中文与 `!()` 等可读符号**，只把路径危险字符
-> `<>:"/\|?*` 与控制字符替换成 `-`，空白折叠为 `-`，最多 60 字符（不切断 emoji），
-> 题名退化成空时回退裸 `challenge`（id 由文件名单独拼，如 `challenge-12.md`）。
-> 编排层、工具层与 WP 用的是**同一条规则**，所以目录名和 WP 文件名总是对得上。
+> `<slug>` 由题名清洗而来：保留中文与 `!()` 等可读符号，只把路径危险字符
+> `<>:"/|?*` 与控制字符替换成 `-`，最多 60 字符，题名退化成空时回退 `challenge`
+> （如 `challenge-12.md`）。
 
 ---
 
-## 7. Web 控制面板
+## Web 控制面板
 
-`enableWebPanel: true`（默认）时，宿主插件注册两个 same-origin 路由：
+`enableWebPanel: true`（默认）时可用：
 
-| 路由 | 内容 |
-|---|---|
-| `GET /lingxu-ctf/state` | 面板 JSON 快照（赛事、统计、题目看板、排行榜、提交审计、理论题） |
-| `GET /lingxu-ctf/client.js` | 自托管客户端 bundle（由 index 注入，无需 npm 解析） |
+- **设置页配置卡片**：注册进 DSH Plugins 页的 bundle 配置槽（key = 包名 `dsh-lingxu-ctf`），
+  就是你填平台地址 / Cookie 的地方；`cookie` 渲染为只写输入框，永不回显。
+- **浮动看板**：右下角面板，数据来自同源路由 `GET /lingxu-ctf/state`（5 秒轮询，页面不可见时暂停）。
 
 面板能看到：
 
-- **赛事头部**：赛事名 / 平台 / 剩余时间 / 我的分数与排名；
+- **赛事头部**：赛事名 / 剩余时间 / 我的分数与排名；
 - **统计条**：题目总数、已解、进行中、待解、总分；
-- **题目看板**：按分类分组的卡片，显示分值、状态（待解/进行中/已解）、负责人（teammate 名）、已提交次数，支持过滤与搜索；
+- **题目看板**：按分类分组，显示分值、状态（待解 / 进行中 / 已解）、负责的 agent、已提交次数，支持过滤与搜索；
 - **排行榜**：个人榜前 20，标出自己；
 - **提交审计**：最近 20 条 flag 提交（时间 / 题目 / 状态，flag 已脱敏）；
 - **理论题**：试卷状态、题量、剩余时间。
 
-面板每 5 秒轮询一次（页面不可见时暂停）。未配置平台时会提示先调用 `ctf_connect`。
+排查用：`GET /lingxu-ctf/diag` 返回宿主侧的客户端加载诊断（路由注册、bundle 版本、浏览器打点）。
+客户端半通过 DSH 官方 `dsh.client` 机制加载（`package.json` 的 `dsh.client` + `exports["./client"]`），
+由 DSH 的 client-modules 宿主半自动组装并服务，**不要**改成手工注入 boot graph。
 
 ---
 
-## 8. 多场赛事（只支持凌虚）
+## 多场赛事
 
-**本插件只适配凌虚赛事平台**，不提供其他平台的适配器。
+**本插件只适配凌虚赛事平台**。同时打多场比赛时：
 
-| 能力 | 支持 | 说明 |
-|---|---|---|
-| 认证 | ✅ | `sessionid` Cookie（写操作带 `csrftoken`） |
-| 环境题 | ✅ | `begin → run → addr` |
-| 理论题 | ✅ | 全自动答题 + 交卷 |
-| 平台侧 WP | ✅ | 列表 / 提交 |
-
-**切换方式**：每次 `ctf_connect` 都会把该连接设为激活连接，连接 key 形如
-`<host>:<eventId>`；之后不带 `connection` 的工具都走激活连接。
+- 设置页的 `baseUrl` / `eventId` / `cookie` 永远指向**当前主用**的那场；
+- 想保留多场，就分别对 agent 说「用 `ctf_connect` 存一下这场比赛：地址 …、赛事 ID …、Cookie …」，
+  每次 `ctf_connect` 都会把连接存进本地状态并设为激活连接；
+- 连接 key 形如 `lingxu:<host>:<赛事ID>`，之后用 `connection` 参数显式指定要用哪一场，
+  不传则用激活连接（或设置页配置）。
 
 ```
 ctf_connect { baseUrl: "https://shuxinbei.clsadp.com:8000", eventId: 4, cookie: "sessionid=..." }
 ```
 
-要同时打多场比赛，就多次 `ctf_connect`（每次都会保存），再用 `connection` 参数显式指定；
-`ctf_status` 会显示当前生效的连接。
-
 ---
 
-## 9. 注意事项
+## 注意事项
 
 - **登录带验证码 → 只支持 Cookie**。平台登录走 `/api/captcha/verify/`，插件不做自动登录；
-  Cookie 过期后 `ctf_connect` / 工具会提示重新获取。请只在本机粘贴自己的 Cookie。
-- **`punish: true` 时错误提交会扣分**。`ctf_status` / `ctf_connect` 会给出警告；
-  护栏默认只记录不阻断（符合「全自动」设计），可用 `maxWrongAttempts` 主动收紧。
-- **环境题记得释放**。`ctf_start_env` 会占用平台环境配额，解完或放弃请 `ctf_release_env`
-  （重复释放是幂等的：平台返回「该环境正在释放」/「没有运行的环境」都视为成功）。
+  Cookie 过期后工具会提示重新获取。请只在本机粘贴自己的 Cookie。
+- **`punish: true` 时错误提交会扣分**。`ctf_status` 会给出警告；护栏默认只记录不阻断
+  （符合「全自动」设计），可用 `maxWrongAttempts` 主动收紧。
+- **环境题记得释放**。`ctf_start_env` 会占用平台环境配额；解完或放弃时说一句「这题环境放掉」
+  （`ctf_release_env`，重复释放是幂等的）。`ctf_solve_stop` 默认也会释放。
 - **只访问你配置的平台地址**。所有出站请求只指向 `baseUrl`，不做任何第三方外发；
   附件也只会从平台返回的地址下载。
-- **Cookie 安全**：凭据只落在本机 `~/.dsh/storages/lingxu-ctf/state.json`，日志中脱敏（只留前 6 位）；
-  不要把带 Cookie 的截图或状态文件分享出去。
-- **理论题交卷不可逆**：`ctf_theory` 的 `finish` 是危险操作，调用前确认所有题目已作答。
+- **Cookie 安全**：secret 字段只写不读、日志脱敏（只留前 6 位）、状态文件在本机
+  `~/.dsh/storages/lingxu-ctf/`；不要把带 Cookie 的截图或状态文件分享出去。
+- **理论题交卷不可逆**：`ctf_theory` 的 `finish` 没有撤回接口，交卷前确认所有题都已作答。
 - **不要在未确认 flag 的情况下反复提交**，尤其是开启了错误扣分的赛事。
 
 ---
 
-## 10. 开发
+## 开发
 
 ```bash
 # 全部单测（自动发现 tests/**/*.test.mjs）
 node --test
 
-# 只跑 WP 模块
+# 只跑某个模块
 node --test tests/writeup.test.mjs
 
 # 语法检查
 node --check lib/writeup.js
 ```
 
-> Node 24 起测试运行器不再接受目录参数，`node --test tests/` 会报 `MODULE_NOT_FOUND`；
-> 用上面的 `node --test`（自动发现）或显式 glob：`node --test "tests/*.test.mjs"`。
-
-> 本机若 `node` 不在 PATH，可用 DSH 自带的 Node：
-> ```bash
-> "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/node/bin/node" --test
-> ```
+> Node 24 起测试运行器不再接受目录参数：`node --test tests/` 会报 `MODULE_NOT_FOUND`，
+> 用 `node --test`（自动发现）或 `node --test "tests/*.test.mjs"`。
+> 若 `node` 不在 PATH，可用 DSH 自带的 Node：
+> `"<DSH 安装目录>/Contents/Resources/runtime/primary-runtime/dependencies/node/bin/node" --test`
 
 文档：
 
-- [`docs/DESIGN.md`](docs/DESIGN.md) — 设计文档（用户决策、平台 API、模块划分、工具清单、编排设计、验收标准）；
-- [`docs/DSH-API-NOTES.md`](docs/DSH-API-NOTES.md) — DSH 插件 API 契约（`defineTool`、Agent Teams、预设、Web 路由、存储、打包安装），写代码前以它为准。
+- [`docs/DESIGN.md`](docs/DESIGN.md) — 设计文档（用户决策、平台 API、模块划分、编排设计、验收标准）；
+- [`docs/DSH-API-NOTES.md`](docs/DSH-API-NOTES.md) — DSH 插件 API 契约（工具注册、Agent Teams、预设、Web 路由、存储、打包安装）。
 
-模块划分：`lib/lingxu.js`（平台客户端）→ `lib/platforms.js`（适配器）→ `lib/store.js`（持久化）
-→ `lib/tools.js` / `lib/orchestrate.js` / `lib/writeup.js`（业务）→ `lib/index.js`（装配）。
-依赖方向单向，反向依赖禁止。
+模块划分（依赖方向单向，反向依赖禁止）：
+
+```
+lib/lingxu.js      平台客户端（纯 fetch，零依赖）
+lib/platforms.js   平台适配器注册表
+lib/store.js       连接配置 + 提交审计 + 解题进度持久化
+lib/tools.js       13 个模型可见工具
+lib/orchestrate.js Agent Teams 并发编排
+lib/writeup.js     WP 生成与提交
+lib/client.js      Web 控制面板（浏览器半）
+lib/index.js       装配（配置归一化 + 依赖注入 + 注册）
+```
 
 ---
 
-## 11. 已知限制
+## 已知限制
 
-- **本机没有 Docker / pwntools**：插件按「本机 workspace + 按需装工具链」设计（不用容器）。
-  pwn / rev 类题目需要自己准备环境，例如 `pip install pwntools`、`brew install gdb`、
-  `apt install gdb-multiarch`，或按题目要求装对应版本的解释器 / JDK。
+- **只支持凌虚赛事平台**，没有其他平台的适配器。
+- **没有 Docker / pwntools**：插件按「本机工作区 + 按需装工具链」设计，不用容器。
+  pwn / rev 类题目需要自己准备环境（`pip install pwntools`、`brew install gdb`、
+  `apt install gdb-multiarch`，或按题目要求装解释器 / JDK）。
 - **理论题交卷不可逆**：平台没有撤回接口，`finish` 之后无法重来。
 - **`answer_mode == 2`（check 模式）不支持自动判题**：插件保留该标记并照常展示题面，需要人工确认。
 - **平台可能只返回内网地址**：连接信息优先公网地址；只有内网时原样返回并给出提示。
-- **并发上限**：插件 `concurrency` 上限 8，同时受 DSH `agentTeams.maxMembers`（默认 16）约束。
-- **浏览器半走官方 `dsh.client` 机制**：`package.json` 声明 `dsh.client` + `exports["./client"]`，
-  由 DSH 的 client-modules 宿主半自动组装 boot graph 条目（服务在 `/plugins/`），
-  **不要**改用 `tapIndex` 手工注入 —— 宿主会用权威 graph 覆盖删除非官方条目。
-  升级 DSH 后如面板或配置卡片失效，先重启再看该机制是否有变。
+- **并发上限**：`concurrency` 上限 8，同时受 DSH `agentTeams.maxMembers`（默认 16）约束。
+- **客户端半依赖 DSH 的 `dsh.client` 机制**：升级 DSH 后如配置卡片或浮动面板失效，
+  先重启，再看 `GET /lingxu-ctf/diag` 确认宿主侧路由与 bundle 是否正常。
