@@ -333,6 +333,9 @@ const {
   envChallengesOf,
   runningEnvCount,
   renderViewEnvHtml,
+  renderViewTheoryHtml,
+  renderTheoryItemsHtml,
+  theoryQuestionCount,
   renderViewChallengeCard,
   renderViewTabCount,
   challengeKey,
@@ -1772,7 +1775,7 @@ test('视图：slot 常量与 DSH 契约一致（list slot 必须有 id + order�
   assert.equal(FLOATING_CONFIG_KEY, 'enableFloatingPanel')
   assert.deepEqual(
     VIEW_TABS.map((tab) => tab.id),
-    ['board', 'agents', 'messages', 'submissions', 'reports', 'env'],
+    ['board', 'theory', 'agents', 'messages', 'submissions', 'reports', 'env'],
   )
 })
 
@@ -3156,6 +3159,188 @@ test('★ 预览假数据防漂移：配置项必须与宿主 describeConfigFiel
     }
   }
   assert.equal(payload.secretsSet.cookie, true, 'cookie 是 secret，预览要展示「已设置」')
+})
+
+// ══════════════════════════════════════ 14. 布局四连修（task-26）
+
+test('★ 布局：看板卡片 / 分组标签 / 筛选行 共用同一条左侧基线', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+
+  // ① 左侧基线的唯一来源是 .lx-view 的 padding（视图）/ .lx-body 的 padding（面板），
+  //    中间容器一律不得再加 padding-left / margin-left（否则卡片整体右缩）。
+  assert.match(css, /\.lx-view\{[^}]*padding:16px 20px 24px/)
+  for (const cls of ['lx-vbody', 'lx-vgroup', 'lx-vcards', 'lx-vtoolbar']) {
+    const rule = new RegExp(`\\.${cls}\\{([^}]*)\\}`).exec(css)
+    assert.ok(rule, `应有 .${cls} 样式`)
+    assert.equal(/padding-left|margin-left/.test(rule[1]), false, `.${cls} 不能有单独的左内边距/左边距`)
+  }
+  // ② 卡片状态色**不再用 3px 左边框**（会让卡片可视左边缘与标签错位），
+  //    改成均匀 1px 边框 + inset 盒阴影画状态条。
+  for (const cls of ['lx-vcard', 'lx-card']) {
+    const rule = new RegExp(`\\.${cls}\\{([^}]*)\\}`).exec(css)
+    assert.ok(rule, `应有 .${cls} 样式`)
+    assert.equal(rule[1].includes('border-left-width'), false, `.${cls} 不该再用 3px 左边框（基线会错位）`)
+    assert.equal(rule[1].includes('border-left-color'), false)
+  }
+  assert.match(css, /\.lx-vcard\.lx-st-solved\{box-shadow:inset 3px 0 0 0 var\(--dsw-alias-state-success-primary\);\}/)
+  assert.match(css, /\.lx-vcard\.lx-st-working\{box-shadow:inset 3px 0 0 0 var\(--dsw-alias-state-business-primary\);\}/)
+  assert.match(css, /\.lx-card\.lx-st-solved\{box-shadow:inset 3px 0 0 0 var\(--dsw-alias-state-success-primary\);\}/)
+  // 卡片为状态条留出的左侧内边距显式且一致（= 内容边距 + 3px 条）
+  assert.match(css, /\.lx-vcard\{[^}]*padding:10px 12px 10px 16px/)
+  assert.match(css, /\.lx-card\{[^}]*padding:8px 10px 8px 14px/)
+})
+
+test('★ 布局：排行榜两种宽度都不散架（# 窄 / 选手自适应 / 分数有界）', async () => {
+  const { api } = await loadClientModule()
+  const state = api.normalizeState({
+    connection: { key: 'k' },
+    leaderboard: [
+      { rank: 1, username: 'xiyi', score: 5200, isSelf: true },
+      { rank: 2, username: 'a-very-long-player-name-for-overflow-check', score: 2400, isSelf: false },
+    ],
+  })
+
+  const html = api.renderLeaderboardHtml(state)
+  // 两族共用同一个表格类，列宽由 CSS 统一约束
+  assert.match(html, /<table class="lx-table lx-rank">/)
+  assert.match(html, /<th>#<\/th><th>选手<\/th><th>分数<\/th>/)
+  assert.match(html, /class="lx-num"/)
+
+  const css = api.panelCss()
+  const rank = /\.lx-table\.lx-rank\{([^}]*)\}/.exec(css)
+  assert.ok(rank, '应有排行榜专用样式 .lx-table.lx-rank')
+  // 宽屏（视图 1180）不散架：表格不铺满，收窄到 560px
+  assert.match(rank[1], /max-width:560px/)
+  // 窄栏（面板 440）不溢出：宽度仍受容器限制
+  assert.match(rank[1], /width:100%/)
+  assert.match(rank[1], /table-layout:fixed/, '固定布局才能让首末列宽生效、中间列自适应')
+  // # 窄列、分数有界列
+  assert.match(css, /\.lx-table\.lx-rank th:first-child,\.lx-table\.lx-rank td:first-child\{width:48px;\}/)
+  assert.match(css, /\.lx-table\.lx-rank th:last-child,\.lx-table\.lx-rank td:last-child\{width:88px;\}/)
+  // 「我」徽章改柔和 token（浅色下不再是一坨近黑）
+  const you = /\.lx-you\{([^}]*)\}/.exec(css)
+  assert.match(you[1], /background:var\(--dsw-alias-state-business-tertiary\)/)
+  assert.match(you[1], /color:var\(--dsw-alias-state-business-primary\)/)
+  assert.equal(you[1].includes('brand-primary'), false, '不再用近黑品牌色做实心底')
+})
+
+test('★ 布局：面板头部不再有分隔线；select 给箭头留位；控件放不下就整齐换行', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+
+  // ① 那条「没用的横线」：头部块里不得再有 border-bottom
+  const head = /\.lx-head\{([^}]*)\}/.exec(css)
+  assert.ok(head, '应有 .lx-head 样式')
+  assert.equal(head[1].includes('border-bottom'), false, '头部横线已删除（用户点名）')
+  assert.match(head[1], /padding:12px 14px/)
+
+  // ② 下拉箭头位：两族的 select 共用一条规则，且必须有 >=20px 的右内边距
+  // ⚠️ 注意：select 的基础规则是「逗号选择器」（.lx-controls select,.lx-controls input{...}），
+  //    所以按选择器列表精确匹配，而不是找 `.lx-controls select{` 开头的那条。
+  const cssRules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .map((m) => ({ selectors: m[1].split(',').map((x) => x.trim()), body: m[2] }))
+  for (const target of ['.lx-controls select', '.lx-vtoolbar select']) {
+    const rules = cssRules.filter((rule) => rule.selectors.includes(target))
+    assert.ok(rules.length > 0, '应有 ' + target + ' 规则')
+    const arrow = rules.find((rule) => /padding-right:(\d+)px/.test(rule.body))
+    assert.ok(arrow, target + ' 必须有 padding-right 给箭头留位（否则 ▼ 压在右边框上）')
+    const px = Number(/padding-right:(\d+)px/.exec(arrow.body)[1])
+    assert.ok(px >= 20, target + ' 右内边距应 >=20px，实际 ' + px + 'px')
+    assert.ok(rules.some((rule) => /flex:1 1 132px/.test(rule.body)), target + ' 应按内容定基宽')
+  }
+
+  // ③ 控件排布：input 基宽够大 → 一行放不下时整块换行（而不是被压扁）
+  const inputRules = cssRules.filter((rule) => rule.selectors.includes('.lx-controls input') || rule.selectors.includes('.lx-vtoolbar input'))
+  assert.ok(inputRules.length > 0, '应有 input 规则')
+  assert.ok(inputRules.some((rule) => /flex:1 1 168px/.test(rule.body)), 'input 基宽 168px（放不下时整块换行）')
+  for (const cls of ['lx-controls', 'lx-vtoolbar']) {
+    const rule = new RegExp(`\\.${cls}\\{([^}]*)\\}`).exec(css)
+    assert.match(rule[1], /flex-wrap:wrap/)
+  }
+  // 左基线：控件容器与指标行/看板一致（无额外左内边距）
+  assert.match(css, /\.lx-controls\{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px 14px 0;\}/)
+})
+
+test('★ 布局：理论题是独立子 tab（不再塞在看板末尾）', async () => {
+  const { api } = await loadClientModule()
+  // tab 表里紧跟「题目看板」
+  const ids = api.VIEW_TABS.map((tab) => tab.id)
+  assert.deepEqual(ids.slice(0, 2), ['board', 'theory'])
+  assert.equal(api.VIEW_TABS.find((tab) => tab.id === 'theory').label, '理论题')
+
+  const state = api.normalizeState({
+    connection: { key: 'k' },
+    challenges: [{ id: 1, name: 'A', category: 'Misc' }],
+    theory: [
+      { id: 3, name: '理论题 A', count: 100, isBegin: true, remainingSeconds: 3600 },
+      { id: 4, name: '理论题 B', count: 50, isParse: true, parseCount: 2 },
+    ],
+    leaderboard: [],
+    submissions: [],
+  })
+  const model = {
+    state,
+    team: api.normalizeTeam(null),
+    board: api.mergeChallengeBoard(state.challenges, api.normalizeTeam(null)),
+    reports: api.normalizeReports(null),
+  }
+
+  // 渲染：两道试卷 + 状态徽章 + 题量；与面板族共用 renderTheoryItemsHtml
+  const html = api.renderViewTheoryHtml(model)
+  assert.match(html, /理论题 A/)
+  assert.match(html, /理论题 B/)
+  assert.match(html, /100 题/)
+  assert.match(html, /已交卷/)
+  assert.equal(html, api.renderTheoryHtml(state), '视图与面板的理论题条目必须逐字一致（共享片段）')
+
+  // 角标 = 题量（100 + 50）
+  assert.equal(api.renderViewTabCount('theory', model), 150)
+  assert.equal(api.theoryQuestionCount(state.theory), 150)
+
+  // 空态
+  const emptyModel = { ...model, state: api.normalizeState({ connection: { key: 'k' }, theory: [] }) }
+  assert.match(api.renderViewTheoryHtml(emptyModel), /本赛事没有理论题赛段/)
+
+  // **不能两处都渲染**：题目看板里不得出现理论题
+  assert.equal(api.renderViewBoardHtml(model, {}).includes('理论题'), false, '看板里不该再塞理论题')
+})
+
+test('★ 布局：理论题 tab 在视图控制器里可切换', async () => {
+  const { impl } = viewFetch({
+    state: {
+      ...fullSnapshot(),
+      theory: [{ id: 3, name: '理论题 A', count: 100, isBegin: true, remainingSeconds: 3600 }],
+    },
+  })
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+  assert.match(collectText(dom.document.body), /题目看板/)
+  view.setTab('theory')
+  const text = collectText(dom.document.body)
+  assert.match(text, /理论题 A/)
+  assert.match(text, /100 题/)
+  assert.match(text, /进行中/)
+  assert.equal(view.state.tab, 'theory')
+  view.destroy()
+})
+
+test('★ 布局：间距只用 4/6/8/10/12/14/16/20/24（防随手写 13px 之类）', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  // 允许：约定间距 + 字号/行高/控件尺寸/圆角/列宽等非间距数值
+  const allowed = new Set([
+    0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 19, 20, 22, 24, 26, 28, 30, 32, 36, 48, 88, 96,
+    108, 132, 150, 160, 168, 190, 216, 280, 420, 440, 480, 560, 640, 760, 999, 1180, 2147483000,
+  ])
+  const offenders = new Set()
+  for (const match of css.matchAll(/(?:padding|margin|gap)(?:-(?:right|left|top|bottom|inline|block))?:([^;}]+)/g)) {
+    for (const px of match[1].matchAll(/(\d+(?:\.\d+)?)px/g)) {
+      const value = Number(px[1])
+      if (!allowed.has(value)) offenders.add(value)
+    }
+  }
+  assert.deepEqual([...offenders], [], `出现了非约定间距值：${[...offenders].join(', ')}`)
 })
 
 test('理论题状态：交卷后必须显示「已交卷」，不能显示「未开始」', () => {
