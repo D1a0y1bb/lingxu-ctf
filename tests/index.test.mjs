@@ -131,9 +131,10 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.equal(routes.includes('/lingxu-ctf/config'), true, '配置读写路由必须注册（设置页表单用）')
   assert.equal(routes.includes('/lingxu-ctf/diag'), true, '诊断路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/beacon'), true, '客户端回传探针路由必须注册')
-  // client.js 路由仅在 lib/client.js 存在时注册（优雅降级）；taps 数量与之一致
+  // client.js 路由仅在 lib/client.js 存在时注册（优雅降级）
   const hasBundle = routes.includes('/lingxu-ctf/client.js')
-  assert.equal(ctx._collected.taps.length, hasBundle ? 1 : 0)
+  // 客户端半改走官方 dsh.client 机制，**不再**注册 tapIndex
+  assert.equal(ctx._collected.taps.length, 0, '不得再注册 tapIndex 注入（会被宿主权威 graph 覆盖）')
   assert.equal(routes.length, hasBundle ? 5 : 4)
   assert.equal(ctx._collected.commands.length, 1)
   assert.equal(ctx._collected.commands[0].name, 'ctf-status')
@@ -624,45 +625,28 @@ function validateBootManifest(graph) {
   return true
 }
 
-test('injectBootEntry：注入的 boot graph 能通过宿主 parseBootManifest 的全部校验', () => {
-  const html = `<head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
-    rev: 'abc',
-    entries: [{ id: 'a', url: '/a.js', rev: 'abc' }],
-    batches: [{ phase: 'application', url: '/a.js', rev: 'abc', entries: ['a'] }],
-  })}</script></head><body></body>`
-  const out = injectBootEntry(html, { id: 'dsh-lingxu-ctf', url: '/lingxu-ctf/client.js?rev=r1', rev: 'r1' })
-  const m = /globalThis\["__DSH_BOOT__"\] = ([\s\S]*?)<\/script>/.exec(out)
-  assert.ok(m, '应能取回注入后的 boot graph')
-  const graph = JSON.parse(m[1])
+test('package.json 走官方 dsh.client 机制（而不是 tapIndex 注入）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
-  assert.doesNotThrow(() => validateBootManifest(graph), '注入后必须仍是合法 boot manifest')
-
-  const mine = graph.entries.find((e) => e.id === 'dsh-lingxu-ctf')
-  assert.deepEqual(mine, {
-    id: 'dsh-lingxu-ctf',
-    url: '/lingxu-ctf/client.js?rev=r1',
-    rev: 'r1',
-    inject: [],
-    external: [],
-  })
-  const batch = graph.batches.find((b) => b.entries.includes('dsh-lingxu-ctf'))
-  assert.deepEqual(batch, { phase: 'application', url: '/lingxu-ctf/client.js?rev=r1', rev: 'r1', entries: ['dsh-lingxu-ctf'] })
-  assert.equal(graph.entries.length, 2, '不得重复注入')
-  assert.equal(graph.batches.length, 2)
+  // dsh-client-modules 宿主半的 resolveMeta 要求：dsh.client.platform === 'web'
+  assert.equal(pkg.dsh?.client?.platform, 'web', 'dsh.client.platform 必须是 web')
+  // clientExportOf 要求 exports["./client"] 是字符串
+  assert.equal(typeof pkg.exports?.['./client'], 'string', 'exports["./client"] 必须是字符串')
+  assert.equal(pkg.exports['./client'], './lib/client.js')
+  // 且该文件必须真实存在
+  assert.equal(readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8').length > 0, true)
+  // bundle patch 仍要在
+  assert.equal(pkg.dsh?.bundle?.patch, './cordis.patch.yml')
 })
 
-test('injectBootEntry：幂等 / 无 boot 行 / 坏 JSON 都安全', () => {
-  const base = `<script>globalThis["__DSH_BOOT__"] = {"rev":"r","entries":[],"batches":[]}</script>`
-  const once = injectBootEntry(base, { id: 'x', url: '/x.js', rev: 'r' })
-  assert.equal(injectBootEntry(once, { id: 'x', url: '/x.js', rev: 'r' }), once, '幂等')
-  assert.equal(injectBootEntry('<html></html>', { id: 'x', url: '/x.js', rev: 'r' }), '<html></html>', '无 boot 行原样返回')
-  const broken = `<script>globalThis["__DSH_BOOT__"] = {oops</script>`
-  assert.equal(injectBootEntry(broken, { id: 'x', url: '/x.js', rev: 'r' }), broken, '坏 JSON 原样返回')
-})
-
-test('injectBootEntry：把 < 转义成 \\u003c，与 renderRow("global") 一致', () => {
-  const html = `<script>globalThis["__DSH_BOOT__"] = {"rev":"r","entries":[],"batches":[]}</script>`
-  const out = injectBootEntry(html, { id: 'x', url: '/x.js?a=<b>', rev: 'r' })
-  assert.equal(out.includes('<b>'), false, 'url 里的尖括号必须被转义')
-  assert.equal(out.includes('\\u003c'), true)
+test('index.js 源码里不再调用 webServer.tapIndex 注入 boot graph', async () => {
+  // 宿主会用权威 graph 覆盖并删除非官方条目，注入毫无意义；
+  // 且若与官方条目 id 重名，parseBootManifest 会抛 duplicate graph entry，
+  // 导致**整个客户端模块系统**启动失败。
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+  // 允许注释里提到 tapIndex，但不允许真的调用
+  const calls = src.match(/webServer\.tapIndex\s*\(|webServer\?\.tapIndex\s*\(/g) ?? []
+  assert.deepEqual(calls, [], `不得调用 tapIndex，实际 ${calls.length} 处`)
 })
