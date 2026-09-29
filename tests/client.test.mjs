@@ -2171,10 +2171,16 @@ test('视图：摘要统计条含「题目总数 / 已解 / 进行中 / 待解 /
     assert.ok(stats.includes(label), `统计条应含「${label}」`)
   }
   const meta = renderViewMetaHtml(model)
-  assert.match(meta, /赛事 #4/)
+  assert.match(meta, /得分 120/)
+  assert.match(meta, /排名 4\/12/)
   assert.match(meta, /剩余 1小时1分/)
-  assert.match(meta, /Agents 3/)
+  assert.match(meta, /3 Agents/)
   assert.match(meta, /任务 1\/4/)
+  // 用户点名的噪音项一个都不能出现
+  assert.equal(meta.includes('赛事 #'), false)
+  assert.equal(meta.includes('lingxu'), false)
+  assert.equal(meta.includes('http'), false)
+  assert.equal(meta.includes('更新于'), false)
 })
 
 test('视图：所有片段标签闭合平衡（innerHTML 结构不会破损）', () => {
@@ -2226,7 +2232,10 @@ test('视图控制器：挂载后拉三份数据并渲染摘要 / 看板，切 t
 
   const text = collectText(dom.document.body)
   assert.match(text, /2026 测试赛/)
-  assert.match(text, /凌虚/)
+  // 头部改版（task-24）：平台名/URL/更新时间/赛事 ID 都不再显示
+  assert.equal(text.includes('凌虚'), false, '平台名不该出现在视图里')
+  assert.equal(text.includes('更新于'), false)
+  assert.equal(text.includes('赛事 #'), false)
   assert.match(text, /题目总数/)
   assert.match(text, /RSA/)
   assert.match(text, /进行中 · solver-rev-02/)
@@ -2550,15 +2559,15 @@ test('★ 看板卡片：题型徽章 + 环境剩余（橙 / 红 / 正常）都�
   assert.equal(card.includes('lx-venv'), false)
 })
 
-test('★ 摘要 chips：环境 held/limit；free === 0 时高亮', () => {
+test('★ 摘要指标行：环境 held/limit；free === 0 时高亮', () => {
   const normal = renderViewMetaHtml(envModel(envSnapshot()))
   assert.match(normal, /环境 1\/2/)
-  assert.equal(normal.includes('lx-chip-warn'), false, '没满时不告警')
+  assert.equal(normal.includes('lx-vmetric-warn'), false, '没满时不告警')
 
   const full = renderViewMetaHtml(envModel(envSnapshot({ env: { limit: 2, held: 2, free: 0 } })))
   assert.match(full, /环境 2\/2/)
   assert.match(full, /已满/)
-  assert.match(full, /lx-chip-warn/)
+  assert.match(full, /lx-vmetric-warn/)
 })
 
 test('★ Agent 活动：持有环境的 agent 有标记（含告警色）', () => {
@@ -2674,6 +2683,262 @@ test('视图 CSS：作用域限定在 .lx-v* / .lx-view*，且不含任何定位
   assert.deepEqual(fixedBlocks, ['#lingxu-ctf-panel'])
   // 视图的暗色不靠自己写媒体查询，而是 DSH token 自己切（见「主题」用例）
   assert.equal(css.includes('prefers-color-scheme'), false)
+})
+
+// ══════════════════════════════════════ 12. tab 门控 inject / 头部重做 / flag 完整显示（task-24）
+
+test('★ 门控：会话列表还没到时不得 latch「始终显示」（task-24 真 bug）', () => {
+  // 页面刚加载时 sessions.list 快照是 { byId:{}, phase:'pending' }。
+  // 旧实现 a) canDetectPreset({byId:{}}) === false → detectorBroken 被永久 latch
+  //         → 之后无论什么会话都「始终显示」。
+  const registered = []
+  const disposed = []
+  let listener = null
+  let snapshot = { byId: {}, phase: 'pending' }
+  const ctx = {
+    slots: {
+      register(options) { registered.push(options); return () => disposed.push(options.id) },
+      inject(slot, fn) { fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+    get: (name) => (name === 'sessions'
+      ? { list: { getSnapshot: () => snapshot, subscribe: (fn) => { listener = fn; return () => { listener = null } } } }
+      : undefined),
+  }
+  registerCtfView(ctx)
+  assert.equal(registered.length, 0, '列表为空时先不下结论')
+
+  // 会话列表到达：当前会话是普通预设 → 不注册（门控生效）
+  snapshot = { byId: { s1: { projectionValues: { agentPreset: 'standard' } } }, phase: 'ready' }
+  listener()
+  assert.equal(registered.length, 0, '普通会话不该出现 CTF tab')
+
+  // 切到 CTF 会话 → 注册
+  snapshot = {
+    byId: {
+      s1: { projectionValues: { agentPreset: 'standard' } },
+      s2: { projectionValues: { agentPreset: 'ctf' }, retainedBy: { mainView: 1 } },
+    },
+    phase: 'ready',
+  }
+  listener()
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].id, 'ctf')
+
+  // 切走 → 注销
+  snapshot = {
+    byId: {
+      s1: { projectionValues: { agentPreset: 'standard' }, retainedBy: { mainView: 1 } },
+      s2: { projectionValues: { agentPreset: 'ctf' } },
+    },
+    phase: 'ready',
+  }
+  listener()
+  assert.deepEqual(disposed, ['ctf'])
+})
+
+test('★ 门控：canDetectPreset —— 空列表/无字段不可判定，键存在即可判定', async () => {
+  const { api } = await loadClientModule()
+  // 空列表 / 垃圾 → 不可判定（但调用方不能因此 latch）
+  assert.equal(api.canDetectPreset({ byId: {} }), false)
+  assert.equal(api.canDetectPreset(null), false)
+  assert.equal(api.canDetectPreset({ byId: { s1: {} } }), false)
+  // 旧宿主：字段直接在行上
+  assert.equal(api.canDetectPreset({ byId: { s1: { agentPreset: 'standard' } } }), true)
+  // 新宿主：投影列存在（哪怕值是 null）就算「看得到事实」
+  assert.equal(api.canDetectPreset({ byId: { s1: { projectionValues: { agentPreset: null } } } }), true)
+  assert.equal(api.canDetectPreset({ byId: { s1: { projectionValues: { agentPreset: 'ctf' } } } }), true)
+  // 投影里是别的列（没有 agentPreset）→ 仍不可判定
+  assert.equal(api.canDetectPreset({ byId: { s1: { projectionValues: { other: 1 } } } }), false)
+})
+
+test('★ 门控：一次会话都没有时（current 找不到）不注册，也不报错', () => {
+  const registered = []
+  const ctx = {
+    slots: {
+      register(options) { registered.push(options); return () => {} },
+      inject(slot, fn) { fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+    get: (name) => (name === 'sessions'
+      ? {
+        list: {
+          // 有行、但没有 retainedBy.mainView、也没有 current → 认不出「当前会话」
+          getSnapshot: () => ({ byId: { s1: { projectionValues: { agentPreset: 'ctf' } } }, phase: 'ready' }),
+          subscribe: () => () => {},
+        },
+      }
+      : undefined),
+  }
+  registerCtfView(ctx)
+  assert.equal(registered.length, 0)
+})
+
+test('★ 门控：sessions 服务迟到 → 先始终显示，上线后自动升级为门控', () => {
+  // 真实事故（task-24）：客户端插件按加载顺序挂载，apply 时 sessions 可能还没 provide。
+  // 旧实现一次性探测失败就永久降级 → 「tab 在任何模式下都出现」。
+  const registered = []
+  const disposed = []
+  let waitDeps = null
+  let waitCb = null
+  let listener = null
+  let snapshot = { byId: { s1: { projectionValues: { agentPreset: 'standard' } } }, phase: 'ready' }
+  const lateStore = {
+    getSnapshot: () => snapshot,
+    subscribe: (fn) => { listener = fn; return () => { listener = null } },
+  }
+  const ctx = {
+    slots: {
+      register(options) { registered.push(options); return () => disposed.push(options.id) },
+      inject(slot, fn) { fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+    get: () => undefined, // 一开始拿不到 sessions
+    inject(deps, cb) { waitDeps = deps; waitCb = cb; return () => {} },
+  }
+  registerCtfView(ctx)
+  assert.deepEqual(waitDeps, ['sessions'], '应等待 sessions 服务')
+  assert.equal(registered.length, 1, '服务没到时先始终显示（不让 tab 消失）')
+
+  // 服务上线：cordis 会带着 scoped ctx 调 callback
+  waitCb({ get: (name) => (name === 'sessions' ? { list: lateStore } : undefined) })
+  assert.deepEqual(disposed, ['ctf'], '升级前先注销「始终显示」')
+  assert.equal(registered.length, 1, '当前是普通会话 → 门控生效，不再注册')
+
+  // 切到 CTF 会话 → 注册；再切走 → 注销
+  snapshot = {
+    byId: {
+      s1: { projectionValues: { agentPreset: 'ctf' }, retainedBy: { mainView: 1 } },
+    },
+    phase: 'ready',
+  }
+  listener()
+  assert.equal(registered.length, 2)
+  snapshot = { byId: { s1: { projectionValues: { agentPreset: 'standard' }, retainedBy: { mainView: 1 } } }, phase: 'ready' }
+  listener()
+  assert.deepEqual(disposed, ['ctf', 'ctf'])
+})
+
+test('★ package.json：dsh.client.inject 必须含 ui-conversation（门控失效的根因）', async () => {
+  // 背景（task-24 真实事故）：inject 里少了 @deepseek-ai/dsh-client-ui-conversation，
+  // 客户端 boot graph 就不会组装那一行 → `sessions` 服务不存在 → registerCtfView 走
+  // 「拿不到 sessions → 始终注册」的降级 → **CTF tab 在任何模式下都出现**。
+  // 这个用例专门防止「清理未使用依赖」时把它删掉（它看起来没被 import 使用）。
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const inject = pkg?.dsh?.client?.inject
+  assert.ok(Array.isArray(inject), 'dsh.client.inject 必须是数组')
+  for (const required of [
+    '@deepseek-ai/dsh-client-runtime',
+    '@deepseek-ai/dsh-client-ui-conversation',
+    '@deepseek-ai/dsh-client-locale',
+  ]) {
+    assert.ok(inject.includes(required), `inject 必须包含 ${required}（否则会话门控会静默降级）`)
+  }
+  // 必须留下「为什么不能删」的说明
+  const why = String(pkg?.dsh?.client?.injectWhy ?? '')
+  assert.ok(why.length > 40, 'dsh.client.injectWhy 要写清为什么必须 inject 这些包')
+  assert.match(why, /sessions/)
+  assert.match(why, /ui-conversation/)
+})
+
+test('★ 头部：只有居中标题 + 一行指标，不含平台名 / URL / 更新时间 / 赛事 ID / 刷新按钮 / 绿点', async () => {
+  const { impl } = viewFetch()
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+  const text = collectText(dom.document.body)
+  const html = collectHtml(view.element())
+
+  // 用户点名的噪音项
+  assert.equal(text.includes('凌虚'), false, '平台名不该出现（「lingxu 是个啥鬼」）')
+  assert.equal(text.includes('https://'), false, 'URL 不该出现')
+  assert.equal(text.includes('更新于'), false)
+  assert.equal(text.includes('赛事 #'), false, '赛事 ID 不该出现')
+  assert.equal(html.includes('lx-vrefresh'), false, '刷新按钮已删除')
+  assert.equal(text.includes('刷新'), false)
+  assert.equal(html.includes('lx-vlive'), false, '连接绿点已删除')
+
+  // 保留的有用信息
+  assert.match(text, /2026 测试赛/)
+  assert.match(text, /得分 /)
+  assert.match(text, /排名 /)
+  assert.match(text, /剩余 /)
+  assert.match(text, /环境 /)
+  assert.match(text, /Agents/)
+  assert.match(text, /任务 /)
+  // 账号挪进标题 tooltip（不占正文）
+  const nameEl = (() => {
+    const stack = [view.element()]
+    while (stack.length > 0) {
+      const node = stack.pop()
+      if (node && String(node.className || '').split(/\s+/).includes('lx-vname')) return node
+      for (const child of (node && node.children) || []) stack.push(child)
+    }
+    return null
+  })()
+  assert.ok(nameEl, '应有标题元素')
+  assert.equal(nameEl.tagName, 'H2', '标题用 h2，语义正确')
+  assert.equal(nameEl.title, '账号 @alice')
+  view.destroy()
+
+  // 定时器仍会自动刷新（删掉按钮不等于不刷新）
+  const running = mountView({ fetchImpl: impl })
+  running.view.start()
+  assert.equal(running.dom.timerCount(), 1, '仍应保留轮询定时器')
+  running.view.destroy()
+})
+
+test('★ 头部样式：标题居中且字号 ≥18px；指标行无 chip 底色', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  const name = /\.lx-vname\{([^}]*)\}/.exec(css)
+  assert.ok(name, '应有 .lx-vname 样式')
+  assert.match(name[1], /text-align:center/, '赛事名必须居中')
+  const size = /font-size:(\d+)px/.exec(name[1])
+  assert.ok(size, '应有字号')
+  assert.ok(Number(size[1]) >= 18, `标题字号应 ≥18px，实际 ${size[1]}px`)
+  assert.match(name[1], /font-weight:600/)
+  // 指标行：小字、居中、无背景（不是 chip）
+  const meta = /\.lx-vmeta\{([^}]*)\}/.exec(css)
+  assert.ok(meta, '应有 .lx-vmeta 样式')
+  assert.match(meta[1], /justify-content:center/)
+  assert.equal(meta[1].includes('background:'), false, '指标行不该有 chip 底色')
+  // 每项之间用 · 分隔
+  const model = envModel(envSnapshot())
+  assert.match(renderViewMetaHtml(model), /<span class="lx-vsep"[^>]*>·<\/span>/)
+})
+
+test('★ 提交审计：70 字符 flag 完整显示（等宽 / break-all / 不省略）', async () => {
+  const { api } = await loadClientModule()
+  const longFlag = 'flag{BB4400B4318B3C8E9D19AFB22B8929C56B421FDAAEF2D440CB91DCA0A0A1B85F}'
+  assert.ok(longFlag.length > 60)
+
+  const model = envModel({
+    connection: { key: 'k' },
+    challenges: [],
+    submissions: [
+      { at: '2026-09-29T01:00:00Z', challengeId: 1, challengeName: '折叠端口', status: 'correct', flag: longFlag },
+      { at: '2026-09-29T01:05:00Z', challengeId: 2, challengeName: 'check 模式题', status: 'correct', flag: '' },
+    ],
+  })
+  const html = api.renderViewSubmissionsHtml(model)
+
+  // 完整 flag（一个字符都不能少，且不能有省略号）
+  assert.ok(html.includes(longFlag), 'flag 必须完整渲染')
+  assert.equal(html.includes('…'), false, 'flag 不该被截断成省略号')
+  assert.match(html, /lx-vflag/, '要有等宽 flag 容器')
+  assert.match(html, /class="lx-vsub-row"/, '每条一行、flag 独占一行')
+  // 空 flag（check 模式）要优雅处理
+  assert.match(html, /无 flag · check 模式/)
+
+  // 样式：等宽 + break-all + 无 ellipsis
+  const css = api.panelCss()
+  const flagBlock = /\.lx-vflag\{([^}]*)\}/.exec(css)
+  assert.ok(flagBlock, '应有 .lx-vflag 样式')
+  assert.match(flagBlock[1], /ui-monospace/, 'flag 用等宽字体')
+  assert.match(flagBlock[1], /word-break:break-all/, 'flag 允许换行')
+  assert.equal(flagBlock[1].includes('text-overflow:ellipsis'), false)
+  assert.equal(flagBlock[1].includes('white-space:nowrap'), false)
+  assert.match(flagBlock[1], /background:var\(--dsw-alias-markdown-code-block\)/)
 })
 
 test('理论题状态：交卷后必须显示「已交卷」，不能显示「未开始」', () => {
@@ -2821,6 +3086,6 @@ test('环境配额：blocked（平台侧已满）比本地计数可信', async (
     challenges: [], submissions: [], theory: [], leaderboard: [], stats: {},
   })
   const html = renderViewMetaHtml({ state, team: normalizeTeam(null), board: [], reports: normalizeReports(null) })
-  assert.match(html, /平台已满/, 'blocked 时 chip 应明说「平台已满」')
-  assert.match(html, /lx-chip-warn/, '并高亮')
+  assert.match(html, /平台已满/, 'blocked 时指标行应明说「平台已满」')
+  assert.match(html, /lx-vmetric-warn/, '并高亮')
 })

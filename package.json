@@ -45,8 +45,11 @@
     },
     "client": {
       "platform": "web",
+      "injectWhy": "⚠️ 这三个包一个都不能删（哪怕看起来「没被 import」）：inject 决定客户端 boot graph 里组装哪些插件行，而我们只能通过 ctx.get('sessions') 拿会话列表。sessions 服务由 @deepseek-ai/dsh-api-session-controller 提供，但只有 @deepseek-ai/dsh-client-ui-conversation 把该行拉进客户端组合；少了它，CTF tab 的会话门控会静默降级成「任何会话都显示」。@deepseek-ai/dsh-client-locale 用于 tab 文案跟随语言（ui-conversation 自己也会拉，一并声明保证顺序）。dsh-pentest 用的是同一组 inject。",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime"
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
   },
