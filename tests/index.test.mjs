@@ -130,10 +130,11 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.equal(routes.includes('/lingxu-ctf/state'), true, '状态路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/config'), true, '配置读写路由必须注册（设置页表单用）')
   assert.equal(routes.includes('/lingxu-ctf/diag'), true, '诊断路由必须注册')
+  assert.equal(routes.includes('/lingxu-ctf/beacon'), true, '客户端回传探针路由必须注册')
   // client.js 路由仅在 lib/client.js 存在时注册（优雅降级）；taps 数量与之一致
   const hasBundle = routes.includes('/lingxu-ctf/client.js')
   assert.equal(ctx._collected.taps.length, hasBundle ? 1 : 0)
-  assert.equal(routes.length, hasBundle ? 4 : 3)
+  assert.equal(routes.length, hasBundle ? 5 : 4)
   assert.equal(ctx._collected.commands.length, 1)
   assert.equal(ctx._collected.commands[0].name, 'ctf-status')
 })
