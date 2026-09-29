@@ -82,7 +82,27 @@ profile 的 **bundle 列表在启动时读取**，安装后不会热生效：
 
 ## 3. 快速开始
 
-### 3.1 从浏览器拿 `sessionid`
+推荐流程是**先在设置页配置一次，之后每次开赛只要：新建工作区 → 选预设 → 说「开始」**。
+
+### 3.1 在设置页配置（推荐，一次配好）
+
+打开 **设置 → 插件 → 插件配置 → 凌虚 CTF**，按 schema 生成的表单填写：
+
+| 字段 | 填什么 |
+|---|---|
+| `platform` | `lingxu`（凌虚）/ `ctfd` |
+| `baseUrl` | 平台根地址，如 `https://shuxinbei.clsadp.com:8000`（**不要**带前端 `#/...` 路由） |
+| `eventId` | URL 里 `/event/<id>/` 的那个数字（凌虚必填） |
+| `cookie` | 浏览器复制的完整 Cookie（见 3.2）；这是**只写输入框**，DSH 会在跨线前结构化脱敏 |
+| `concurrency` | 并发解题 agent 数，默认 4（1–8） |
+| `workDir` | 附件与 WP 落盘目录；留空 = 工作区下的 `lingxu-ctf-work/` |
+
+其余字段（`maxWrongAttempts` / `dedupeFlags` / `timeoutMs` / `enableWebPanel`）都有合理默认值，可不改。
+
+> 凭据只存本机，不会写进插件目录、不会进 git；`cookie` / `token` 标了 `role('secret')`，
+> 设置页渲染成**只写输入框**，前端拿不到明文。
+
+### 3.2 从浏览器拿 `sessionid`
 
 平台的登录接口带验证码（`/api/captcha/verify/`），**插件不做自动登录**，因此只支持 Cookie 认证：
 
@@ -95,38 +115,38 @@ profile 的 **bundle 列表在启动时读取**，安装后不会热生效：
 sessionid=你的值; csrftoken=你的值
 ```
 
-> - 只复制**平台根地址**（如 `https://shuxinbei.clsadp.com:8000`），**不要**填前端 hash 路由（`#/...`）。
-> - 赛事 ID（`eventId`）是 URL 里 `/event/<id>/` 的那个数字。
-> - Cookie 只写入本机 DSH 存储（`~/.dsh/storages/lingxu-ctf/state.json`），不会进插件目录、不会进 git；日志里只显示前 6 位。
+### 3.3 开一局：新建工作区 → 选预设 → 说「开始」
 
-### 3.2 在会话里说什么
-
-第一句（先接上，不要急着解题）：
+1. **新建一个文件夹当工作区**（附件、解题脚本、WP 都落在这里）；
+2. 新建会话，模式选 **「CTF 解题模式」**；
+3. 直接说：
 
 ```
-帮我接入凌虚 CTF：
-- 平台地址：https://shuxinbei.clsadp.com:8000
-- 赛事 ID：4
-- Cookie：sessionid=粘贴你的值; csrftoken=粘贴你的值
-
-先用 ctf_connect 配置并校验，再用 ctf_status 汇报全局情况，
-然后用 ctf_challenges 列出未解题并按分值排序。先别开始解题。
+开始
 ```
 
-确认数据无误后，第二句（全自动解题）：
+就这一句。预设里的工作流会驱动 agent：
+
+- `ctf_status` 确认连接（设置页填过就不用再传凭据）
+- `ctf_solve_start` 拉起并发团队：拉未解题 → 建共享任务板 → 按 `concurrency` spawn solver
+- 每个 solver 自己摸题面 → 开环境 → 解题 → 交 flag → 写 WP
+- 想看进度说「看下进度」（`ctf_solve_status`）；喊「停」（`ctf_solve_stop`，默认释放环境）
+
+要缩小范围就直接说，例如：
 
 ```
-开始解题：用 ctf_solve_start 并发 4 个 agent，只做 Web 和 Misc、分值 ≥ 100 的题；
-每题解出后自动交 flag 并生成 WP。期间用 ctf_solve_status 汇报进度。
+开始，只做 Web 和 Misc、分值 ≥ 100 的题，并发 6
 ```
 
-### 3.3 agent 会依次做什么
+> 也可以不用预设、在任意会话里手动驱动（工具都在）。此时先 `ctf_connect` 传一次凭据即可；
+> 设置页填过的话这一步也能省。
 
-1. `ctf_connect` — 保存连接、校验 Cookie、提示 `punish` 等风险；
-2. `ctf_status` / `ctf_challenges` — 摸清题目分布与自身排名；
-3. `ctf_solve_start` — 过滤未解题 → 按分值降序 → 建共享任务板 → 按 `concurrency` 拉起 `solver-*` teammate；
-4. 每个 teammate：`ctf_challenge` 拉题面 →（环境题）`ctf_start_env` → 本地解题 → `ctf_submit_flag` → `ctf_writeup` 生成 WP（用 `body` 传自己总结的思路正文）→ 完成共享任务；
-5. `ctf_solve_status` 对照「任务板 / 平台状态」汇报进度；`ctf_solve_stop` 可随时中断并释放环境。
+### 3.4 agent 会依次做什么
+
+1. `ctf_status` — 确认连接、摸清题目分布与自身排名；
+2. `ctf_solve_start` — 过滤未解题 → 按分值降序 → 建共享任务板 → 按 `concurrency` 拉起 `solver-*` teammate；
+3. 每个 teammate：`ctf_challenge` 拉题面 →（环境题）`ctf_start_env` → 本地解题 → `ctf_submit_flag` → `ctf_writeup` 生成 WP（用 `body` 传自己总结的思路正文）→ 完成共享任务；
+4. `ctf_solve_status` 对照「任务板 / 平台状态」汇报进度；`ctf_solve_stop` 可随时中断并释放环境。
 
 ---
 
@@ -172,16 +192,26 @@ bundle 自带一个 agent 预设 `ctf`（名称「CTF 解题模式」，`order: 
 
 ## 6. 配置项
 
-配置写在 `cordis.patch.yml` 的 `lingxu-ctf` 行 `config:` 下（安装后也可改 profile 的 `cordis.patch.yml`，实时重载）。
+**推荐在「设置 → 插件 → 插件配置 → 凌虚 CTF」里改**（表单由插件导出的 `Config` schema 自动生成，
+带字段说明）。也可以直接改 `cordis.patch.yml` 的 `lingxu-ctf` 行 `config:`（profile 层实时重载）。
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
+| `platform` | `lingxu` | `lingxu`（凌虚）/ `ctfd` |
+| `baseUrl` | `''` | 平台根地址，如 `https://shuxinbei.clsadp.com:8000` |
+| `eventId` | `0` | 赛事 ID（凌虚必填，URL 里 `/event/<id>/`） |
+| `cookie` | `''` | 完整 Cookie（**secret**，只写输入）。凌虚必须含 `sessionid=` |
+| `token` | `''` | CTFd API Token（**secret**，与 cookie 二选一） |
+| `label` | `''` | 连接备注名，便于多赛事识别 |
 | `concurrency` | `4` | 并发解题 agent 数，取值 1–8（硬上限 8） |
 | `maxWrongAttempts` | `0` | 每题 flag 最大错误提交次数；`0` = 不限制。`punish: true` 的赛事建议设为 `3` 左右 |
 | `dedupeFlags` | `true` | 提交前做「同题同 flag」去重，重复的正确 flag 不再请求平台 |
 | `workDir` | `''` | 附件、题目元数据、WP 的落盘根目录；留空 = 会话 cwd 下的 `lingxu-ctf-work/` |
 | `timeoutMs` | `30000` | 单次平台请求超时（毫秒） |
 | `enableWebPanel` | `true` | 是否注册 Web 控制面板路由 `/lingxu-ctf/state` 与客户端 bundle |
+
+> 只要 `baseUrl` + `eventId` + `cookie`（或 CTFd 的 `token`）齐了，工具就会**直接用配置连平台**，
+> 不需要先跑 `ctf_connect`。显式调用 `ctf_connect` 会额外把连接存进本地状态，并支持多赛事切换。
 
 目录约定（`workDir` 下）：
 

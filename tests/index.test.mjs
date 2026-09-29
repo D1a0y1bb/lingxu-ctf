@@ -4,7 +4,10 @@ import { promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { apply, normalizeConfig, slugify, maskFlag, injectClientScript, buildPanelState, name as pluginName, inject } from '../lib/index.js'
+import {
+  apply, normalizeConfig, slugify, maskFlag, injectClientScript, buildPanelState,
+  name as pluginName, inject, Config, configHasCredentials,
+} from '../lib/index.js'
 
 /** 最小 Cordis Context 替身：收集注册项，effect 立即执行并记录 disposer。 */
 function mockCtx(services = {}) {
@@ -231,9 +234,126 @@ test('apply: 严格 Proxy + 完整 service 时正常装配', () => {
   assert.equal(routes.some((r) => r.path === '/lingxu-ctf/state'), true)
 })
 
-test('apply: workDir 未配置时回退到 process.cwd()，且不读 ctx.agent 之外的东西', () => {
-  const ctx = strictCordisCtx({ agent: { session: { header: { cwd: '/tmp/from-agent' } } } })
+test('apply: workDir 未配置时给出可写默认值，不落到不可写的 /', () => {
+  const ctx = strictCordisCtx({})
   assert.doesNotThrow(() => apply(ctx, {}))
+  // Electron 从 Finder 启动时 process.cwd() === '/'，绝不能拼出 /lingxu-ctf-work
+  const cfg = normalizeConfig({})
+  assert.equal(cfg.workDir, '', '未配置时 config.workDir 保持空，由下游解析')
+})
+
+/**
+ * 模拟真实 Cordis：`ctx.inject(deps, cb)` 会**延迟**到依赖就绪才跑 cb。
+ * 这是生产路径（真实 DSH 里 ctx.get 取不到未 inject 的 service），必须专门覆盖。
+ */
+function injectAwareCtx(available = {}) {
+  const collected = { tools: [], sections: [], routes: [], taps: [], commands: [], pending: [], injected: [] }
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    tools: { register(def) { collected.tools.push(def); return () => {} } },
+    effect(fn) { fn(); return () => {} },
+    get() { return undefined }, // 真实 DSH 语义：ctx.get 对未 inject 的 service 返回 undefined
+    inject(deps, callback) {
+      collected.injected.push(deps)
+      const ready = deps.every((d) => available[d] !== undefined)
+      if (ready) callback(makeChild(deps))
+      else collected.pending.push({ deps, callback })
+      return { dispose() {} }
+    },
+    _collected: collected,
+    _collected_deliver(name, value) {
+      available[name] = value
+      const stillPending = []
+      for (const item of collected.pending) {
+        if (item.deps.every((d) => available[d] !== undefined)) item.callback(makeChild(item.deps))
+        else stillPending.push(item)
+      }
+      collected.pending = stillPending
+    },
+  }
+  function makeChild(deps) {
+    const child = {
+      logger: ctx.logger,
+      effect(fn) { fn(); return () => {} },
+      get: () => undefined,
+    }
+    for (const d of deps) child[d] = available[d]
+    return child
+  }
+  return ctx
+}
+
+test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
+  const ctx = injectAwareCtx({}) // 一开始什么服务都没有
+  apply(ctx, { workDir: '/tmp/lingxu-test' })
+
+  assert.equal(ctx._collected.tools.length, 13, '工具只依赖 tools，立即可用')
+  assert.deepEqual(
+    ctx._collected.injected.map((d) => d[0]).sort(),
+    ['agentTeams', 'commands', 'systemPrompt', 'webServer'],
+    '四个可选服务都应通过 ctx.inject 声明',
+  )
+  assert.equal(ctx._collected.pending.length, 4, '依赖未就绪时应挂起而不是失败')
+
+  // 逐个交付服务
+  const sections = []
+  ctx._collected_deliver('systemPrompt', { section: (s) => { sections.push(s); return () => {} } })
+  assert.equal(sections.length, 1, 'systemPrompt 就绪后应注入提示词')
+
+  const routes = []
+  ctx._collected_deliver('webServer', {
+    register: (r) => { routes.push(r); return () => {} },
+    tapIndex: () => () => {},
+  })
+  assert.equal(routes.some((r) => r.path === '/lingxu-ctf/state'), true, 'webServer 就绪后应注册面板路由')
+
+  ctx._collected_deliver('commands', { register: () => () => {} })
+  assert.equal(ctx._collected.pending.length, 1, '只剩 agentTeams 未就绪')
+})
+
+test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延迟赋值）', async () => {
+  const ctx = injectAwareCtx({})
+  apply(ctx, { workDir: '/tmp/lingxu-test' })
+
+  const solveStart = ctx._collected.tools.find((t) => t.name === 'ctf_solve_start')
+  // 未就绪：应给出可读说明或硬失败，但不能崩得莫名其妙
+  let before = ''
+  try {
+    before = String(await solveStart.execute({}, {}))
+  } catch (error) {
+    before = error?.message ?? String(error)
+  }
+  assert.match(before, /orchestrator|Agent Teams|不可用/, '未就绪时要有可读提示')
+
+  // 交付 agentTeams
+  const spawned = []
+  ctx._collected_deliver('agentTeams', {
+    spawnTeammate(caller, req) { spawned.push(req); return { member: { name: req.name } } },
+    createTask() { return { id: 't1' } },
+    listTasks() { return [] },
+    listMembers() { return [] },
+  })
+  assert.equal(
+    ctx._collected.pending.some((p) => p.deps.includes('agentTeams')),
+    false,
+    'agentTeams 交付后不应再挂起',
+  )
+
+  // 就绪后：应能走到真实编排（此处无连接，会给出平台连接提示而不是「orchestrator 缺失」）
+  const after = String(await solveStart.execute({}, {}))
+  assert.equal(
+    /orchestrator.*未注入|请确认 lib\/orchestrate\.js/.test(after),
+    false,
+    `agentTeams 就绪后不应再报编排器缺失，实际：${after.slice(0, 120)}`,
+  )
+})
+
+test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替身兼容）', () => {
+  const ctx = mockCtx({ agentTeams: { spawnTeammate() {}, createTask() {}, listTasks() {}, listMembers() {} } })
+  assert.doesNotThrow(() => apply(ctx, { workDir: '/tmp/lingxu-test' }))
+  assert.equal(ctx._collected.tools.length, 13)
+  assert.equal(ctx._collected.sections.length, 1)
+  assert.equal(ctx._collected.routes.some((r) => r.path === '/lingxu-ctf/state'), true)
 })
 
 test('apply: 工具可通过 dispose 注销', () => {
@@ -330,4 +450,83 @@ test('buildPanelState: 平台接口部分失败时不整体崩', async () => {
   assert.equal(state.stats.total, 0)
   assert.equal(state.rank, null)
   assert.deepEqual(state.theory, [])
+})
+
+// ────────────────────────────────────────────── 插件配置（设置页表单）
+
+test('Config schema：存在、有默认值、字段齐全', () => {
+  assert.equal(typeof Config, 'function', 'Config 应是 schemastery schema（可调用）')
+  const parsed = Config({})
+  for (const key of [
+    'platform', 'baseUrl', 'eventId', 'cookie', 'token', 'label',
+    'concurrency', 'maxWrongAttempts', 'dedupeFlags', 'workDir', 'timeoutMs', 'enableWebPanel',
+  ]) {
+    assert.equal(key in parsed, true, `Config 缺字段 ${key}`)
+  }
+  // 每个字段都必须有默认值：缺默认值会让 Loader 报 missing required value 并让整行加载失败
+  assert.equal(parsed.platform, 'lingxu')
+  assert.equal(parsed.concurrency, 4)
+  assert.equal(parsed.dedupeFlags, true)
+  assert.equal(parsed.enableWebPanel, true)
+})
+
+test('Config schema：cookie/token 标了 role(secret)（跨线脱敏、只写输入）', () => {
+  const json = JSON.stringify(Config.toJSON())
+  assert.match(json, /secret/, 'cookie/token 必须是 role(secret)，否则设置页会明文回显凭据')
+})
+
+test('configHasCredentials：凌虚需要 baseUrl + eventId + cookie', () => {
+  assert.equal(configHasCredentials(normalizeConfig({})), false)
+  assert.equal(configHasCredentials(normalizeConfig({ baseUrl: 'https://x.com' })), false, '缺 eventId/cookie')
+  assert.equal(
+    configHasCredentials(normalizeConfig({ baseUrl: 'https://x.com', eventId: 4, cookie: 'sessionid=a' })),
+    true,
+  )
+  assert.equal(
+    configHasCredentials(normalizeConfig({ platform: 'ctfd', baseUrl: 'https://x.com', token: 't' })),
+    true,
+    'CTFd 用 token 即可',
+  )
+})
+
+test('normalizeConfig：新字段的边界处理', () => {
+  const c = normalizeConfig({ platform: 'CTFD', baseUrl: 'https://x.com///', eventId: '4', cookie: '  a=b  ' })
+  assert.equal(c.platform, 'ctfd')
+  assert.equal(c.baseUrl, 'https://x.com', '去掉尾部斜杠')
+  assert.equal(c.eventId, 4)
+  assert.equal(c.cookie, 'a=b', '去掉首尾空白')
+  assert.equal(normalizeConfig({ platform: 'nope' }).platform, 'lingxu', '非法平台回退 lingxu')
+  assert.equal(normalizeConfig({ eventId: -5 }).eventId, 0)
+})
+
+test('apply：设置页填好配置后，无需 ctf_connect 也能解析连接', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-cfg-'))
+  process.env.DSH_HOME = dir
+  const ctx = injectAwareCtx({})
+  apply(ctx, {
+    baseUrl: 'https://cfg.example.com',
+    eventId: 7,
+    cookie: 'sessionid=from-config',
+    label: '设置页配置',
+  })
+
+  // 没有 ctf_connect、store 里也没有连接 —— 应当用配置兜底
+  const status = ctx._collected.tools.find((t) => t.name === 'ctf_status')
+  let out = ''
+  try {
+    out = String(await status.execute({}, {}))
+  } catch (error) {
+    out = error?.message ?? String(error)
+  }
+  assert.equal(/未找到可用的平台连接/.test(out), false, `配置已填，不应再报未配置：${out.slice(0, 160)}`)
+})
+
+test('apply：配置为空时才提示去设置页', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-cfg2-'))
+  process.env.DSH_HOME = dir
+  const ctx = injectAwareCtx({})
+  apply(ctx, {})
+  const status = ctx._collected.tools.find((t) => t.name === 'ctf_status')
+  const out = String(await status.execute({}, {}))
+  assert.match(out, /设置|插件配置|ctf_connect/, '要告诉用户去哪里配置')
 })
