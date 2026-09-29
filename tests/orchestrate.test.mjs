@@ -16,8 +16,14 @@ import { promises as fsp } from 'node:fs'
 import {
   LIMITS,
   allocateName,
+  buildMemberDescription,
   buildSolverPrompt,
+  buildTaskDescription,
+  challengeIdFromScope,
   createOrchestrator,
+  parseChallengeId,
+  parseMemberDescription,
+  parseTaskSubject,
   pathSlug,
   sanitizeSlug,
   selectChallenges,
@@ -205,6 +211,101 @@ test('taskSubjectFor / writeScopeFor：格式与 DSH write scope 约束', () => 
   assert.equal(scope, 'lingxu-ctf-work/challenges/baby-heap!-12')
   assert.ok(!scope.startsWith('/'))
   assert.ok(!scope.split('/').some((segment) => segment === '' || segment === '.' || segment === '..'))
+})
+
+// ---------------------------------------------------------------- 机器可读契约（/lingxu-ctf/team 依赖）
+
+test('契约：任务 description 的 challengeId 是独立一行', () => {
+  const description = buildTaskDescription({
+    challenge: { id: 12, name: 'babyheap', category: 'pwn', score: 300 },
+    connection: CONNECTION,
+    connKey: CONNECTION.key,
+    taskId: 'task-3',
+  })
+  const lines = description.split('\n')
+  assert.equal(lines[0], 'challengeId: 12', '首行必须是机器可读契约行')
+  assert.equal(parseChallengeId(description), '12')
+  // 任务板任务 id 与写入范围仍要在
+  assert.match(description, /task-3/)
+  assert.match(description, /lingxu-ctf-work\/challenges\/babyheap-12/)
+})
+
+test('parseChallengeId：独立行 / 全角冒号 / 等号 / 列表符号 / 行内提及', () => {
+  assert.equal(parseChallengeId('challengeId: 12'), '12')
+  assert.equal(parseChallengeId('challengeId：12'), '12')
+  assert.equal(parseChallengeId('challengeId = 12'), '12')
+  assert.equal(parseChallengeId('challengeId:12'), '12')
+  assert.equal(parseChallengeId('  challengeId:   12  '), '12')
+  assert.equal(parseChallengeId('CHALLENGEID: 12'), '12', '键名大小写不敏感')
+  assert.equal(parseChallengeId('challengeId: baby-heap_12'), 'baby-heap_12')
+  assert.equal(parseChallengeId('challengeId: 12（baby heap）'), '12', '值后面的说明文字要忽略')
+  // 列表 / 引用 / 有序列表前缀
+  assert.equal(parseChallengeId('- challengeId: 3'), '3')
+  assert.equal(parseChallengeId('* challengeId：3'), '3')
+  assert.equal(parseChallengeId('1. challengeId: 3'), '3')
+  assert.equal(parseChallengeId('# challengeId: 3'), '3')
+  // 多行：取第一条命中（前面的无关行不影响）
+  assert.equal(parseChallengeId('题目：x\n\nchallengeId: 7\n分类：pwn'), '7')
+  // 行内提及（teammate description 的格式）
+  assert.equal(parseChallengeId('解题 teammate：Crypto/NeuroSign（100分，challengeId=1）'), '1')
+  assert.equal(parseChallengeId('（challengeId: 9）'), '9')
+  // 不能误命中把别的词当键
+  assert.equal(parseChallengeId('mychallengeId: 5'), null)
+  assert.equal(parseChallengeId('challengeIds: 5'), null)
+  assert.equal(parseChallengeId('没有这个键'), null)
+  assert.equal(parseChallengeId('challengeId: '), null, '空值 = 没解析到')
+  assert.equal(parseChallengeId('challengeId:（缺失）'), null)
+  // 畸形输入不抛
+  assert.equal(parseChallengeId(null), null)
+  assert.equal(parseChallengeId(undefined), null)
+  assert.equal(parseChallengeId(42), null)
+  assert.equal(parseChallengeId({}), null)
+  assert.equal(parseChallengeId([]), null)
+  // 行内兜底：句子里提到 challengeId 也能解出来（旧格式 / 手写 description）
+  assert.equal(parseChallengeId('题目 challengeId: 12 已解'), '12')
+})
+
+test('challengeIdFromScope：兼容外部/旧任务，长 slug 不串位', () => {
+  assert.equal(challengeIdFromScope(['lingxu-ctf-work/challenges/baby-heap-12']), '12')
+  assert.equal(challengeIdFromScope(['lingxu-ctf-work/challenges/固件加密服务-42']), '42')
+  assert.equal(challengeIdFromScope(['lingxu-ctf-work/challenges/x-1', 'lingxu-ctf-work/challenges/y-2']), '1')
+  assert.equal(challengeIdFromScope([]), null)
+  assert.equal(challengeIdFromScope(null), null)
+  assert.equal(challengeIdFromScope([123]), null)
+})
+
+test('parseTaskSubject：分类 / 题名 / 分值，畸形输入不抛', () => {
+  assert.deepEqual(parseTaskSubject('[Crypto] NeuroSign (100分)'), {
+    category: 'Crypto', name: 'NeuroSign', score: 100,
+  })
+  assert.deepEqual(parseTaskSubject('[未分类] x (0分)'), { category: '未分类', name: 'x', score: 0 })
+  assert.deepEqual(parseTaskSubject('NeuroSign (100分)'), { category: null, name: 'NeuroSign', score: 100 })
+  assert.deepEqual(parseTaskSubject('[Web] 签到题'), { category: 'Web', name: '签到题', score: null })
+  assert.deepEqual(parseTaskSubject(''), { category: null, name: null, score: null })
+  assert.deepEqual(parseTaskSubject(null), { category: null, name: null, score: null })
+  assert.deepEqual(parseTaskSubject(7), { category: null, name: '7', score: null })
+})
+
+test('buildMemberDescription / parseMemberDescription：双向契约', () => {
+  const challenge = { id: 1, name: 'NeuroSign', category: 'Crypto', score: 100 }
+  const description = buildMemberDescription(challenge)
+  assert.equal(description, '解题 teammate：Crypto/NeuroSign（100分，challengeId=1）')
+  assert.deepEqual(parseMemberDescription(description), {
+    challengeId: '1', category: 'Crypto', challengeName: 'NeuroSign', score: 100,
+  })
+  // 中文题名 / 缺字段也要稳
+  const chinese = buildMemberDescription({ id: 42, name: '固件加密服务', category: 'IoT', score: 300 })
+  assert.deepEqual(parseMemberDescription(chinese), {
+    challengeId: '42', category: 'IoT', challengeName: '固件加密服务', score: 300,
+  })
+  assert.deepEqual(parseMemberDescription(buildMemberDescription({ id: 5 })), {
+    challengeId: '5', category: '未分类', challengeName: null, score: 0,
+  })
+  // 畸形输入不抛
+  assert.deepEqual(parseMemberDescription(null), { challengeId: null, category: null, challengeName: null, score: null })
+  assert.deepEqual(parseMemberDescription('随便写的一句话'), {
+    challengeId: null, category: null, challengeName: null, score: null,
+  })
 })
 
 test('pathSlug：保留中文可读性，只替换路径危险字符，截断不切代理对', () => {
@@ -438,6 +539,92 @@ test('start：建任务 + 按 concurrency 拉起 agent + 摘要', async () => {
   assert.equal(work.length, 4)
   const solving = work.filter((w) => w.status === 'solving').map((w) => w.challengeId)
   assert.deepEqual(solving.sort(), ['2', '3'])
+
+  // 任务 createdAt 契约：DSH 任务对象没有时间戳，由编排层写进 work 记录
+  assert.equal(work.every((w) => typeof w.taskCreatedAt === 'string' && w.taskCreatedAt.includes('T')), true)
+})
+
+test('getCaller：start/status/stop 捕获会话身份（/lingxu-ctf/team 依赖它）', async () => {
+  const { teams } = makeTeams()
+  const { orchestrator } = await makeOrchestrator({ challenges: [makeChallenge({ id: 1 })], teams })
+  assert.equal(orchestrator.getCaller(), null, '未调用前没有身份')
+
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(orchestrator.getCaller(), AGENT)
+  await orchestrator.status({ __agent: AGENT })
+  assert.equal(orchestrator.getCaller(), AGENT)
+  await orchestrator.stop({ __agent: AGENT })
+  assert.equal(orchestrator.getCaller(), AGENT)
+
+  // 缺少 caller 时不覆盖已捕获的身份（也不该崩）
+  await assert.rejects(() => orchestrator.status({}), /需要在会话内由 Lead agent 调用/)
+  assert.equal(orchestrator.getCaller(), AGENT, '失败调用不应清掉已捕获身份')
+})
+
+test('getCaller：装配层会话槽兜底（没跑过 ctf_solve_* 也能拿到身份）', async () => {
+  const session = { caller: { id: 'agent-lead', name: 'lead' } }
+  const { teams } = makeTeams()
+  const deps = {
+    config: { concurrency: 4 },
+    teams,
+    store: null,
+    now: () => 1700000000000,
+    session,
+    resolveAdapter: async () => ({ adapter: { async challenges() { return [] } }, connection: CONNECTION }),
+  }
+  const orchestrator = createOrchestrator(deps)
+  assert.equal(orchestrator.getCaller(), session.caller, '没有 solve_* 捕获时退化用会话槽')
+
+  // solve_* 捕获的 Lead 优先，并回写会话槽
+  const lead = { id: 'agent-new', name: 'lead' }
+  await orchestrator.status({ __agent: lead })
+  assert.equal(orchestrator.getCaller(), lead)
+  assert.equal(session.caller, lead, '编排器捕获也要回写会话槽（供装配层使用）')
+})
+
+test('协同消息采集：start → spawn、status → status、stop → stop', async () => {
+  const store = await makeStore()
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const { teams } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [makeChallenge({ id: 1, name: 'web-1', category: 'web', score: 100 })],
+    teams,
+    store,
+    config: { concurrency: 1 },
+  })
+
+  await orchestrator.start({ __agent: AGENT })
+  let messages = await store.listTeamMessages(CONNECTION.key)
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].kind, 'spawn')
+  assert.equal(messages[0].from, 'lead')
+  assert.match(messages[0].text, /拉起 agent 1 个/)
+  assert.match(messages[0].text, /solver-web-1/)
+
+  await orchestrator.status({ __agent: AGENT })
+  // 反复轮询：连续两次正文相同的 status 只落盘一次（避免刷掉真正的汇报）
+  await orchestrator.status({ __agent: AGENT })
+  assert.deepEqual((await store.listTeamMessages(CONNECTION.key)).map((m) => m.kind), ['spawn', 'status'])
+
+  await orchestrator.stop({ __agent: AGENT, reason: '收工' })
+  messages = await store.listTeamMessages(CONNECTION.key)
+  assert.deepEqual(messages.map((m) => m.kind), ['spawn', 'status', 'stop'])
+  assert.match(messages[1].text, /ctf_solve_status/)
+  assert.match(messages[2].text, /ctf_solve_stop/)
+  assert.match(messages[2].text, /收工/)
+})
+
+test('协同消息采集：store 未注入 / 不支持该方法时不影响编排', async () => {
+  const { teams } = makeTeams()
+  const { orchestrator } = await makeOrchestrator({ challenges: [makeChallenge({ id: 1 })], teams, store: null })
+  await assert.doesNotReject(() => orchestrator.start({ __agent: AGENT }))
+
+  // 只有 upsertChallengeWork 的旧 store：也要能跑完 start/status/stop
+  const partialStore = { async upsertChallengeWork() { return {} }, async listChallengeWork() { return [] } }
+  const second = await makeOrchestrator({ challenges: [makeChallenge({ id: 1 })], teams, store: partialStore })
+  await assert.doesNotReject(() => second.orchestrator.start({ __agent: AGENT }))
+  await assert.doesNotReject(() => second.orchestrator.status({ __agent: AGENT }))
+  await assert.doesNotReject(() => second.orchestrator.stop({ __agent: AGENT }))
 })
 
 test('start：默认 limit = 全部选中题目（≤200），concurrency 硬上限 8', async () => {
@@ -755,9 +942,48 @@ test('status：外部创建的任务用 writeScope 反解 challengeId（连字�
   })
   const report = await orchestrator.status({ __agent: AGENT })
   assert.match(report, /babyheap \(#12\)/, 'writeScope 应反解出 12（旧正则会把 baby-heap-12 解成 heap-12）')
-  assert.match(report, /未解/)
+  assert.match(report, /进行中（agent 正在做）/, '平台未解但任务 in_progress → 必须标注进行中（而不是只显示未解）')
   assert.match(report, /进行中 1，待认领 0，已完成 0/)
   assert.match(report, /未建任务 0 题/, '不应再出现一条重复的排队行')
+})
+
+test('status：进行中可见 —— 任务 in_progress 与「已拉起未认领」都要标注（用户反馈）', async () => {
+  const store = await makeStore()
+  // busy 只算 running/provisioning：放一个 inactive 的 teammate 占名但不算并发
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    { name: 'solver-pwn-2', role: 'teammate', status: 'inactive' },
+  ]
+  const challenges = [
+    makeChallenge({ id: 1, name: 'web-1', category: 'web', score: 100, solved: false }),
+    makeChallenge({ id: 2, name: 'pwn-2', category: 'pwn', score: 200, solved: false }),
+    makeChallenge({ id: 3, name: 'misc-3', category: 'misc', score: 300, solved: false }),
+  ]
+  const { teams, taskList } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, store, config: { concurrency: 2 } })
+  await orchestrator.start({ __agent: AGENT })
+
+  // 建任务按分值降序：task-1=misc-3(300) → task-2=pwn-2(200) → task-3=web-1(100)；并发 2 只拉起前两题
+  assert.equal(taskList.length, 3)
+  // 题目 3：teammate 已认领（in_progress）但平台仍是未解
+  taskList[0].status = 'in_progress'
+  taskList[0].ownerName = 'solver-misc-3'
+  // 题目 2：agent 已拉起（work.status=solving）但还没 claim → 任务仍是 pending（空窗期）
+  assert.equal(taskList[1].status, 'pending')
+
+  const report = await orchestrator.status({ __agent: AGENT })
+  assert.match(report, /\| misc-3 \(#3\) .*进行中（agent 正在做）/, 'in_progress 的题要标注进行中')
+  assert.match(report, /\| pwn-2 \(#2\) .*进行中（agent 正在做）/, '已拉起未认领的题也要标注进行中（空窗期）')
+  assert.match(report, /\| web-1 \(#1\) .*未解/, '没起 agent 的题仍是未解')
+  assert.match(report, /- 进行中（agent 正在做）：2 题/)
+  assert.match(report, /### 进行中（agent 正在做）/)
+  assert.match(report, /- misc-3 \(#3\)｜misc｜300分｜任务 task-1｜owner=solver-misc-3｜平台未解/)
+  assert.match(report, /- pwn-2 \(#2\)｜pwn｜200分｜任务 task-2｜owner=未认领｜平台未解/)
+
+  // 平台侧已解时不再进「进行中」清单
+  challenges.find((c) => c.id === 3).solved = true
+  const after = await orchestrator.status({ __agent: AGENT })
+  assert.match(after, /- 进行中（agent 正在做）：1 题/)
 })
 
 test('status：spawn 失败的题目会出现在统计里', async () => {
@@ -797,18 +1023,80 @@ test('stop：中断全部 teammate，releaseEnvs 释放已开环境', async () =
   })
   await orchestrator.start({ __agent: AGENT })
 
-  // 标记题目 1 已开环境；题目 2 的任务处于进行中
+  // 标记题目 1 已开环境；题目 2 的任务处于进行中但**没有起过环境**（附件题）
   await store.upsertChallengeWork(CONNECTION.key, '1', { envStarted: true, connectionInfo: 'nc 1.2.3.4 1337' })
   taskList[1].status = 'in_progress'
 
   const summary = await orchestrator.stop({ __agent: AGENT, releaseEnvs: true })
   assert.deepEqual(calls.interrupt.map((c) => c.name), ['solver-web-1', 'solver-pwn-2'])
   assert.equal(calls.interrupt[0].caller, AGENT)
-  assert.deepEqual(adapterCalls.release.sort(), ['1', '2'])
+  assert.deepEqual(adapterCalls.release.sort(), ['1'], '「任务进行中」≠「有环境」：只有起过环境的题才 release')
   assert.match(summary, /中断 agent：2 个/)
-  assert.match(summary, /释放环境：2 个/)
+  assert.match(summary, /释放环境：1 个成功，0 个本来就没环境，0 个平台未配置环境/)
   assert.match(summary, /challengeId=1/)
-  assert.match(summary, /challengeId=2/)
+  assert.doesNotMatch(summary, /challengeId=2/, '没起过环境的题不应出现在释放清单里')
+})
+
+test('stop：非环境题（task_type=2 / 附件题）绝不被 release（回归）', async () => {
+  const store = await makeStore()
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const { teams, taskList } = makeTeams({ members })
+  const { orchestrator, adapterCalls } = await makeOrchestrator({
+    // 41 这类附件题的 task_type 是 2（link_path 指向网盘），平台对 release 返回 400
+    challenges: [
+      makeChallenge({ id: 41, name: '消失的浮点数', category: 'misc', score: 100, task_type: 2, type: 2 }),
+      makeChallenge({ id: 7, name: 'baby-heap', category: 'pwn', score: 200, task_type: 1, type: 1 }),
+    ],
+    teams,
+    store,
+    config: { concurrency: 2 },
+  })
+  await orchestrator.start({ __agent: AGENT })
+  for (const task of taskList) task.status = 'in_progress'
+
+  // 只有题目 7 真的起过环境（ctf_start_env 写的 work 记录）
+  await store.upsertChallengeWork(CONNECTION.key, '7', {
+    envStarted: true, envReleased: false, connectionInfo: 'nc 10.0.0.1 1337',
+  })
+
+  const summary = await orchestrator.stop({ __agent: AGENT, releaseEnvs: true })
+  assert.deepEqual(adapterCalls.release, ['7'], '只释放起过环境的题')
+  assert.doesNotMatch(summary, /challengeId=41/)
+  assert.match(summary, /- challengeId=7/)
+})
+
+test('stop：释放结果四分类摘要（成功 / 本来就没环境 / 平台未配置 / 失败）', async () => {
+  const store = await makeStore()
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const { teams } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [makeChallenge({ id: 1 }), makeChallenge({ id: 2 }), makeChallenge({ id: 3 }), makeChallenge({ id: 4 }), makeChallenge({ id: 5 })],
+    teams,
+    store,
+    releaseImpl: async (id) => {
+      if (id === '2') return { kind: 'no-env', released: false, idempotent: true }
+      if (id === '3') return { kind: 'not-configured', released: false, notConfigured: true }
+      if (id === '4') throw new Error('平台 500')
+      if (id === '5') return { kind: 'released', released: true, idempotent: true }
+      return { kind: 'released', released: true }
+    },
+  })
+  for (const id of ['1', '2', '3', '4', '5']) {
+    await store.upsertChallengeWork(CONNECTION.key, id, { envStarted: true, connectionInfo: 'nc x 1' })
+  }
+
+  const summary = await orchestrator.stop({ __agent: AGENT, releaseEnvs: true })
+  assert.match(summary, /释放环境：1 个成功，2 个本来就没环境，1 个平台未配置环境，1 个失败/)
+  assert.match(summary, /- challengeId=1\n/)
+  assert.match(summary, /- challengeId=2（幂等：本来就无环境）/)
+  assert.match(summary, /- challengeId=3（平台未配置环境，跳过）/)
+  assert.match(summary, /- challengeId=4：平台 500/)
+  assert.match(summary, /- challengeId=5（幂等：此前已释放或正在释放）/, 'idempotent + kind=released 要与 no-env 区分')
+
+  // 释放成功的题会写 envReleased=true → 下一轮不再重复释放
+  const second = await orchestrator.stop({ __agent: AGENT, releaseEnvs: true })
+  assert.doesNotMatch(second, /- challengeId=1\n/)
+  assert.match(second, /释放环境：0 个成功/)
 })
 
 test('stop：names 只中断指定成员；releaseEnvs 默认关闭；中断失败不崩', async () => {

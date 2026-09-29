@@ -87,11 +87,18 @@ check('我的排名可解析', mine.rank !== null, `第 ${mine.rank} / ${mine.to
 const tests = await client.theoryTests()
 if (tests.length) {
   const t = tests[0]
-  check('理论题列表', t.id, `${t.name}｜${t.count} 题｜${t.timeSeconds}s｜题型 ${t.types.join('/')}｜已开始=${t.isBegin}`)
+  check(
+    '理论题列表',
+    t.id,
+    `${t.name}｜${t.count} 题｜${t.timeSeconds}s｜题型 ${t.types.join('/')}｜状态=${t.statusLabel}（is_parse=${t.isParse} is_begin=${t.isBegin}）`,
+  )
+  check('理论题交卷状态字段可读', typeof t.isParse === 'boolean', `parse_count=${t.parseCount}`)
   // 只读：不 begin、不 answer、不 finish
   if (t.isBegin) {
     const time = await client.theoryTime(t.id).catch(() => null)
     console.log(`  ℹ 剩余时间：${JSON.stringify(time)}`)
+  } else if (t.isParse) {
+    console.log('  ℹ 试卷已交卷：平台不再开放题目列表（list/order 会 400「题目不是开启状态」），跳过拉题')
   } else {
     console.log('  ℹ 试卷未开始，跳过题目拉取（冒烟测试不触发 begin）')
   }

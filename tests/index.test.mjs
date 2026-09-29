@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import {
   apply, normalizeConfig, slugify, maskFlag, injectBootEntry, buildPanelState,
+  buildTeamState, buildReportsState, readLimitParam, toChallengeId, toEpochMs, withSessionCapture,
   name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
   describeConfigFields, readJsonBody,
 } from '../lib/index.js'
@@ -131,11 +132,13 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.equal(routes.includes('/lingxu-ctf/config'), true, '配置读写路由必须注册（设置页表单用）')
   assert.equal(routes.includes('/lingxu-ctf/diag'), true, '诊断路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/beacon'), true, '客户端回传探针路由必须注册')
+  assert.equal(routes.includes('/lingxu-ctf/team'), true, '顶部「CTF」视图的团队数据路由必须注册')
+  assert.equal(routes.includes('/lingxu-ctf/reports'), true, '顶部「CTF」视图的报告路由必须注册')
   // client.js 路由仅在 lib/client.js 存在时注册（优雅降级）
   const hasBundle = routes.includes('/lingxu-ctf/client.js')
   // 客户端半改走官方 dsh.client 机制，**不再**注册 tapIndex
   assert.equal(ctx._collected.taps.length, 0, '不得再注册 tapIndex 注入（会被宿主权威 graph 覆盖）')
-  assert.equal(routes.length, hasBundle ? 5 : 4)
+  assert.equal(routes.length, hasBundle ? 7 : 6)
   assert.equal(ctx._collected.commands.length, 1)
   assert.equal(ctx._collected.commands[0].name, 'ctf-status')
 })
@@ -446,7 +449,7 @@ test('Config schema：每个字段都标了 volatile —— 否则设置页根�
   // volatileForm 只在 schema 本身或某个字段带 meta.volatile 时才返回表单。
   // 只导出 Config 不加 volatile 的表现是「插件能跑，但设置里找不到任何配置项」。
   const fields = Object.entries(Config.dict ?? {})
-  assert.equal(fields.length, 10, `应有 10 个字段，实际 ${fields.length}`)
+  assert.equal(fields.length, 11, `应有 11 个字段，实际 ${fields.length}`)
   const notVolatile = fields.filter(([, child]) => child.meta?.volatile !== true).map(([k]) => k)
   assert.deepEqual(notVolatile, [], `这些字段缺 .volatile()，会导致设置页不显示：${notVolatile.join(', ')}`)
   // 外层 object 不能也标 volatile（schemastery 会直接抛 ValidationError）
@@ -550,9 +553,9 @@ test('默认导出必须携带 Config/inject/apply —— Loader 只认 default 
 
 // ────────────────────────────────────────────── 设置页配置读写接口
 
-test('describeConfigFields：10 个字段，含中文标签/类型/说明/secret 标记', () => {
+test('describeConfigFields：11 个字段，含中文标签/类型/说明/secret 标记', () => {
   const fields = describeConfigFields()
-  assert.equal(fields.length, 10)
+  assert.equal(fields.length, 11)
   const byKey = Object.fromEntries(fields.map((f) => [f.key, f]))
 
   assert.equal(byKey.cookie.role, 'secret')
@@ -658,4 +661,411 @@ test('index.js 源码里不再调用 webServer.tapIndex 注入 boot graph', asyn
   // 允许注释里提到 tapIndex，但不允许真的调用
   const calls = src.match(/webServer\.tapIndex\s*\(|webServer\?\.tapIndex\s*\(/g) ?? []
   assert.deepEqual(calls, [], `不得调用 tapIndex，实际 ${calls.length} 处`)
+})
+
+// ────────────────────────────────────────────── 顶部「CTF」视图：/lingxu-ctf/team
+
+const TEAM_CONN_KEY = 'lingxu:x.com:4'
+const TEAM_AGENT = { id: 'agent-lead', name: 'lead' }
+
+/** 复刻 ctx.agentTeams 的只读接口（listMembers 首行固定是 lead）。 */
+function mockAgentTeams(overrides = {}) {
+  const calls = { listMembers: 0, listTasks: 0, callers: [] }
+  const teams = {
+    listMembers(caller) {
+      calls.listMembers += 1
+      calls.callers.push(caller)
+      return [
+        { id: 'agent-lead', name: 'lead', role: 'lead', status: 'running' },
+        {
+          id: 'child-1', name: 'solver-neurosign-1', role: 'teammate', status: 'running',
+          description: '解题 teammate：Crypto/NeuroSign（100分，challengeId=1）',
+        },
+        { id: 'child-2', name: 'solver-web-2', role: 'teammate', status: 'inactive' },
+      ]
+    },
+    listTasks() {
+      calls.listTasks += 1
+      return [
+        {
+          id: 'task-1', revision: 3, subject: '[Crypto] NeuroSign (100分)', status: 'in_progress',
+          description: 'challengeId: 1\n题目：NeuroSign\n分类：Crypto ｜ 分值：100',
+          ownerName: 'solver-neurosign-1',
+          writeScopes: ['lingxu-ctf-work/challenges/neurosign-1'],
+          blockedBy: [], ready: false, writeScopeWarnings: [],
+        },
+        {
+          id: 'task-2', revision: 1, subject: '[Web] 签到 (100分)', status: 'completed',
+          description: 'challengeId: 2', ownerName: 'solver-web-2',
+          writeScopes: ['lingxu-ctf-work/challenges/签到-2'], blockedBy: [], ready: false,
+        },
+      ]
+    },
+    ...overrides,
+  }
+  return { teams, calls }
+}
+
+/** 复刻 store 的两个只读接口（team 路由用到的部分）。 */
+function mockTeamStore(overrides = {}) {
+  const work = [
+    {
+      connKey: TEAM_CONN_KEY, challengeId: '1', taskId: 'task-1', teammate: 'solver-neurosign-1',
+      subject: '[Crypto] NeuroSign (100分)', status: 'solving',
+      taskCreatedAt: '2026-09-29T05:00:00.000Z', updatedAt: '2026-09-29T05:02:00.000Z',
+    },
+  ]
+  const messages = [
+    { connKey: TEAM_CONN_KEY, at: '2026-09-29T05:02:10.000Z', from: 'solver-neurosign-1', to: 'lead', kind: 'report', text: 'NeuroSign 已解出，flag 已提交' },
+    { connKey: TEAM_CONN_KEY, at: '2026-09-29T05:03:00.000Z', from: 'lead', to: 'team', kind: 'status', text: '轮询一次' },
+  ]
+  return {
+    async listChallengeWork() { return work },
+    async listTeamMessages(connKey, limit) {
+      const rows = connKey ? messages.filter((m) => m.connKey === connKey) : messages
+      return rows.slice(-(Number(limit) > 0 ? Number(limit) : 50))
+    },
+    ...overrides,
+  }
+}
+
+const teamResolveAdapter = async () => ({
+  adapter: {},
+  connection: { platform: 'lingxu', baseUrl: 'https://x.com', eventId: 4, label: '数信杯测试赛' },
+  connKey: TEAM_CONN_KEY,
+})
+
+test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 计数）', async () => {
+  const { teams } = mockAgentTeams()
+  const store = mockTeamStore()
+  const state = await buildTeamState({
+    store,
+    teams,
+    caller: TEAM_AGENT,
+    resolveAdapter: teamResolveAdapter,
+    now: () => Date.parse('2026-09-29T05:02:45.143Z'),
+  })
+
+  assert.equal(state.ok, true)
+  assert.equal(state.generatedAt, '2026-09-29T05:02:45.143Z')
+  assert.deepEqual(state.connection, { key: TEAM_CONN_KEY, label: '数信杯测试赛' })
+  assert.deepEqual(Object.keys(state).sort(), ['connection', 'counts', 'generatedAt', 'members', 'messages', 'ok', 'tasks'])
+
+  // ── members：listMembers 透传 + work/description 映射出题目
+  assert.equal(state.members.length, 3)
+  for (const member of state.members) {
+    assert.deepEqual(Object.keys(member).sort(), ['category', 'challengeId', 'challengeName', 'description', 'name', 'role', 'status'])
+  }
+  assert.deepEqual(state.members[0], {
+    name: 'lead', role: 'lead', status: 'running', description: '',
+    challengeId: null, challengeName: null, category: null,
+  })
+  const solver = state.members[1]
+  assert.equal(solver.name, 'solver-neurosign-1')
+  assert.equal(solver.role, 'teammate')
+  assert.equal(solver.status, 'running', 'status 直接透传')
+  assert.equal(solver.description, '解题 teammate：Crypto/NeuroSign（100分，challengeId=1）')
+  assert.equal(solver.challengeId, 1, '数字 id（与平台 challenges[].id 可比）')
+  assert.equal(solver.challengeName, 'NeuroSign')
+  assert.equal(solver.category, 'Crypto')
+  // 没有 work 记录 + 没有 description → 一律 null，不崩
+  assert.deepEqual(state.members[2], {
+    name: 'solver-web-2', role: 'teammate', status: 'inactive', description: '',
+    challengeId: null, challengeName: null, category: null,
+  })
+
+  // ── tasks
+  assert.equal(state.tasks.length, 2)
+  for (const task of state.tasks) {
+    assert.deepEqual(Object.keys(task).sort(), [
+      'category', 'challengeId', 'challengeName', 'createdAt', 'id', 'owner', 'revision', 'status', 'subject', 'updatedAt', 'writeScopes',
+    ])
+  }
+  assert.deepEqual(state.tasks[0], {
+    id: 'task-1', revision: 3, subject: '[Crypto] NeuroSign (100分)', status: 'in_progress',
+    owner: 'solver-neurosign-1', challengeId: 1, challengeName: 'NeuroSign', category: 'Crypto',
+    writeScopes: ['lingxu-ctf-work/challenges/neurosign-1'],
+    createdAt: Date.parse('2026-09-29T05:00:00.000Z'),
+    updatedAt: Date.parse('2026-09-29T05:02:00.000Z'),
+  })
+  assert.equal(state.tasks[1].challengeId, 2, '从 description 的契约行解析')
+  assert.equal(state.tasks[1].challengeName, '签到')
+  assert.equal(state.tasks[1].status, 'completed')
+  assert.equal(state.tasks[1].createdAt, null, 'DSH 任务没有时间戳 / 无 work 记录 → null')
+
+  // ── messages：最新在前，字段裁剪到契约
+  assert.equal(state.messages.length, 2)
+  assert.deepEqual(Object.keys(state.messages[0]).sort(), ['at', 'from', 'kind', 'text', 'to'])
+  assert.equal(state.messages[0].kind, 'status', '最新一条在前')
+  assert.deepEqual(state.messages[1], {
+    at: '2026-09-29T05:02:10.000Z', from: 'solver-neurosign-1', to: 'lead', kind: 'report',
+    text: 'NeuroSign 已解出，flag 已提交',
+  })
+
+  // ── counts
+  assert.deepEqual(state.counts, {
+    members: 3, running: 2, inactive: 1, tasksTotal: 2, tasksDone: 1, tasksInProgress: 1, tasksPending: 0,
+  })
+})
+
+test('buildTeamState：messagesLimit 只取最新 N 条', async () => {
+  const { teams } = mockAgentTeams()
+  const state = await buildTeamState({
+    store: mockTeamStore(), teams, caller: TEAM_AGENT, resolveAdapter: teamResolveAdapter, messagesLimit: 1,
+  })
+  assert.equal(state.messages.length, 1)
+  assert.equal(state.messages[0].kind, 'status')
+})
+
+test('buildTeamState：agentTeams 缺失 / caller 未捕获 / 读取失败 → ok:false，不抛', async () => {
+  const generatedAt = '2026-09-29T05:02:45.143Z'
+  const now = () => Date.parse(generatedAt)
+
+  // 1) agentTeams 未挂载（或接口不完整）
+  const missing = await buildTeamState({ store: mockTeamStore(), teams: null, caller: TEAM_AGENT, now })
+  assert.equal(missing.ok, false)
+  assert.match(missing.error, /Agent Teams 不可用/)
+  assert.equal(missing.members.length, 0)
+  assert.deepEqual(missing.counts, { members: 0, running: 0, inactive: 0, tasksDone: 0, tasksInProgress: 0, tasksPending: 0, tasksTotal: 0 })
+
+  const partial = await buildTeamState({ teams: { listTasks() { return [] } }, caller: TEAM_AGENT, now })
+  assert.equal(partial.ok, false)
+  assert.match(partial.error, /listMembers/)
+
+  // 2) 会话里还没调用过 ctf_solve_* → 没有 caller
+  const { teams } = mockAgentTeams()
+  const noCaller = await buildTeamState({ store: mockTeamStore(), teams, caller: null, now })
+  assert.equal(noCaller.ok, false)
+  assert.match(noCaller.error, /ctf_solve_start/)
+  assert.equal(noCaller.generatedAt, generatedAt)
+
+  // 3) 名单/任务板读取抛错（例如捕获到的身份已失效）
+  const throwing = await buildTeamState({
+    teams: { listMembers() { throw new Error('stale caller') }, listTasks() { return [] } },
+    caller: TEAM_AGENT,
+    now,
+  })
+  assert.equal(throwing.ok, false)
+  assert.match(throwing.error, /stale caller/)
+})
+
+test('buildTeamState：没有平台连接也能看团队；store 缺方法不崩', async () => {
+  const { teams } = mockAgentTeams()
+  const state = await buildTeamState({
+    store: {}, // 连 listChallengeWork 都没有
+    teams,
+    caller: TEAM_AGENT,
+    resolveAdapter: async () => { throw new Error('未找到可用的平台连接') },
+  })
+  assert.equal(state.ok, true)
+  assert.deepEqual(state.connection, { key: null, label: '' })
+  assert.equal(state.tasks.length, 2, '任务板来自 agentTeams，不依赖平台连接')
+  assert.equal(state.messages.length, 0)
+  // description 兜底解析出题目（没有 work 记录）
+  assert.equal(state.tasks[0].challengeId, 1)
+  assert.equal(state.members[1].challengeId, 1)
+})
+
+test('toChallengeId / toEpochMs：平台 id 与时间戳归一化', () => {
+  assert.equal(toChallengeId('12'), 12)
+  assert.equal(toChallengeId(12), 12)
+  assert.equal(toChallengeId('baby-heap'), 'baby-heap')
+  assert.equal(toChallengeId(''), null)
+  assert.equal(toChallengeId(undefined), null)
+  assert.equal(toEpochMs('2026-09-29T05:02:45.143Z'), Date.parse('2026-09-29T05:02:45.143Z'))
+  assert.equal(toEpochMs(1790651925466), 1790651925466)
+  assert.equal(toEpochMs('nope'), null)
+  assert.equal(toEpochMs(null), null)
+})
+
+test('readLimitParam：合法值夹在 1..max，非法回退默认', () => {
+  assert.equal(readLimitParam({ url: '/x?limit=10' }, 50, 200), 10)
+  assert.equal(readLimitParam({ url: '/x?limit=999' }, 50, 200), 200)
+  assert.equal(readLimitParam({ url: '/x?limit=0' }, 50, 200), 50)
+  assert.equal(readLimitParam({ url: '/x?limit=abc' }, 50, 200), 50)
+  assert.equal(readLimitParam({ url: '/x' }, 50, 200), 50)
+  assert.equal(readLimitParam({}, 50, 200), 50)
+})
+
+/** 最小 req/res 替身，用来真调路由 handler。 */
+function mockReq({ url = '/', method = 'GET' } = {}) {
+  return { url, method }
+}
+function mockRes() {
+  const res = { statusCode: 200, headers: {}, body: '' }
+  res.setHeader = (key, value) => { res.headers[String(key).toLowerCase()] = value }
+  res.end = (chunk) => { res.body = chunk ?? '' }
+  return res
+}
+async function callRoute(route, options) {
+  const res = mockRes()
+  await route.handler(mockReq(options), res)
+  return res
+}
+
+test('GET /lingxu-ctf/team：真调 handler —— 200 + JSON（caller 由 ctf_solve_* 捕获）', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-team-'))
+  process.env.DSH_HOME = dir
+  const { teams, calls } = mockAgentTeams()
+  const ctx = mockCtx({ agentTeams: teams })
+  apply(ctx, { workDir: dir })
+
+  const route = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/team')
+  assert.ok(route, 'team 路由必须注册')
+
+  // 还没跑过任何 ctf_solve_* → 没有会话语境
+  const before = await callRoute(route)
+  assert.equal(before.statusCode, 200, '失败也必须 HTTP 200（前端渲染空态，不要 500）')
+  assert.equal(before.headers['content-type'], 'application/json; charset=utf-8')
+  const beforeBody = JSON.parse(before.body)
+  assert.equal(beforeBody.ok, false)
+  assert.match(beforeBody.error, /ctf_solve_start/)
+
+  // 跑一次 ctf_solve_status（无平台连接也不抛），把 exec.agent 捕获成会话语境
+  const status = ctx._collected.tools.find((t) => t.name === 'ctf_solve_status')
+  await status.execute({}, { agent: TEAM_AGENT })
+
+  const after = await callRoute(route, { url: '/lingxu-ctf/team?limit=1' })
+  const body = JSON.parse(after.body)
+  assert.equal(body.ok, true)
+  assert.equal(body.members.length, 3)
+  assert.equal(body.tasks.length, 2)
+  assert.equal(calls.listMembers > 0, true)
+  assert.equal(calls.callers.every((caller) => caller === TEAM_AGENT), true, 'listMembers 必须用捕获到的 caller 调用')
+  // 编排层刚刚那次 status 调用应留下一条协同消息（connKey 未知时也能被读到）
+  assert.equal(body.messages.length, 1)
+  assert.equal(body.messages[0].kind, 'status')
+  assert.match(body.messages[0].text, /ctf_solve_status/)
+
+  // 非 GET → 405
+  const posted = await callRoute(route, { method: 'POST' })
+  assert.equal(posted.statusCode, 405)
+  assert.equal(JSON.parse(posted.body).ok, false)
+})
+
+// ────────────────────────────────────────────── 顶部「CTF」视图：/lingxu-ctf/reports
+
+test('buildReportsState：按 store 记录列出本地 WP，文件不存在则跳过', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-reports-'))
+  const writeupsDir = path.join(dir, 'writeups')
+  await fsp.mkdir(writeupsDir, { recursive: true })
+  const existing = path.join(writeupsDir, 'neurosign-1.md')
+  await fsp.writeFile(existing, '# NeuroSign\n\nflag{test}\n', 'utf8')
+  await fsp.writeFile(path.join(writeupsDir, 'babyheap-3.md'), '# babyheap\n', 'utf8')
+
+  const store = {
+    async listChallengeWork() {
+      return [
+        { connKey: TEAM_CONN_KEY, challengeId: '1', subject: '[Crypto] NeuroSign (100分)', writeupPath: existing },
+        { connKey: TEAM_CONN_KEY, challengeId: '2', subject: '[Web] 签到 (100分)', writeupPath: path.join(writeupsDir, 'gone-2.md') },
+        { connKey: TEAM_CONN_KEY, challengeId: '3', subject: '[Pwn] babyheap (300分)', writeupSlug: 'babyheap' },
+      ]
+    },
+  }
+  const state = await buildReportsState({ store, resolveAdapter: teamResolveAdapter, workDir: dir })
+  assert.equal(state.ok, true)
+  assert.equal(state.writeups.length, 2, '文件不存在的记录要跳过')
+
+  const byId = Object.fromEntries(state.writeups.map((w) => [w.challengeId, w]))
+  assert.deepEqual(Object.keys(byId[1]).sort(), ['absPath', 'bytes', 'category', 'challengeId', 'challengeName', 'modifiedAt', 'path', 'submitted'])
+  assert.equal(byId[1].challengeName, 'NeuroSign')
+  assert.equal(byId[1].category, 'Crypto')
+  assert.equal(byId[1].absPath, existing)
+  assert.equal(byId[1].path.endsWith('writeups/neurosign-1.md'), true)
+  assert.equal(byId[1].bytes > 0, true)
+  assert.match(byId[1].modifiedAt, /^\d{4}-\d{2}-\d{2}T/)
+  assert.equal(byId[1].submitted, false)
+  assert.equal(byId[3].challengeName, 'babyheap', 'writeupPath 缺失时按目录约定找文件')
+})
+
+test('buildReportsState：store 无记录 → ok:true + 空数组；store 抛错 → ok:false（HTTP 200）', async () => {
+  const empty = await buildReportsState({ store: {}, resolveAdapter: teamResolveAdapter, workDir: '/tmp' })
+  assert.equal(empty.ok, true)
+  assert.deepEqual(empty.writeups, [])
+
+  const broken = await buildReportsState({
+    store: { async listChallengeWork() { throw new Error('state.json 损坏') } },
+    resolveAdapter: teamResolveAdapter,
+    workDir: '/tmp',
+  })
+  assert.equal(broken.ok, false)
+  assert.match(broken.error, /state\.json 损坏/)
+  assert.deepEqual(broken.writeups, [])
+})
+
+test('GET /lingxu-ctf/reports：真调 handler', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-reports-route-'))
+  process.env.DSH_HOME = dir
+  const ctx = mockCtx({ agentTeams: mockAgentTeams().teams })
+  apply(ctx, { workDir: dir })
+  const route = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/reports')
+  assert.ok(route, 'reports 路由必须注册')
+
+  const res = await callRoute(route)
+  assert.equal(res.statusCode, 200)
+  const body = JSON.parse(res.body)
+  assert.equal(body.ok, true)
+  assert.deepEqual(body.writeups, [])
+
+  const posted = await callRoute(route, { method: 'POST' })
+  assert.equal(posted.statusCode, 405)
+})
+
+// ────────────────────────────────────────────── enableFloatingPanel（默认关闭）
+
+test('enableFloatingPanel：默认 false（顶部「CTF」视图为主），显式 true 才开', () => {
+  assert.equal(normalizeConfig({}).enableFloatingPanel, false)
+  assert.equal(normalizeConfig({ enableFloatingPanel: true }).enableFloatingPanel, true)
+  assert.equal(normalizeConfig({ enableFloatingPanel: 'yes' }).enableFloatingPanel, false, '只认严格 true')
+  const schemaDefault = plainConfigValue(Config({})).enableFloatingPanel
+  assert.equal(schemaDefault, false, 'schema 默认值必须是 false')
+  const field = describeConfigFields().find((f) => f.key === 'enableFloatingPanel')
+  assert.ok(field, '设置页要能渲染该字段')
+  assert.equal(field.type, 'boolean')
+  assert.equal(field.default, false)
+  assert.equal(field.label, '显示右下角浮动面板')
+})
+
+test('withSessionCapture：旁路记录 exec.agent，不改参数与返回值', async () => {
+  const session = { caller: null }
+  const seen = []
+  const spec = {
+    name: 'demo',
+    async execute(args, exec) { seen.push({ args, agent: exec?.agent }); return `ok:${args.x}` },
+  }
+  const wrapped = withSessionCapture(spec, session)
+  assert.notEqual(wrapped, spec, '必须返回包装后的新对象（不污染原 spec）')
+  assert.equal(await wrapped.execute({ x: 1 }, { agent: TEAM_AGENT }), 'ok:1')
+  assert.equal(session.caller, TEAM_AGENT)
+  assert.deepEqual(seen, [{ args: { x: 1 }, agent: TEAM_AGENT }], '参数与 exec 原样透传')
+
+  // 没有 exec / 没有 agent → 不记录、不抛
+  await wrapped.execute({ x: 2 }, {})
+  assert.equal(session.caller, TEAM_AGENT)
+  await wrapped.execute({ x: 3 }, null)
+  assert.equal(await wrapped.execute({ x: 3 }), 'ok:3')
+
+  // 缺少必要形状时原样返回，不制造半成品工具
+  assert.equal(withSessionCapture(null, session), null)
+  assert.equal(withSessionCapture({ name: 'x' }, session).name, 'x')
+  const plain = { name: 'y', execute: () => 'z' }
+  assert.equal(withSessionCapture(plain, null), plain, '没有会话槽时不包装')
+})
+
+test('GET /lingxu-ctf/team：任意 ctf_* 工具调用都能提供会话语境（不限于 solve_*）', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-team2-'))
+  process.env.DSH_HOME = dir
+  const { teams, calls } = mockAgentTeams()
+  const ctx = mockCtx({ agentTeams: teams })
+  apply(ctx, { workDir: dir })
+
+  const route = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/team')
+  const status = ctx._collected.tools.find((t) => t.name === 'ctf_status')
+  // ctf_status 不是 solve 工具：编排器不会捕获它，靠 withSessionCapture 兜住
+  await status.execute({}, { agent: TEAM_AGENT })
+
+  const body = JSON.parse((await callRoute(route)).body)
+  assert.equal(body.ok, true, '跑过任意 ctf_* 工具后团队视图就该有数据')
+  assert.equal(body.members.length, 3)
+  assert.equal(calls.callers.every((caller) => caller === TEAM_AGENT), true)
 })

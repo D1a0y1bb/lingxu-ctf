@@ -167,11 +167,14 @@ function collectHtml(node) {
  * 所以断言失败导致漏掉 `destroy()` 时，**下一个用例会拿到上一个用例的面板**，
  * 出现难以定位的连锁失败。这里用 afterEach 兜底，保证用例之间彻底隔离。
  */
-const live = { panels: [], envs: [] }
+const live = { panels: [], envs: [], views: [] }
 
 afterEach(() => {
   for (const panel of live.panels.splice(0)) {
     try { panel.destroy() } catch { /* 已销毁 */ }
+  }
+  for (const view of live.views.splice(0)) {
+    try { view.destroy() } catch { /* 已销毁 */ }
   }
   for (const env of live.envs.splice(0)) {
     try { env.restore() } catch { /* 已还原 */ }
@@ -290,6 +293,39 @@ const {
   CONFIG_SLOT_KEY,
   SECRET_SET_PLACEHOLDER,
   SECRET_UNSET_PLACEHOLDER,
+  // ── task-13：顶部「CTF」视图 tab ──
+  VIEW_SLOT,
+  VIEW_SLOT_ID,
+  VIEW_ORDER,
+  VIEW_CLASS,
+  VIEW_TABS,
+  VIEW_LOCALE_NS,
+  TEAM_URL,
+  REPORTS_URL,
+  createCtfView,
+  registerCtfView,
+  renderCtfViewSlot,
+  renderViewMetaHtml,
+  renderViewStatsHtml,
+  renderViewBoardHtml,
+  renderViewAgentsHtml,
+  renderViewMessagesHtml,
+  renderViewSubmissionsHtml,
+  renderViewReportsHtml,
+  normalizeTeam,
+  normalizeReports,
+  normalizeTaskStatus,
+  normalizeMemberStatus,
+  challengeKey,
+  mergeChallengeBoard,
+  viewStats,
+  memberLastActivity,
+  floatingPanelEnabled,
+  pendingFloatingSync,
+  FLOATING_CONFIG_KEY,
+  AGENT_STATUS_LABELS,
+  TASK_STATUS_LABELS,
+  MESSAGE_KIND_LABELS,
 } = client
 
 /** 构造一个「已配置 + 有数据」的快照。 */
@@ -324,6 +360,26 @@ const jsonResponse = (payload, init = {}) => ({
   status: init.status ?? 200,
   json: async () => payload,
 })
+
+/**
+ * 显式挂出右下角悬浮面板的辅助函数。
+ *
+ * task-13 起 `apply()` **默认不挂**悬浮面板（用户明确要求不要；只有宿主
+ * `GET /lingxu-ctf/config` 下发 `enableFloatingPanel: true` 才挂）。下面这些用例
+ * 测的是面板自身的渲染 / 轮询 / 折叠行为，所以显式打开开关 ——
+ * 默认行为另有专门用例（见「悬浮面板：默认不挂」一节）。
+ */
+const floatingApply = (ctx = null, options = {}) => apply(ctx, { ...options, enableFloating: true })
+
+/** 等待一次宏任务，让 fetch/promise 链落地。 */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+/** 依次 await 所有 pending 的悬浮面板决策，避免用例之间互相干扰。 */
+async function settleFloating() {
+  const { pendingFloatingSync } = client
+  await pendingFloatingSync()
+  await flush()
+}
 
 // ────────────────────────────────────────────────────────────── 1. 模块形态
 
@@ -552,7 +608,7 @@ test('排行榜最多 20 行', () => {
 
 // ────────────────────────────────────────────────────────────── 5. apply / 生命周期
 
-test('apply(ctx) 通过 ctx.effect 注册且不抛错，销毁后卸载', () => {
+test('apply(ctx) 通过 ctx.effect 注册且不抛错，销毁后卸载', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
     const registered = []
@@ -562,16 +618,19 @@ test('apply(ctx) 通过 ctx.effect 注册且不抛错，销毁后卸载', () => 
         return () => {}
       },
     }
-    const panel = track(apply(ctx))
-    assert.equal(registered.length, 1)
-    assert.match(registered[0].label, /lingxu-ctf/)
+    const panel = track(floatingApply(ctx))
+    await settleFloating()
+    assert.ok(registered.length >= 1, '应通过 ctx.effect 托管生命周期')
+    assert.match(registered.map((item) => item.label).join(' '), /lingxu-ctf/)
     assert.equal(panel.mounted, true)
     assert.ok(env.dom.document.getElementById('lingxu-ctf-panel'))
 
-    // 模拟 cordis 执行 effect 拿到 disposer
-    const dispose = registered[0].fn()
-    assert.equal(typeof dispose, 'function')
-    dispose()
+    // 模拟 cordis 执行每个 effect 拿到 disposer，并全部释放
+    for (const item of registered) {
+      const dispose = item.fn()
+      assert.equal(typeof dispose, 'function')
+      dispose()
+    }
     assert.equal(panel.mounted, false)
     assert.equal(env.dom.document.getElementById('lingxu-ctf-panel'), null)
   } finally {
@@ -579,10 +638,11 @@ test('apply(ctx) 通过 ctx.effect 注册且不抛错，销毁后卸载', () => 
   }
 })
 
-test('apply(null)（浏览器自挂载路径）不抛错且可销毁', () => {
+test('apply(null)（浏览器自挂载路径）不抛错且可销毁', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
+    await settleFloating()
     assert.equal(panel.mounted, true)
     assert.equal(env.dom.timerCount(), 1, '应启动轮询定时器')
     panel.destroy()
@@ -606,7 +666,7 @@ test('findHostContainer：找不到容器时返回 null（→ 浮动模式）', 
 test('成功路径：渲染赛事名、统计、题目卡片、排行榜与提交审计', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     const text = collectText(panel.root())
     const html = collectHtml(panel.root())
@@ -667,7 +727,7 @@ test('契约对齐：宿主未配置时的 {ok:false,configured:false,error} 走
     error: '未找到可用的平台连接，请先调用 ctf_connect 配置平台地址与 sessionid',
   }))
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     const text = collectText(panel.root())
     assert.match(text, new RegExp(NOT_CONFIGURED_HINT))
@@ -680,7 +740,7 @@ test('契约对齐：宿主未配置时的 {ok:false,configured:false,error} 走
 test('fetch 抛错 → 渲染错误态', async () => {
   const env = installGlobals(async () => { throw new Error('network down') })
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     const text = collectText(panel.root())
     assert.match(text, /加载失败/)
@@ -695,7 +755,7 @@ test('fetch 抛错 → 渲染错误态', async () => {
 test('HTTP 非 2xx → 渲染错误态', async () => {
   const env = installGlobals(async () => ({ ok: false, status: 502, json: async () => null }))
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     assert.match(collectText(panel.root()), /HTTP 502/)
     panel.destroy()
@@ -707,7 +767,7 @@ test('HTTP 非 2xx → 渲染错误态', async () => {
 test('未配置平台 → 空态提示 ctf_connect', async () => {
   const env = installGlobals(async () => jsonResponse({ connection: null, error: 'not configured' }))
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     const text = collectText(panel.root())
     assert.match(text, new RegExp(NOT_CONFIGURED_HINT))
@@ -721,7 +781,7 @@ test('未配置平台 → 空态提示 ctf_connect', async () => {
 test('响应不是 JSON（json() 抛错）→ 错误态而非崩溃', async () => {
   const env = installGlobals(async () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json') } }))
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     assert.match(collectText(panel.root()), /暂无题目数据|加载失败/)
     panel.destroy()
@@ -736,7 +796,7 @@ test('轮询：页面隐藏时暂停，恢复可见后立即刷新', async () =>
   let calls = 0
   const env = installGlobals(async () => { calls += 1; return jsonResponse(fullSnapshot()) })
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     const afterInitial = calls
     assert.ok(afterInitial >= 1)
@@ -759,7 +819,7 @@ test('轮询：页面隐藏时暂停，恢复可见后立即刷新', async () =>
 test('交互：分类 / 状态 / 搜索过滤会重绘看板', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     const root = panel.root()
     const find = (className) => {
@@ -808,7 +868,7 @@ test('交互：分类 / 状态 / 搜索过滤会重绘看板', async () => {
 test('折叠：启动器可展开 / 收起', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
-    const panel = track(apply(null))
+    const panel = track(floatingApply())
     await panel.refresh()
     const root = panel.root()
     panel.setCollapsed(true)
@@ -821,12 +881,13 @@ test('折叠：启动器可展开 / 收起', async () => {
   }
 })
 
-test('重复 apply 不会挂出第二个面板', () => {
+test('重复 apply 不会挂出第二个面板', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
-    const first = track(apply(null))
-    const second = track(apply(null))
+    const first = track(floatingApply())
+    const second = track(floatingApply())
     assert.equal(first, second)
+    await settleFloating()
     const panels = collectHtml(env.dom.document.body).match(/id="lingxu-ctf-panel"/g) || []
     assert.equal(panels.length, 0) // stub 的 id 走属性赋值，不在 innerHTML 里
     assert.equal(env.dom.document.getElementById('lingxu-ctf-panel') !== null, true)
@@ -852,7 +913,7 @@ test('createPanel 可显式注入 doc/win/fetch，不依赖全局', async () => 
 
 // ────────────────────────────────────────────────────────────── 8. 生产路径：classic script + __ModuleLoader__
 
-test('生产路径：脚本执行即向 __ModuleLoader__ 注册 factory，并自挂载浮动面板', async () => {
+test('生产路径：脚本执行即向 __ModuleLoader__ 注册 factory（默认不挂悬浮面板）', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
     const { api, registration } = await loadClientModule()
@@ -862,11 +923,19 @@ test('生产路径：脚本执行即向 __ModuleLoader__ 注册 factory，并自
     // factory 物化后必须给出 name / apply
     assert.equal(api.name, 'dsh-lingxu-ctf')
     assert.equal(typeof api.apply, 'function')
-    // ② 顶层自挂载（不依赖 ctx）
-    const mounted = env.dom.document.getElementById('lingxu-ctf-panel')
-    assert.ok(mounted, '顶层自挂载应立即创建面板（无需宿主调用 apply）')
+    // ② 顶层装配完成，但**不再默认挂右下角悬浮**（task-13）
+    await api.pendingFloatingSync()
+    assert.equal(
+      env.dom.document.getElementById('lingxu-ctf-panel'),
+      null,
+      '默认（宿主没开 enableFloatingPanel）不应挂悬浮面板',
+    )
 
+    // 显式打开开关后才挂，并且能正常渲染
     const panel = track(api.getPanel())
+    await api.maybeMountFloatingPanel({ enableFloating: true })
+    const mounted = env.dom.document.getElementById('lingxu-ctf-panel')
+    assert.ok(mounted, '显式打开后应挂出面板')
     assert.equal(panel.root(), mounted)
     await panel.ready
     assert.match(collectText(panel.root()), /2026 测试赛/)
@@ -876,7 +945,7 @@ test('生产路径：脚本执行即向 __ModuleLoader__ 注册 factory，并自
   }
 })
 
-test('生产路径：DOM 未就绪（readyState=loading）时等 DOMContentLoaded 再挂载', async () => {
+test('生产路径：DOM 未就绪（readyState=loading）时等 DOMContentLoaded 再装配', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   env.dom.document.readyState = 'loading'
   try {
@@ -884,12 +953,15 @@ test('生产路径：DOM 未就绪（readyState=loading）时等 DOMContentLoade
     assert.equal(env.dom.document.getElementById('lingxu-ctf-panel'), null, 'DOM 未就绪时不应提前挂载')
 
     env.dom.document.dispatch('DOMContentLoaded')
-    const mounted = env.dom.document.getElementById('lingxu-ctf-panel')
-    assert.ok(mounted, 'DOMContentLoaded 后应挂载')
+    await api.pendingFloatingSync()
+    // DOMContentLoaded 之后也只是「装配完成」：悬浮面板默认仍不挂
+    assert.equal(env.dom.document.getElementById('lingxu-ctf-panel'), null)
 
-    const panel = track(api.getPanel())
-    await panel.ready
-    assert.match(collectText(panel.root()), /2026 测试赛/)
+    const panel = track(api.maybeMountFloatingPanel({ enableFloating: true }))
+    await panel
+    assert.ok(env.dom.document.getElementById('lingxu-ctf-panel'), '显式打开后应挂载')
+    await track(api.getPanel()).ready
+    assert.match(collectText(track(api.getPanel()).root()), /2026 测试赛/)
   } finally {
     env.restore()
   }
@@ -899,7 +971,13 @@ test('生产路径：宿主页面没有 fetch 时也不抛错（降级为错误�
   const env = installGlobals(undefined)
   try {
     const { api } = await loadClientModule()
+    // 没有 fetch → 无法判定悬浮开关 → 默认不挂（顶层装配不抛错）
+    await api.pendingFloatingSync()
+    assert.equal(env.dom.document.getElementById('lingxu-ctf-panel'), null)
+    // 显式挂载后帧渲染降级为可读错误态，而不是崩溃
     const panel = track(api.getPanel())
+    panel.mount()
+    panel.start()
     await panel.refresh()
     assert.match(collectText(panel.root()), /加载失败|不支持 fetch/)
   } finally {
@@ -907,14 +985,15 @@ test('生产路径：宿主页面没有 fetch 时也不抛错（降级为错误�
   }
 })
 
-test('生产路径：没有 __ModuleLoader__ 时脚本仍能跑（浮动面板照旧）', async () => {
+test('生产路径：没有 __ModuleLoader__ 时脚本仍能跑（装配照旧）', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
     // 模拟「没有模块加载器」的降级场景：注册应当被安全跳过
     const { api } = await loadClientModule()
     delete globalThis.window.__ModuleLoader__
-    assert.ok(env.dom.document.getElementById('lingxu-ctf-panel'), '没有模块加载器也要挂出面板')
+    await api.pendingFloatingSync()
     track(api.getPanel())
+    assert.equal(env.dom.document.getElementById('lingxu-ctf-panel'), null, '默认不挂悬浮')
   } finally {
     env.restore()
   }
@@ -928,6 +1007,8 @@ test('生产路径：classic script 无 export，Node 侧经全局兜底取到 A
     const fallback = globalThis.__DSH_LINGXU_CTF_CLIENT__
     assert.equal(fallback.name, 'dsh-lingxu-ctf')
     assert.equal(typeof fallback.renderConfigSlot, 'function')
+    assert.equal(typeof fallback.registerCtfView, 'function')
+    assert.equal(typeof fallback.createCtfView, 'function')
     assert.equal(typeof fallback.apply, 'function')
     assert.equal(fallback.name, api.name)
     track(api.getPanel())
@@ -940,7 +1021,7 @@ test('生产路径：文件可被当作 **classic script** 求值（浏览器真
   // 这是本文件最关键的回归护栏：DSH 的 defaultLoadBundle 用
   // `document.createElement("script")`（无 type="module"）加载 bundle，
   // 所以只要有人加回顶层 `export` / `import.meta`，浏览器就会 SyntaxError、
-  // 面板与配置卡片全部消失。vm.runInContext 按 **script** 编译，正好复现这一点。
+  // 视图 tab 与配置卡片全部消失。vm.runInContext 按 **script** 编译，正好复现这一点。
   const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   const dom = createDom()
   const registered = []
@@ -959,15 +1040,24 @@ test('生产路径：文件可被当作 **classic script** 求值（浏览器真
   assert.equal(registered[0].id, 'dsh-lingxu-ctf')
   assert.equal(typeof registered[0].factory, 'function')
 
-  // 物化后仍要给出 name / apply / inject
+  // 物化后仍要给出 name / apply / inject 与视图注册入口
   const exports = registered[0].factory(() => { throw new Error('no react') })
   assert.equal(exports.name, 'dsh-lingxu-ctf')
   assert.equal(typeof exports.apply, 'function')
+  assert.equal(typeof exports.registerCtfView, 'function')
   // 注意：数组来自 vm 的另一个 realm，需拷回本 realm 再比较
   assert.deepEqual([...exports.inject], ['slots'])
+  // 视图常量：slot 名 / id / 顺序都必须与 DSH 契约一致
+  assert.equal(exports.VIEW_SLOT, 'conversation.view')
+  assert.equal(exports.VIEW_SLOT_ID, 'ctf')
+  assert.equal(exports.VIEW_ORDER, 20)
 
-  // 顶层自挂载也要在 script 求值时生效
-  assert.ok(dom.document.getElementById('lingxu-ctf-panel'), 'classic script 求值后应挂出浮动面板')
+  // classic script 求值后默认**不挂**右下角悬浮面板（宿主没开开关）
+  assert.equal(
+    dom.document.getElementById('lingxu-ctf-panel'),
+    null,
+    '默认不挂悬浮面板；图省事的自挂载不能把面板塞回页面',
+  )
 })
 
 // ────────────────────────────────────────────────────────────── 9. 配置卡片（task-8）
@@ -1294,19 +1384,29 @@ test('配置卡片：summary 预热后带平台与 event 信息', async () => {
   resetConfigSummaryCache()
 })
 
-test('apply(ctx)：同时注册配置卡片与浮动面板', () => {
+test('apply(ctx)：注册配置卡片 + CTF 视图 tab，悬浮面板按开关决定', async () => {
   const env = installGlobals(async () => jsonResponse(fullSnapshot()))
   try {
     const registered = []
+    const injected = []
     const ctx = {
-      slots: { register(options) { registered.push(options); return () => {} } },
+      slots: {
+        register(options) { registered.push(options); return () => {} },
+        inject(slot, fn) { injected.push(slot); fn(); return () => {} },
+      },
       effect(fn) { return fn() },
     }
     const panel = track(apply(ctx))
-    assert.equal(registered.length, 1, 'apply 应把配置卡片注册进 slot')
-    assert.equal(registered[0].name, 'plugins.bundle.config')
-    assert.equal(registered[0].key, 'dsh-lingxu-ctf')
-    assert.equal(panel.mounted, true, '浮动面板照旧挂载')
+    await settleFloating()
+    const byName = (name) => registered.filter((options) => options.name === name)
+    assert.equal(byName('plugins.bundle.config').length, 1, 'apply 应把配置卡片注册进 slot')
+    assert.equal(byName('plugins.bundle.config')[0].key, 'dsh-lingxu-ctf')
+    // 无 ctx.sessions → 降级：视图 tab 始终注册
+    assert.equal(byName('conversation.view').length, 1, 'apply 应注册顶部 CTF 视图 tab')
+    assert.equal(byName('conversation.view')[0].id, 'ctf')
+    assert.deepEqual(injected, ['plugins.bundle.config', 'conversation.view'])
+    assert.equal(panel.mounted, false, '默认不挂右下角悬浮面板')
+    assert.equal(env.dom.document.getElementById('lingxu-ctf-panel'), null)
   } finally {
     env.restore()
   }
@@ -1418,4 +1518,785 @@ test('配置卡片：布局 —— 布尔独占开关行，workDir 占两列，�
   assert.deepEqual(toggleKeys, ['dedupeFlags', 'enableWebPanel'])
 
   card.destroy()
+})
+
+// ══════════════════════════════════════ 10. 顶部「CTF」视图 tab（task-13）
+
+/** 团队快照：形状对齐宿主 `GET /lingxu-ctf/team`（task-12 契约）。 */
+function teamPayload() {
+  return {
+    ok: true,
+    members: [
+      { name: 'solver-web-01', status: 'running', description: 'Web 方向解题', challengeId: 2, challengeName: '<img src=x onerror=alert(1)>', category: 'Web' },
+      { name: 'solver-misc-01', status: 'inactive', description: 'Misc 方向', challengeId: null, challengeName: '', category: '' },
+      { name: 'solver-rev-02', status: 'failed', description: '逆向进度慢', challengeId: 3, challengeName: 'RSA', category: 'Crypto' },
+    ],
+    tasks: [
+      // 平台侧已是 working，任务也 in_progress
+      { id: 't1', subject: '解出 Web 题', status: 'in_progress', owner: 'solver-web-01', challengeId: '2', challengeName: '<img src=x onerror=alert(1)>', category: 'Web' },
+      // 平台侧已解 → 不能因为任务完成而变回未解
+      { id: 't2', subject: '解出签到', status: 'completed', owner: 'solver-misc-01', challengeId: 1, challengeName: '签到', category: 'Misc' },
+      // ★ 平台侧 pending + 任务 in_progress → 必须升级成「进行中 · solver-rev-02」
+      { id: 't3', subject: '解出 RSA', status: 'in_progress', owner: 'solver-rev-02', challengeId: 3, challengeName: 'RSA', category: 'Crypto' },
+      // 任务里有、平台列表里没有 → 补一张「仅任务」卡
+      { id: 't4', subject: '解出隐藏题', status: 'in_progress', owner: 'solver-web-01', challengeId: 99, challengeName: '隐藏题', category: 'Web' },
+    ],
+    messages: [
+      { at: '2026-09-29T01:00:00Z', from: 'lead', to: 'solver-web-01', kind: 'spawn', text: '去做 Web 题' },
+      { at: '2026-09-29T01:05:00Z', from: 'solver-web-01', to: 'lead', kind: 'report', text: '拿到 flag 了' },
+      { at: '2026-09-29T01:06:00Z', from: 'lead', to: 'solver-rev-02', kind: 'status', text: '进度？' },
+      { at: '2026-09-29T01:07:00Z', from: 'lead', to: 'solver-rev-02', kind: 'stop', text: '先停一下' },
+      { at: '2026-09-29T01:08:00Z', from: 'lead', to: 'solver-misc-01', kind: 'send', text: '顺手看下 Misc' },
+    ],
+    counts: { members: 3, running: 1, inactive: 1, tasksTotal: 4, tasksDone: 1, tasksInProgress: 3, tasksPending: 0 },
+  }
+}
+
+/** 报告快照：形状对齐宿主 `GET /lingxu-ctf/reports`。 */
+function reportsPayload() {
+  return {
+    ok: true,
+    writeups: [
+      {
+        challengeId: 1,
+        challengeName: '签到',
+        title: '签到 writeup',
+        path: '/Users/x/lingxu-ctf-work/writeups/challenge-1.md',
+        submitted: true,
+        submittedAt: '2026-09-29T02:00:00Z',
+        body: '# 签到\n\nbase64 解码即得 flag。',
+      },
+      {
+        challengeId: 3,
+        challengeName: 'RSA',
+        title: 'RSA writeup',
+        path: '/Users/x/lingxu-ctf-work/writeups/rsa-3.md',
+        submitted: false,
+        body: '',
+      },
+    ],
+  }
+}
+
+/** 三路 fetch stub：/state、/team、/reports 各自返回给定 payload（或抛错）。 */
+function viewFetch({
+  state = fullSnapshot(), team = teamPayload(), reports = reportsPayload(),
+  teamError = null, reportsError = null, stateError = null,
+} = {}) {
+  const calls = []
+  const impl = async (url) => {
+    calls.push(url)
+    if (url === STATE_URL) {
+      if (stateError) throw stateError
+      return jsonResponse(state)
+    }
+    if (url === TEAM_URL) {
+      if (teamError) throw teamError
+      return jsonResponse(team)
+    }
+    if (url === REPORTS_URL) {
+      if (reportsError) throw reportsError
+      return jsonResponse(reports)
+    }
+    return jsonResponse({ ok: false })
+  }
+  return { impl, calls }
+}
+
+/** 把视图挂到 stub document 上（真实路径由 React host 插入）。 */
+function mountView(options = {}) {
+  const dom = options.dom || createDom()
+  const view = createCtfView({ doc: dom.document, win: dom.window, ...options })
+  const element = view.mount()
+  dom.document.body.appendChild(element)
+  live.views.push(view)
+  return { dom, view, element }
+}
+
+test('视图：slot 常量与 DSH 契约一致（list slot 必须有 id + order）', () => {
+  assert.equal(VIEW_SLOT, 'conversation.view')
+  assert.equal(VIEW_SLOT_ID, 'ctf')
+  assert.equal(VIEW_ORDER, 20, '排在「对话」(0) / 「轨迹」(10) 之后')
+  assert.equal(VIEW_CLASS, 'lx-view')
+  assert.equal(TEAM_URL, '/lingxu-ctf/team')
+  assert.equal(REPORTS_URL, '/lingxu-ctf/reports')
+  assert.equal(FLOATING_CONFIG_KEY, 'enableFloatingPanel')
+  assert.deepEqual(
+    VIEW_TABS.map((tab) => tab.id),
+    ['board', 'agents', 'messages', 'submissions', 'reports'],
+  )
+})
+
+test('视图：registerCtfView 注册 conversation.view，id=ctf / order=20 / label 可调用', () => {
+  const registered = []
+  const injected = []
+  const ctx = {
+    slots: {
+      register(options, render) { registered.push({ options, render }); return () => {} },
+      inject(slot, fn) { injected.push(slot); fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+  }
+  const register = registerCtfView(ctx)
+  assert.equal(typeof register, 'function')
+  assert.deepEqual(injected, ['conversation.view'])
+  assert.equal(registered.length, 1)
+  const { options, render } = registered[0]
+  assert.equal(options.name, 'conversation.view')
+  assert.equal(options.id, 'ctf')
+  assert.equal(options.order, 20)
+  // 无 locale 服务时必须不带 locale 字段（ui-renderer 会因缺 face 抛 SlotAssemblyError）
+  assert.equal('locale' in options, false)
+  assert.equal(typeof options.label, 'function', 'label 必须是 thunk（跟随语言）')
+  assert.equal(options.label(), 'CTF')
+  assert.equal(typeof render, 'function')
+})
+
+test('视图：有 locale 服务时带命名空间 + thunk 标签', () => {
+  const registered = []
+  const namespaces = []
+  const ctx = {
+    slots: { register(options) { registered.push(options); return () => {} } },
+    effect(fn) { return fn() },
+    get(name) {
+      if (name !== 'locale') return undefined
+      return {
+        register(ns, dict) { namespaces.push({ ns, dict }) },
+        bind: () => (key) => (key === 'view.ctf' ? 'CTF 视图' : key),
+      }
+    },
+  }
+  registerCtfView(ctx)
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].locale, VIEW_LOCALE_NS)
+  assert.deepEqual(namespaces.map((item) => item.ns), [VIEW_LOCALE_NS])
+  assert.equal(registered[0].label(), 'CTF 视图')
+})
+
+test('视图：locale.register 抛错 / 键缺失时 label thunk 仍可用（兜底 CTF）', () => {
+  const registered = []
+  const ctx = {
+    slots: { register(options) { registered.push(options); return () => {} } },
+    effect(fn) { return fn() },
+    get: () => ({
+      register() { throw new Error('namespace already registered') },
+      bind: () => (key) => key, // 未注册命名空间 → 原样返回 key
+    }),
+  }
+  registerCtfView(ctx)
+  assert.equal(registered[0].locale, VIEW_LOCALE_NS)
+  assert.equal(registered[0].label(), 'CTF', '拿不到译文时兜底成 CTF，而不是显示 view.ctf')
+})
+
+test('视图：拿不到 slots 服务时安全返回 null（不抛）', () => {
+  assert.equal(registerCtfView(null), null)
+  assert.equal(registerCtfView(undefined), null)
+  assert.equal(registerCtfView({}), null)
+  assert.equal(registerCtfView({ slots: {} }), null)
+})
+
+test('视图：没有 ctx.sessions 时降级为始终注册（不能因此不注册这个 tab）', () => {
+  const registered = []
+  const ctx = {
+    slots: {
+      register(options) { registered.push(options); return () => {} },
+      inject(slot, fn) { fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+  }
+  registerCtfView(ctx)
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].id, 'ctf')
+})
+
+test('视图：会话门控 —— 非 CTF 会话不注册，切到 ctf 会话注册，切走注销', () => {
+  const registered = []
+  const disposed = []
+  let listener = null
+  let snapshot = {
+    current: 's1',
+    byId: { s1: { projectionValues: { agentPreset: 'standard' } } },
+  }
+  const ctx = {
+    slots: {
+      register(options) {
+        registered.push(options)
+        return () => disposed.push(options.id)
+      },
+      inject(slot, fn) { fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+    get(name) {
+      if (name !== 'sessions') return undefined
+      return {
+        list: {
+          getSnapshot: () => snapshot,
+          subscribe(fn) { listener = fn; return () => { listener = null } },
+        },
+      }
+    },
+  }
+  registerCtfView(ctx)
+  assert.equal(registered.length, 0, '普通会话里不该出现 CTF tab')
+
+  // 切到 CTF 预设的会话 → 注册
+  snapshot = {
+    current: 's2',
+    byId: { s1: { projectionValues: { agentPreset: 'standard' } }, s2: { projectionValues: { agentPreset: 'ctf' } } },
+  }
+  listener()
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].id, 'ctf')
+
+  // 切回普通会话 → 注销
+  snapshot = {
+    current: 's1',
+    byId: { s1: { projectionValues: { agentPreset: 'standard' } }, s2: { projectionValues: { agentPreset: 'ctf' } } },
+  }
+  listener()
+  assert.deepEqual(disposed, ['ctf'])
+  assert.equal(registered.length, 1, '不应重复注册')
+})
+
+test('视图：preset 识别 —— ctf / ctf-* / 祖先会话 / 旧字段 agentPreset / 环路', () => {
+  assert.equal(client.isCtfPresetId('ctf'), true)
+  assert.equal(client.isCtfPresetId('ctf-hard'), true)
+  assert.equal(client.isCtfPresetId('standard'), false)
+  assert.equal(client.isCtfPresetId(undefined), false)
+  // 旧字段（0.1.1 及更早）：preset id 直接在行上
+  assert.equal(client.isCtfSession({ byId: { s1: { agentPreset: 'ctf' } } }, 's1'), true)
+  // 新字段：projectionValues.agentPreset
+  assert.equal(client.isCtfSession({ byId: { s1: { projectionValues: { agentPreset: 'ctf-x' } } } }, 's1'), true)
+  // 子会话继承 lead 的会话（沿 parentId 向上找）
+  assert.equal(
+    client.isCtfSession({
+      byId: {
+        child: { parentId: 'root', projectionValues: { agentPreset: null } },
+        root: { projectionValues: { agentPreset: 'ctf' } },
+      },
+    }, 'child'),
+    true,
+  )
+  // 环路也不能死循环
+  assert.equal(client.isCtfSession({ byId: { a: { parentId: 'b' }, b: { parentId: 'a' } } }, 'a'), false)
+  // 当前会话：current 优先，其次 retainedBy.mainView
+  assert.equal(client.currentSessionOf({ current: 'x', byId: {} }), 'x')
+  assert.equal(client.currentSessionOf({ byId: { y: { retainedBy: { mainView: 1 } } } }), 'y')
+  assert.equal(client.currentSessionOf({ byId: {} }), undefined)
+})
+
+test('视图：options.alwaysShowView 逃生舱 —— 跳过关控始终显示', () => {
+  const registered = []
+  const ctx = {
+    slots: {
+      register(options) { registered.push(options); return () => {} },
+      inject(slot, fn) { fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+    get(name) {
+      if (name !== 'sessions') return undefined
+      // 当前会话明确是普通 preset —— 门控会拒绝注册
+      return {
+        list: {
+          getSnapshot: () => ({ current: 's1', byId: { s1: { projectionValues: { agentPreset: 'standard' } } } }),
+          subscribe: () => () => {},
+        },
+      }
+    },
+  }
+  registerCtfView(ctx)
+  assert.equal(registered.length, 0, '默认门控：普通会话不显示')
+  registerCtfView(ctx, { alwaysShowView: true })
+  assert.equal(registered.length, 1, '打开逃生舱后始终显示')
+  assert.equal(registered[0].id, 'ctf')
+})
+
+test('视图：快照里完全没有 preset 信息时降级为始终注册（宁可多显示）', () => {  const registered = []
+  const ctx = {
+    slots: {
+      register(options) { registered.push(options); return () => {} },
+      inject(slot, fn) { fn(); return () => {} },
+    },
+    effect(fn) { return fn() },
+    get(name) {
+      if (name !== 'sessions') return undefined
+      return { list: { getSnapshot: () => ({ current: 's1', byId: { s1: {} } }), subscribe: () => () => {} } }
+    },
+  }
+  registerCtfView(ctx)
+  assert.equal(registered.length, 1, '无法判定时必须始终注册')
+})
+
+test('视图：renderCtfViewSlot 必须返回 React 元素，而不是组件函数 / DOM 节点', () => {
+  const react = {
+    createElement(type, props, ...children) { return { $$typeof: ELEMENT, type, props: props ?? {}, children } },
+    useRef: () => ({ current: null }),
+    useEffect: () => {},
+  }
+  const out = renderCtfViewSlot({}, { react })
+  assert.notEqual(typeof out, 'function', '返回组件函数会被 React 判为非法 child')
+  assert.equal(out && out.$$typeof, ELEMENT, '必须返回 React 元素')
+  assert.equal(typeof out.type, 'function')
+  const rendered = out.type({})
+  assert.equal(rendered && rendered.$$typeof, ELEMENT, '组件调用后也必须返回元素')
+  assert.equal(rendered.type, 'div')
+  assert.equal(rendered.props.className, 'lx-view-host')
+})
+
+// ── 数据模型：全部容错 ──
+
+test('视图模型：normalizeTeam 对 null / 垃圾 / ok:false 全部降级成空团队', () => {
+  for (const input of [null, undefined, 42, 'nope', [], {}, { ok: false, error: '团队数据缺失' }]) {
+    const team = normalizeTeam(input)
+    assert.equal(team.hasTeam, false)
+    assert.deepEqual(team.members, [])
+    assert.deepEqual(team.tasks, [])
+    assert.deepEqual(team.messages, [])
+    assert.equal(team.counts.members, 0)
+    assert.equal(team.counts.tasksTotal, 0)
+  }
+  assert.equal(normalizeTeam({ ok: false, error: 'x' }).error, 'x')
+})
+
+test('视图模型：counts 缺失时由 members / tasks 推导', () => {
+  const team = normalizeTeam({
+    members: [{ name: 'a', status: 'running' }, { name: 'b', status: 'inactive' }, { name: 'c', status: 'failed' }],
+    tasks: [
+      { id: 't1', status: 'in_progress', owner: 'a' },
+      { id: 't2', status: 'completed', owner: 'b' },
+      { id: 't3', status: 'pending', owner: 'c' },
+    ],
+  })
+  assert.equal(team.hasTeam, true)
+  assert.equal(team.counts.members, 3)
+  assert.equal(team.counts.running, 1)
+  assert.equal(team.counts.inactive, 1)
+  assert.equal(team.counts.tasksTotal, 3)
+  assert.equal(team.counts.tasksDone, 1)
+  assert.equal(team.counts.tasksInProgress, 1)
+  assert.equal(team.counts.tasksPending, 1)
+})
+
+test('视图模型：状态归一（连字符 / 大小写 / 别名）与 challengeId 对齐', () => {
+  assert.equal(normalizeTaskStatus('In-Progress'), 'in_progress')
+  assert.equal(normalizeTaskStatus('done'), 'completed')
+  assert.equal(normalizeTaskStatus(undefined), 'unknown')
+  assert.equal(normalizeTaskStatus('奇怪状态'), '奇怪状态')
+  assert.equal(normalizeMemberStatus('RUNNING'), 'running')
+  assert.equal(normalizeMemberStatus('gone'), 'unknown')
+  assert.equal(challengeKey(2), '2')
+  assert.equal(challengeKey(' 2 '), '2')
+  assert.equal(challengeKey(null), null)
+  assert.equal(challengeKey(''), null)
+})
+
+test('★ 「进行中」必须可见：平台未解 + 任务 in_progress → working + owner', () => {
+  const state = normalizeState(fullSnapshot())
+  const team = normalizeTeam(teamPayload())
+  const board = mergeChallengeBoard(state.challenges, team)
+
+  const rsa = board.find((item) => item.name === 'RSA')
+  assert.equal(rsa.status, 'working', '平台 pending + 任务 in_progress 必须升级为进行中')
+  assert.equal(rsa.owner, 'solver-rev-02')
+  assert.equal(rsa.taskStatus, 'in_progress')
+
+  const signed = board.find((item) => item.name === '签到')
+  assert.equal(signed.status, 'solved', '已解的题不能因为任务完成而变回未解')
+
+  // id 类型不一致（平台 2 / 任务 "2"）也要对齐
+  const web = board.find((item) => item.category === 'Web' && item.name.startsWith('<img'))
+  assert.equal(web.status, 'working')
+  assert.equal(web.owner, 'solver-web-01')
+
+  // 任务里有、平台没有的题补一张卡
+  const extra = board.find((item) => item.teamOnly === true)
+  assert.ok(extra, '应补出「仅任务」的题')
+  assert.equal(extra.name, '隐藏题')
+  assert.equal(extra.status, 'working')
+
+  const stats = viewStats(state, board, team)
+  assert.equal(stats.total, 78)
+  assert.equal(stats.working, 3, 'working 统计按合并后的看板算')
+  assert.equal(stats.agents, 3)
+})
+
+test('★ 题目看板渲染出「进行中 · solver-rev-02」，并做注入防护', () => {
+  const state = normalizeState(fullSnapshot())
+  const team = normalizeTeam(teamPayload())
+  const board = mergeChallengeBoard(state.challenges, team)
+  const html = renderViewBoardHtml({ state, team, board, reports: normalizeReports(null) }, {})
+
+  assert.match(html, /进行中 · solver-rev-02/)
+  assert.match(html, /lx-st-working/)
+  assert.match(html, /Crypto/)
+  assert.match(html, /已解 1\/1/)
+  // 平台数据里的 HTML 必须被转义（题名是 <img src=x onerror=...>）
+  assert.equal(html.includes('<img src=x'), false)
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/)
+})
+
+test('视图：Agent 活动渲染状态点 / 当前题目 / 完成数 / 最后活动 + 可展开题目', () => {
+  const state = normalizeState(fullSnapshot())
+  const team = normalizeTeam(teamPayload())
+  const board = mergeChallengeBoard(state.challenges, team)
+  const html = renderViewAgentsHtml({ state, team, board, reports: normalizeReports(null) })
+
+  assert.match(html, /solver-web-01/)
+  assert.match(html, /运行中/)
+  assert.match(html, /空闲/)
+  assert.match(html, /失败/)
+  assert.match(html, /lx-vdot lx-ok/, 'running 用绿点')
+  assert.match(html, /lx-vdot lx-dim/, 'inactive 用灰点')
+  assert.match(html, /lx-vdot lx-err/, 'failed 用红点')
+  assert.match(html, /当前：/)
+  assert.match(html, /已完成 1 题/)
+  assert.match(html, /最后活动/)
+  assert.match(html, /负责的题目（2）/, '点开可看该 agent 负责的全部题目')
+  assert.match(html, /隐藏题/)
+})
+
+test('视图：Agent 活动 / 协同通信在无团队或 ok:false 时给空态且不抛', () => {
+  const state = normalizeState(fullSnapshot())
+  for (const raw of [null, { ok: false, error: 'HTTP 404' }, { ok: true, members: [], tasks: [], messages: [] }]) {
+    const team = normalizeTeam(raw)
+    const board = mergeChallengeBoard(state.challenges, team)
+    const model = { state, team, board, reports: normalizeReports(null) }
+    const agents = renderViewAgentsHtml(model)
+    const messages = renderViewMessagesHtml(model)
+    assert.match(agents, /尚未拉起解题团队/)
+    assert.match(messages, /暂无协同记录/)
+    assert.match(agents, /lx-vempty/)
+    assert.match(messages, /lx-vempty/)
+  }
+  // 宿主路由 404 时把原因写进空态提示（仍然不崩）
+  const team = { ...normalizeTeam(null), error: 'HTTP 404' }
+  assert.match(renderViewAgentsHtml({ state, team, board: [], reports: normalizeReports(null) }), /HTTP 404/)
+})
+
+test('视图：协同通信时间线按时间升序并带 from → to / kind 标签', () => {
+  const state = normalizeState(fullSnapshot())
+  const team = normalizeTeam(teamPayload())
+  const html = renderViewMessagesHtml({ state, team, board: [], reports: normalizeReports(null) })
+  assert.match(html, /lead/)
+  assert.match(html, /solver-web-01/)
+  assert.match(html, /→/)
+  assert.match(html, /拉起/)
+  assert.match(html, /汇报/)
+  assert.match(html, /lx-vmsg-spawn/)
+  assert.match(html, /lx-vmsg-report/)
+  const first = html.indexOf('去做 Web 题')
+  const last = html.indexOf('顺手看下 Misc')
+  assert.ok(first > 0 && last > first, '时间线应从早到晚')
+})
+
+test('视图：提交审计渲染状态徽章与脱敏 flag；报告可展开正文', () => {
+  const state = normalizeState(fullSnapshot())
+  const model = { state, team: normalizeTeam(null), board: [], reports: normalizeReports(reportsPayload()) }
+  const subs = renderViewSubmissionsHtml(model)
+  assert.match(subs, /签到/)
+  assert.match(subs, /正确/)
+  assert.match(subs, /错误/)
+  assert.match(subs, /lx-sub-correct/)
+
+  const reports = renderViewReportsHtml(model)
+  assert.match(reports, /签到 writeup/)
+  assert.match(reports, /已提交平台/)
+  assert.match(reports, /仅本地/)
+  assert.match(reports, /lx-vreport-body/)
+  assert.match(reports, /base64 解码即得 flag/)
+  assert.match(reports, /writeups\/challenge-1\.md/)
+})
+
+test('视图：报告路由拿不到时显示「暂无 writeup」空态', () => {
+  const state = normalizeState(fullSnapshot())
+  for (const raw of [null, { ok: false, error: 'HTTP 404' }, []]) {
+    const html = renderViewReportsHtml({ state, team: normalizeTeam(null), board: [], reports: normalizeReports(raw) })
+    assert.match(html, /暂无 writeup/)
+    assert.match(html, /lx-vempty/)
+  }
+  const withError = renderViewReportsHtml({
+    state, team: normalizeTeam(null), board: [], reports: { ok: false, error: 'HTTP 404', items: [] },
+  })
+  assert.match(withError, /HTTP 404/)
+})
+
+test('视图：摘要统计条含「题目总数 / 已解 / 进行中 / 待解 / Agents」', () => {
+  const state = normalizeState(fullSnapshot())
+  const team = normalizeTeam(teamPayload())
+  const board = mergeChallengeBoard(state.challenges, team)
+  const model = { state, team, board, reports: normalizeReports(null), stats: viewStats(state, board, team) }
+  const stats = renderViewStatsHtml(model)
+  for (const label of ['题目总数', '已解', '进行中', '待解', 'Agents', 'flag 提交']) {
+    assert.ok(stats.includes(label), `统计条应含「${label}」`)
+  }
+  const meta = renderViewMetaHtml(model)
+  assert.match(meta, /赛事 #4/)
+  assert.match(meta, /剩余 1小时1分/)
+  assert.match(meta, /Agents 3/)
+  assert.match(meta, /任务 1\/4/)
+})
+
+test('视图：所有片段标签闭合平衡（innerHTML 结构不会破损）', () => {
+  const VOID = new Set(['br', 'hr', 'img', 'input', 'meta', 'link'])
+  const imbalance = (html) => {
+    const stack = []
+    const re = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)\b[^>]*?(\/?)>/g
+    let match
+    while ((match = re.exec(html)) !== null) {
+      const name = match[2].toLowerCase()
+      if (VOID.has(name) || match[3] === '/') continue
+      if (match[1] === '/') {
+        if (stack.pop() !== name) return `意外闭合 </${name}>`
+      } else stack.push(name)
+    }
+    return stack.length === 0 ? null : `未闭合：${stack.join(',')}`
+  }
+  const state = normalizeState(fullSnapshot())
+  const team = normalizeTeam(teamPayload())
+  const board = mergeChallengeBoard(state.challenges, team)
+  const model = { state, team, board, reports: normalizeReports(reportsPayload()), stats: viewStats(state, board, team) }
+  const emptyModel = {
+    state, team: normalizeTeam(null), board: [], reports: normalizeReports(null), stats: viewStats(state, [], null),
+  }
+  const fragments = {
+    meta: renderViewMetaHtml(model),
+    stats: renderViewStatsHtml(model),
+    board: renderViewBoardHtml(model, {}),
+    boardEmpty: renderViewBoardHtml(emptyModel, {}),
+    agents: renderViewAgentsHtml(model),
+    agentsEmpty: renderViewAgentsHtml(emptyModel),
+    messages: renderViewMessagesHtml(model),
+    messagesEmpty: renderViewMessagesHtml(emptyModel),
+    submissions: renderViewSubmissionsHtml(model),
+    reports: renderViewReportsHtml(model),
+    reportsEmpty: renderViewReportsHtml(emptyModel),
+  }
+  for (const [key, html] of Object.entries(fragments)) {
+    assert.equal(imbalance(html), null, `${key} 标签不平衡`)
+  }
+})
+
+// ── DOM 控制器 ──
+
+test('视图控制器：挂载后拉三份数据并渲染摘要 / 看板，切 tab 重绘', async () => {
+  const { impl, calls } = viewFetch()
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+
+  const text = collectText(dom.document.body)
+  assert.match(text, /2026 测试赛/)
+  assert.match(text, /凌虚/)
+  assert.match(text, /题目总数/)
+  assert.match(text, /RSA/)
+  assert.match(text, /进行中 · solver-rev-02/)
+  // 三个路由都要拉
+  assert.ok(calls.includes(STATE_URL))
+  assert.ok(calls.includes(TEAM_URL))
+  assert.ok(calls.includes(REPORTS_URL))
+  assert.equal(view.state.snapshot.configured, true)
+  assert.equal(view.state.team.hasTeam, true)
+
+  view.setTab('agents')
+  const agents = collectText(dom.document.body)
+  assert.match(agents, /solver-web-01/)
+  assert.match(agents, /运行中/)
+
+  view.setTab('messages')
+  assert.match(collectText(dom.document.body), /拿到 flag 了/)
+
+  view.setTab('submissions')
+  assert.match(collectText(dom.document.body), /正确/)
+
+  view.setTab('reports')
+  assert.match(collectText(dom.document.body), /签到 writeup/)
+
+  // 未知 tab 忽略
+  view.setTab('nope')
+  assert.equal(view.state.tab, 'reports')
+  view.destroy()
+})
+
+test('视图控制器：/lingxu-ctf/team 与 /reports 404 时显示空态且不抛（赛事数据不被连坐）', async () => {
+  const notFound = () => {
+    const error = new Error('HTTP 404')
+    error.status = 404
+    return error
+  }
+  const { impl } = viewFetch({ teamError: notFound(), reportsError: notFound() })
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+
+  assert.match(collectText(dom.document.body), /2026 测试赛/)
+  view.setTab('agents')
+  assert.match(collectText(dom.document.body), /尚未拉起解题团队/)
+  assert.match(collectText(dom.document.body), /HTTP 404/)
+  view.setTab('messages')
+  assert.match(collectText(dom.document.body), /暂无协同记录/)
+  view.setTab('reports')
+  assert.match(collectText(dom.document.body), /暂无 writeup/)
+  assert.equal(view.state.team.hasTeam, false)
+
+  // ok:false 的形状同样只走空态
+  const { impl: impl2 } = viewFetch({ team: { ok: false, error: '团队不可用' }, reports: { ok: false, error: '报告不可用' } })
+  const second = mountView({ fetchImpl: impl2 })
+  await second.view.refresh()
+  second.view.setTab('agents')
+  assert.match(collectText(second.dom.document.body), /尚未拉起解题团队/)
+  second.view.destroy()
+  view.destroy()
+})
+
+test('视图控制器：筛选（分类 / 状态 / 搜索）与工具条随 tab 显隐', async () => {
+  const { impl } = viewFetch()
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+
+  const find = (cls) => {
+    const stack = [view.element()]
+    while (stack.length > 0) {
+      const node = stack.pop()
+      if (node && String(node.className || '').split(/\s+/).includes(cls)) return node
+      for (const child of (node && node.children) || []) stack.push(child)
+    }
+    return null
+  }
+  const search = find('lx-vsearch')
+  assert.ok(search, '看板应有搜索框')
+  search.value = '不存在'
+  search.dispatch('input')
+  assert.match(collectText(dom.document.body), /没有符合筛选条件的题目/)
+
+  search.value = ''
+  search.dispatch('input')
+  const statusSel = find('lx-vfilter-status')
+  statusSel.value = 'solved'
+  statusSel.dispatch('change')
+  assert.match(collectText(dom.document.body), /签到/)
+  assert.equal(collectText(dom.document.body).includes('RSA'), false, '已解筛选不应出现待解题')
+
+  const toolbar = find('lx-vtoolbar')
+  assert.equal(toolbar.dataset.hidden, 'false')
+  view.setTab('agents')
+  assert.equal(toolbar.dataset.hidden, 'true')
+  view.destroy()
+})
+
+test('视图控制器：轮询在页面隐藏时暂停、恢复可见后继续、销毁后停表', async () => {
+  let calls = 0
+  const { impl } = viewFetch()
+  const counting = async (url, init) => { calls += 1; return impl(url, init) }
+  const { dom, view } = mountView({ fetchImpl: counting })
+  view.start()
+  await view.ready
+  const afterInitial = calls
+  assert.ok(afterInitial >= 3, '首轮应拉三份数据')
+
+  dom.document.hidden = true
+  dom.runTimers()
+  await flush()
+  assert.equal(calls, afterInitial, '页面隐藏时不应轮询')
+
+  dom.document.hidden = false
+  dom.runTimers()
+  await flush()
+  assert.ok(calls > afterInitial, '恢复可见后应继续轮询')
+
+  view.destroy()
+  assert.equal(dom.timerCount(), 0, '销毁后应清掉定时器')
+  assert.equal(view.mounted, false)
+})
+
+test('视图控制器：没有 fetch 时降级为可读错误态，而不是崩溃', async () => {
+  const dom = createDom()
+  const view = createCtfView({ doc: dom.document, win: dom.window, fetchImpl: null })
+  live.views.push(view)
+  dom.document.body.appendChild(view.mount())
+  await view.refresh()
+  assert.match(collectText(dom.document.body), /不支持 fetch|加载失败/)
+  view.destroy()
+})
+
+test('视图控制器：未配置平台 → 空态提示 ctf_connect', async () => {
+  const { impl } = viewFetch({ state: { ok: false, configured: false, error: 'not configured' } })
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+  assert.match(collectText(dom.document.body), /尚未连接竞赛平台/)
+  assert.match(collectText(dom.document.body), /ctf_connect/)
+  view.destroy()
+})
+
+// ── 悬浮面板开关（默认不挂） ──
+
+test('悬浮面板：默认不挂 —— 宿主没给 enableFloatingPanel 字段', async () => {
+  const env = installGlobals(async (url) => {
+    if (url === CONFIG_URL) return jsonResponse(configPayload()) // 老配置：只有 enableWebPanel
+    return jsonResponse(fullSnapshot())
+  })
+  try {
+    assert.equal(await floatingPanelEnabled(), false)
+    const panel = track(apply(null))
+    await pendingFloatingSync()
+    assert.equal(panel.mounted, false)
+    assert.equal(env.dom.document.getElementById('lingxu-ctf-panel'), null)
+  } finally {
+    env.restore()
+  }
+})
+
+test('悬浮面板：enableFloatingPanel:true 才挂', async () => {
+  const env = installGlobals(async (url) => {
+    if (url === CONFIG_URL) {
+      const payload = configPayload()
+      payload.values.enableFloatingPanel = true
+      return jsonResponse(payload)
+    }
+    return jsonResponse(fullSnapshot())
+  })
+  try {
+    assert.equal(await floatingPanelEnabled(), true)
+    const panel = track(apply(null))
+    await pendingFloatingSync()
+    assert.equal(panel.mounted, true, '宿主显式打开时应挂载')
+  } finally {
+    env.restore()
+  }
+})
+
+test('悬浮面板：配置读取失败 / 非 JSON / 404 一律按「不挂」', async () => {
+  for (const response of [
+    () => { throw new Error('network down') },
+    () => ({ ok: false, status: 404, json: async () => ({}) }),
+    () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json') } }),
+    () => ({ ok: true, status: 200, json: async () => ({ ok: false, error: '配置不可用' }) }),
+  ]) {
+    const env = installGlobals(async () => response())
+    try {
+      assert.equal(await floatingPanelEnabled(), false)
+    } finally {
+      env.restore()
+    }
+  }
+  assert.equal(await floatingPanelEnabled({ enableFloating: false }), false)
+  assert.equal(await floatingPanelEnabled({ enableFloatingPanel: true }), true)
+})
+
+// ── 样式作用域 ──
+
+test('视图 CSS：作用域限定在 .lx-view / .lx-view-host，且不含任何定位声明', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  assert.match(css, /\.lx-view\{/)
+  assert.match(css, /\.lx-view-host\{display:block;width:100%;\}/)
+  // 视图样式里不能出现 position（尤其 fixed）—— 会话区里的视图一旦定位就会盖住别的 UI
+  const viewBlocks = [...css.matchAll(/\.lx-view[a-z-]*\{([^}]*)\}/g)].map((match) => match[1])
+  assert.ok(viewBlocks.length > 0)
+  for (const block of viewBlocks) {
+    assert.equal(block.includes('position:'), false, `视图样式不得含定位：${block}`)
+    assert.equal(block.includes('z-index:'), false)
+  }
+  // 全局扫描：position:fixed 仍然只能出现在面板块里（历史坑的回归防线）
+  const fixedBlocks = [...css.matchAll(/([^{}]+)\{[^}]*position:fixed/g)].map((match) => match[1].trim())
+  assert.deepEqual(fixedBlocks, ['#lingxu-ctf-panel'])
+  // 深色主题变量要覆盖视图
+  assert.match(css, /@media \(prefers-color-scheme:dark\)\{\.lx-view\{/)
 })

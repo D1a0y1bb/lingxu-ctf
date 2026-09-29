@@ -14,10 +14,11 @@ import { promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { buildToolSpecs, TOOL_NAMES } from '../lib/tools.js'
+import { buildToolSpecs, TOOL_NAMES, SESSION_EXPIRED_TEXT } from '../lib/tools.js'
 import { CtfStore } from '../lib/store.js'
 import { createOrchestrator, pathSlug } from '../lib/orchestrate.js'
 import { slugify as indexPathSlug } from '../lib/index.js'
+import { LingxuError, LINGXU_CODES } from '../lib/lingxu.js'
 
 const tmpDirs = []
 after(async () => {
@@ -1004,4 +1005,281 @@ test('所有工具的 execute 都能容忍空参数对象', async () => {
     const out = await tools[name].execute({}, {})
     assert.equal(typeof out, 'string', `${name} 应返回字符串`)
   }
+})
+
+// ------------------------------------------------------------------ task-11 回归：理论题状态/选项/作答
+
+test('ctf_theory list：is_parse 优先于 is_begin → 已交卷；交卷次数单独成列', async () => {
+  const adapter = createAdapter({
+    theoryTests: async () => [
+      // 真实平台交卷后的返回：is_parse=true，is_begin=false，is_end=false，parse_count=1
+      {
+        id: 3, name: '理论题', types: ['单选', '多选', '判断'], score: 1000, count: 100,
+        timeSeconds: 3600, isBegin: false, isEnd: false, isParse: true, statusLabel: '已交卷', parseCount: 1,
+      },
+    ],
+  })
+  const out = await createHarness({ adapter }).tools.ctf_theory.execute({ action: 'list' })
+  assert.match(out, /交卷次数/)
+  assert.match(out, /单选\/多选\/判断/)
+  assert.match(out, /已交卷 1 套/)
+  assert.match(out, /不能再拉题目\/作答/)
+  assert.doesNotMatch(out, /未开始/, '交卷后不得再渲染成「未开始」')
+  assert.doesNotMatch(out, /action=begin/, '已交卷时不应再提示开始考试')
+})
+
+test('ctf_theory list：状态判定顺序（is_parse > is_begin > is_end > start_time > 未开始）', async () => {
+  const adapter = createAdapter({
+    theoryTests: async () => [
+      { id: 1, name: 'A', isParse: true, isBegin: false, isEnd: false },
+      { id: 2, name: 'B', isParse: false, isBegin: true, isEnd: false },
+      { id: 3, name: 'C', isParse: false, isBegin: false, isEnd: true },
+      { id: 4, name: 'D', isParse: false, isBegin: false, isEnd: false, startTime: '2026-09-29 10:00' },
+      { id: 5, name: 'E', isParse: false, isBegin: false, isEnd: false },
+    ],
+  })
+  const out = await createHarness({ adapter }).tools.ctf_theory.execute({ action: 'list' })
+  const rows = out.split('\n').filter((line) => /^\| [1-5] \|/.test(line))
+  assert.equal(rows.length, 5)
+  assert.match(rows[0], /已交卷/)
+  assert.match(rows[1], /进行中/)
+  assert.match(rows[2], /已结束（未交卷）/, 'is_end 是比赛已结束，不是已交卷')
+  assert.match(rows[3], /已开始未交卷/)
+  assert.match(rows[4], /未开始/)
+})
+
+test('ctf_status：理论题摘要用同一套状态判定（已交卷不再指路 action=questions）', async () => {
+  const adapter = createAdapter({
+    theoryTests: async () => [
+      { id: 3, name: '理论题', types: ['单选'], score: 1000, count: 100, isParse: true, isBegin: false, isEnd: false },
+      { id: 4, name: '加试', types: ['判断'], score: 100, count: 10, isParse: false, isBegin: true, isEnd: false },
+    ],
+  })
+  const out = await createHarness({ adapter }).tools.ctf_status.execute({})
+  assert.match(out, /#3 理论题（已交卷，100 题，1000 分）/)
+  assert.match(out, /#4 加试（进行中，10 题，100 分）→ ctf_theory action=questions testId=4/)
+})
+
+test('ctf_theory questions：渲染 content 选项字典 / user_option 数组 / 题型分值 / 填空提示', async () => {
+  const adapter = createAdapter({
+    theoryQuestions: async () => [
+      {
+        index: 1, id: 501, title: '以下哪些属于对称加密？', optionType: 2, optionTypeLabel: '多选', score: 5,
+        options: [{ key: 'A', text: 'RSA' }, { key: 'B', text: 'AES' }, { key: 'C', text: 'SM4' }],
+        userOption: ['B', 'C'], userOptionText: 'B、C', answered: true,
+      },
+      {
+        index: 2, id: 502, title: '国密分组密码是？', optionType: 4, optionTypeLabel: '填空',
+        optionCount: 2, score: 5, options: [], userOption: null, answered: false,
+      },
+    ],
+  })
+  const out = await createHarness({ adapter }).tools.ctf_theory.execute({ action: 'questions', testId: 1 })
+  assert.match(out, /已作答 1 题/)
+  assert.match(out, /\[id=501\]（多选，5 分）/)
+  assert.match(out, /（已作答：B、C）/)
+  assert.match(out, /   A\. RSA/)
+  assert.match(out, /\[id=502\]（填空，5 分）/)
+  assert.match(out, /（未作答）/)
+  assert.match(out, /共 2 空/)
+  assert.match(out, /option=\["答案1","答案2"\]/)
+})
+
+test('ctf_theory questions：适配器没给 optionTypeLabel 时用客户端标签兜底', async () => {
+  const adapter = createAdapter({
+    theoryQuestions: async () => [
+      { index: 1, id: 601, title: '判断题', optionType: 3, options: [{ key: 'T', text: '正确' }], userOption: ['T'], subUser: 'alice' },
+    ],
+  })
+  const out = await createHarness({ adapter }).tools.ctf_theory.execute({ action: 'questions', testId: 1 })
+  assert.match(out, /\[id=601\]（判断）/)
+  assert.match(out, /（已作答：T）/)
+  assert.match(out, /   T\. 正确/)
+})
+
+test('ctf_theory answer：option 支持数组，多选字符串透传给适配器（由客户端拆分）', async () => {
+  const adapter = createAdapter()
+  const { tools } = createHarness({ adapter })
+
+  const arrayOut = await tools.ctf_theory.execute({
+    action: 'answer', testId: 1, questionId: 501, option: ['C', 'B'],
+  })
+  assert.match(arrayOut, /已提交作答/)
+  assert.match(arrayOut, /→ C、B/)
+  assert.deepEqual(callsOf(adapter, 'answerTheory')[0].args, ['1', '501', ['C', 'B']])
+
+  await tools.ctf_theory.execute({ action: 'answer', testId: 1, questionId: 501, option: 'BCD' })
+  assert.deepEqual(callsOf(adapter, 'answerTheory')[1].args, ['1', '501', 'BCD'])
+
+  // 数组里全是空值 = 没有提供 option
+  assert.match(
+    await tools.ctf_theory.execute({ action: 'answer', testId: 1, questionId: 501, option: ['  '] }),
+    /需要 option/,
+  )
+  assert.equal(callsOf(adapter, 'answerTheory').length, 2, '空选项不得请求平台')
+})
+
+test('ctf_theory answer：schema 里 option 同时接受字符串与数组', () => {
+  const { tools } = createHarness()
+  assert.equal(tools.ctf_theory.parameters.option.oneOf.length, 2)
+  assert.equal(tools.ctf_theory.parameters.option.oneOf[0].type, 'string')
+  assert.equal(tools.ctf_theory.parameters.option.oneOf[1].type, 'array')
+})
+
+// ------------------------------------------------------------------ task-11 回归：错误分类与文案
+
+test('ctf_release_env：平台未配置环境 → ℹ️ 提示且记为已释放（不是失败）', async () => {
+  const store = await makeStore()
+  const adapter = createAdapter({
+    releaseEnvironment: async () => ({
+      challengeId: '41',
+      released: false,
+      idempotent: false,
+      notConfigured: true,
+      unsupported: false,
+      kind: 'not-configured',
+      message: '该题目没有选择对应的环境，请联系管理员。',
+    }),
+  })
+  const out = await createHarness({ adapter, store }).tools.ctf_release_env.execute({ id: 41 })
+  assert.match(out, /^ℹ️ 题目 #41：平台未为该题配置环境，无需释放（不算失败）。/)
+  assert.match(out, /该题目没有选择对应的环境/)
+  assert.doesNotMatch(out, /❌/)
+  const work = await store.getChallengeWork(CONNECTION.key, '41')
+  assert.equal(work.envReleased, true, '避免下次 stop 再对同一题重复报错')
+})
+
+test('ctf_start_env：平台未配置环境 → ⚠️ 说明 + 建议分析附件（不是裸 HTTP 400）', async () => {
+  const adapter = createAdapter({
+    startEnvironment: async () => {
+      throw new LingxuError('该题在平台上没有配置环境：该题目没有选择对应的环境，请联系管理员。', {
+        code: LINGXU_CODES.ENV_NOT_CONFIGURED,
+        httpStatus: 400,
+        path: 'run',
+        platformMessage: '该题目没有选择对应的环境，请联系管理员。',
+      })
+    },
+  })
+  const out = await createHarness({ adapter }).tools.ctf_start_env.execute({ id: 46 })
+  assert.match(out, /^⚠️ 该题在平台上没有配置环境/)
+  assert.match(out, /平台返回：该题目没有选择对应的环境，请联系管理员。/)
+  assert.match(out, /直接分析附件/)
+  assert.doesNotMatch(out, /❌/)
+  assert.doesNotMatch(out, /HTTP 400/)
+})
+
+test('ctf_start_env：适配器抛普通 Error（只在文案里带线索）也能识别为未配置环境', async () => {
+  const adapter = createAdapter({
+    startEnvironment: async () => {
+      throw new Error('凌虚 POST /event/4/ctf/46/run/ HTTP 400：该题目没有选择对应的环境，请联系管理员。')
+    },
+  })
+  const out = await createHarness({ adapter }).tools.ctf_start_env.execute({ id: 46 })
+  assert.match(out, /^⚠️ 该题在平台上没有配置环境/)
+  assert.match(out, /该题目没有选择对应的环境/)
+  assert.doesNotMatch(out, /❌/)
+})
+
+test('session 失效：普通工具渲染成指定的中文提示（且不重复文案）', async () => {
+  const sessionError = () =>
+    new LingxuError('凌虚 GET /event/4/ctf/ HTTP 403：未登录', {
+      httpStatus: 403,
+      code: LINGXU_CODES.SESSION_EXPIRED,
+      platformMessage: '未登录',
+    })
+  const adapter = createAdapter({
+    challenges: async () => { throw sessionError() },
+  })
+  const out = await createHarness({ adapter }).tools.ctf_challenges.execute({})
+  assert.equal(out, SESSION_EXPIRED_TEXT, '必须是完全一致的统一文案')
+  assert.match(out, /凌虚 sessionid 已失效，请重新登录平台后复制新的 Cookie，/)
+  assert.match(out, /ctf_connect \{ baseUrl, eventId, cookie \} 更新（其余配置会保留）。/)
+})
+
+test('session 失效：丢 code 的错误（被上层重新包装）也能识别', async () => {
+  const adapter = createAdapter({
+    challenges: async () => {
+      throw new Error('无法解析平台连接：凌虚 GET /event/4/info/ 未登录（HTTP 403）：未登录')
+    },
+  })
+  const out = await createHarness({ adapter }).tools.ctf_challenges.execute({})
+  assert.equal(out, SESSION_EXPIRED_TEXT)
+})
+
+test('ctf_connect：session 失效时直接给更新 Cookie 的指引', async () => {
+  const adapter = createAdapter({
+    validate: async () => {
+      throw new LingxuError('凌虚 GET /event/4/info/ HTTP 403：未登录', {
+        httpStatus: 403,
+        code: LINGXU_CODES.SESSION_EXPIRED,
+      })
+    },
+  })
+  const out = await createHarness({ adapter }).tools.ctf_connect.execute({
+    baseUrl: 'https://example.com:8000',
+    eventId: 4,
+    cookie: 'sessionid=abcdef',
+  })
+  assert.equal(out, SESSION_EXPIRED_TEXT)
+})
+
+test('ctf_connect：cookie 缺 csrftoken 只提醒不拒绝', async () => {
+  const adapter = createAdapter()
+  const { tools, specs } = createHarness({ adapter, deps: { createAdapter: () => adapter } })
+  const out = await tools.ctf_connect.execute({
+    baseUrl: 'https://example.com:8000',
+    eventId: 4,
+    cookie: 'sessionid=abcdef0123456789',
+  })
+  assert.match(out, /^✅ 已连接凌虚赛事平台/)
+  assert.match(out, /建议把 csrftoken 一起带上/)
+  assert.match(out, /不强制/)
+  assert.ok(specs.length === 13)
+
+  const withCsrf = await tools.ctf_connect.execute({
+    baseUrl: 'https://example.com:8000',
+    eventId: 4,
+    cookie: 'sessionid=abcdef0123456789; csrftoken=tok',
+  })
+  assert.doesNotMatch(withCsrf, /建议把 csrftoken/)
+})
+
+test('ctf_submit_flag：session 失效 → 明确说「未生效/已失效」，不说「结果未知」', async () => {
+  const store = await makeStore()
+  const adapter = createAdapter({
+    submitFlag: async () => {
+      throw new LingxuError('凌虚 POST /event/4/ctf/56/flag/ 未登录（HTTP 403）：未登录', {
+        httpStatus: 403,
+        code: LINGXU_CODES.SESSION_EXPIRED,
+        platformMessage: '未登录',
+      })
+    },
+  })
+  const { tools } = createHarness({ adapter, store })
+  await assert.rejects(tools.ctf_submit_flag.execute({ id: 56, flag: 'flag{ok}' }), (error) => {
+    assert.match(error.message, /sessionid 已失效/)
+    assert.match(error.message, /本次提交未生效/)
+    assert.match(error.message, /ctf_connect/)
+    assert.doesNotMatch(error.message, /结果未知/)
+    return true
+  })
+  const submissions = await store.recentSubmissions()
+  assert.equal(submissions.length, 1, '失败也要留审计')
+  assert.equal(submissions[0].status, 'error')
+})
+
+test('ctf_submit_flag：非 session 的 403 仍保留「结果未知」措辞', async () => {
+  const store = await makeStore()
+  const adapter = createAdapter({
+    submitFlag: async () => {
+      throw new LingxuError('凌虚 POST /event/4/ctf/56/flag/ HTTP 403：没有权限', { httpStatus: 403 })
+    },
+  })
+  const { tools } = createHarness({ adapter, store })
+  await assert.rejects(tools.ctf_submit_flag.execute({ id: 56, flag: 'flag{ok}' }), (error) => {
+    assert.match(error.message, /结果未知/)
+    assert.match(error.message, /没有权限/)
+    assert.doesNotMatch(error.message, /sessionid 已失效/)
+    return true
+  })
 })
