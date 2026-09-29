@@ -530,3 +530,21 @@ test('apply：配置为空时才提示去设置页', async () => {
   const out = String(await status.execute({}, {}))
   assert.match(out, /设置|插件配置|ctf_connect/, '要告诉用户去哪里配置')
 })
+
+// ────────────────────────────────────────────── 模块形状（Loader 契约）
+
+test('默认导出必须携带 Config/inject/apply —— Loader 只认 default 导出', async () => {
+  // cordis-plugin-loader 的 normalizeExports 是 `exports = exports.default ?? exports`：
+  // 有 default 导出时，Loader 只从 default 上读 plugin.Config，命名导出被忽略。
+  // 漏了 Config 的后果是「设置页没有配置表单」（inspect status: "absent"），实测踩过。
+  const mod = await import('../lib/index.js')
+  const def = mod.default
+  assert.equal(typeof def, 'object', '必须有 default 导出对象')
+  assert.equal(def.Config, mod.Config, 'default.Config 必须与命名导出一致')
+  assert.equal(typeof def.Config, 'function', 'Config 应是 schemastery schema')
+  assert.deepEqual(def.inject, mod.inject, 'default.inject 必须存在')
+  assert.equal(typeof def.apply, 'function', 'default.apply 必须存在')
+  assert.equal(def.name, 'dsh-lingxu-ctf')
+  // default 上的 Config 必须能解析出默认值（否则 Loader 校验会失败）
+  assert.equal(def.Config({}).concurrency, 4)
+})
