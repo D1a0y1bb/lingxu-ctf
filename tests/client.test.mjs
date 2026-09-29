@@ -13,7 +13,7 @@
 
 import test, { afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import vm from 'node:vm'
 
 // ────────────────────────────────────────────────────────────── 最小 DOM stub
@@ -1453,14 +1453,12 @@ test('renderConfigSlot(summary) 返回字符串（React 可直接渲染）', asy
 
 test('CSS 作用域：面板布局不得泄漏到配置卡片上', async () => {
   // 卡片渲染在插件页里（不在 #lingxu-ctf-panel 内）。
-  // 若面板的 position:fixed 等布局声明与主题变量同处 `#panel,.lx-config{}`，
+  // 若面板的 position:fixed 等布局声明与卡片同处一个选择器，
   // 卡片会变成右下角浮层、布局全乱（用户看到的「CSS 丢失」）。
   const { api } = await loadClientModule()
   const css = api.panelCss()
 
-  // 主题变量块允许同时作用于面板与卡片
-  assert.match(css, /#lingxu-ctf-panel,\.lx-config\{/)
-  // 但 position:fixed 只能出现在 #lingxu-ctf-panel 块里
+  // position:fixed 只能出现在 #lingxu-ctf-panel 块里
   const fixedBlocks = [...css.matchAll(/([^{}]+)\{[^}]*position:fixed/g)].map((m) => m[1].trim())
   assert.deepEqual(fixedBlocks, ['#lingxu-ctf-panel'], `position:fixed 只能作用于面板，实际: ${JSON.stringify(fixedBlocks)}`)
   // 卡片自己的块不得含任何定位
@@ -1471,10 +1469,139 @@ test('CSS 作用域：面板布局不得泄漏到配置卡片上', async () => {
   }
 })
 
-test('CSS 作用域：暗色主题变量同时覆盖面板与卡片', async () => {
+// ────────────────────────────────────────────── 主题：只用 DSH 真实 token（task-15）
+
+/**
+ * DSH 主题 token 白名单（104 个 `--dsw-alias-*`）。
+ *
+ * 提取方式：`dsh-client-ui-theme/lib/client.js` 里 `body{...}` /
+ * `body[data-ds-dark-theme]{...}` 两份定义，grep `--dsw-alias-`。
+ * 本白名单用来**防止 token 名写错导致静默失效**（写错的 var() 不会有任何报错，
+ * 只会让颜色变成 transparent/继承）。
+ */
+const DSH_ALIAS_TOKEN_WHITELIST = new Set([
+  '--dsw-alias-bg-base', '--dsw-alias-bg-document-preview', '--dsw-alias-bg-document-selection',
+  '--dsw-alias-bg-layer-1', '--dsw-alias-bg-layer-2', '--dsw-alias-bg-layer-3',
+  '--dsw-alias-bg-mask-1', '--dsw-alias-bg-mask-2', '--dsw-alias-bg-mask-3',
+  '--dsw-alias-bg-mask-drop', '--dsw-alias-bg-mask-photo', '--dsw-alias-bg-module-platform',
+  '--dsw-alias-bg-multi-select', '--dsw-alias-bg-overlay', '--dsw-alias-bg-skeleton',
+  '--dsw-alias-border-inverted', '--dsw-alias-border-inverted2', '--dsw-alias-border-l1',
+  '--dsw-alias-border-l2', '--dsw-alias-border-l2-darkmode-thin', '--dsw-alias-border-l3', '--dsw-alias-border-l4',
+  '--dsw-alias-brand-primary', '--dsw-alias-brand-primary-invert', '--dsw-alias-brand-primary-new-colorprimary-new-color',
+  '--dsw-alias-brand-text',
+  '--dsw-alias-button-contrast-fill', '--dsw-alias-button-elevated-fill', '--dsw-alias-button-floating-fill',
+  '--dsw-alias-button-floating-hover', '--dsw-alias-button-ghost-active-border',
+  '--dsw-alias-button-ghost-active-fill', '--dsw-alias-button-ghost-active-hover',
+  '--dsw-alias-button-info-fill', '--dsw-alias-button-info-hover', '--dsw-alias-button-primary-dimmed',
+  '--dsw-alias-button-primary-fill', '--dsw-alias-button-primary-hover',
+  '--dsw-alias-button-tool-bar-fill', '--dsw-alias-button-tool-bar-fill-invisible', '--dsw-alias-button-tool-bar-hover',
+  '--dsw-alias-code-diff-added', '--dsw-alias-code-diff-deleted',
+  '--dsw-alias-file-diff-added-bg', '--dsw-alias-file-diff-added-gutter', '--dsw-alias-file-diff-added-marker',
+  '--dsw-alias-file-diff-deleted-bg', '--dsw-alias-file-diff-deleted-gutter', '--dsw-alias-file-diff-deleted-marker',
+  '--dsw-alias-interactive-bg-active', '--dsw-alias-interactive-bg-hover', '--dsw-alias-interactive-bg-hover-accent',
+  '--dsw-alias-interactive-bg-hover-danger', '--dsw-alias-interactive-bg-hover-solid',
+  '--dsw-alias-label-caption', '--dsw-alias-label-deep-diving', '--dsw-alias-label-deep-diving-shimmer',
+  '--dsw-alias-label-dimmed', '--dsw-alias-label-document-preview', '--dsw-alias-label-primary',
+  '--dsw-alias-label-primary-bluish', '--dsw-alias-label-primary-dimmed', '--dsw-alias-label-primary-foreground',
+  '--dsw-alias-label-primary-inverted', '--dsw-alias-label-secondary', '--dsw-alias-label-shimmer',
+  '--dsw-alias-label-tertiary', '--dsw-alias-link',
+  '--dsw-alias-markdown-citation', '--dsw-alias-markdown-code-block', '--dsw-alias-markdown-code-block-banner',
+  '--dsw-alias-markdown-code-segment-selected', '--dsw-alias-markdown-code-segment-unselected',
+  '--dsw-alias-markdown-inline-code', '--dsw-alias-markdown-placeholder', '--dsw-alias-markdown-tag',
+  '--dsw-alias-menu-icon', '--dsw-alias-onboarding-accent', '--dsw-alias-onboarding-card-fill',
+  '--dsw-alias-onboarding-checkbox-border', '--dsw-alias-onboarding-secondary-fill',
+  '--dsw-alias-scrollbar-bg-l1', '--dsw-alias-scrollbar-bg-l2', '--dsw-alias-scrollbar-hover-l1', '--dsw-alias-scrollbar-hover-l2',
+  '--dsw-alias-settings-card-fill', '--dsw-alias-settings-card-stroke',
+  '--dsw-alias-state-business-primary', '--dsw-alias-state-business-tertiary',
+  '--dsw-alias-state-error-primary', '--dsw-alias-state-error-secondary',
+  '--dsw-alias-state-idle-primary',
+  '--dsw-alias-state-success-primary', '--dsw-alias-state-success-secondary', '--dsw-alias-state-success-tertiary',
+  '--dsw-alias-state-warn-label', '--dsw-alias-state-warn-primary', '--dsw-alias-state-warn-secondary', '--dsw-alias-state-warn-tertiary',
+  '--dsw-alias-switch-thumb', '--dsw-alias-toast-bg', '--dsw-alias-toast-label',
+  '--dsw-alias-tooltip-bg', '--dsw-alias-tooltip-key-bg',
+])
+
+test('★ 主题：CSS 里不得出现 prefers-color-scheme（暗色靠 body[data-ds-dark-theme]）', async () => {
+  // 这是 task-15 最关键的回归防线：DSH 的暗色由 `body[data-ds-dark-theme]` 切换，
+  // token 自己会变；用媒体查询判断暗色会导致「系统浅色 + DSH 暗色」时露出浅色兜底。
   const { api } = await loadClientModule()
   const css = api.panelCss()
-  assert.match(css, /@media \(prefers-color-scheme:dark\)\{#lingxu-ctf-panel,\.lx-config\{/)
+  assert.equal(css.includes('prefers-color-scheme'), false, 'CSS 输出里不得有 prefers-color-scheme')
+
+  // 源码层面也守一道（去掉注释后仍不得出现），防止有人写到别的函数里
+  const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  assert.equal(
+    withoutComments.includes('prefers-color-scheme'), false,
+    'lib/client.js（注释以外）不得再出现 prefers-color-scheme —— 主题必须交给 DSH 的 body[data-ds-dark-theme]',
+  )
+})
+
+test('★ 主题：不得有 --lx-* 间接层（直接用 var(--dsw-alias-*)）', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  assert.equal(css.includes('--lx-'), false, 'CSS 里不得再定义/使用 --lx-* 变量')
+  // 顺带确认：没有残留的 hex 颜色兜底（DSH token 才是唯一来源）
+  const hexes = [...css.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((m) => m[0])
+  assert.deepEqual(hexes, [], `CSS 里不应出现硬编码 hex 颜色，实际: ${hexes.join(',')}`)
+})
+
+test('★ 主题：用到的 --dsw-alias-* 名必须在白名单内（防拼错 token 静默失效）', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  const used = [...new Set([...css.matchAll(/var\((--dsw-[a-z0-9-]+)\)/g)].map((m) => m[1]))]
+  assert.ok(used.length >= 20, `应该用到足够多的 token，实际 ${used.length}`)
+  for (const token of used) {
+    if (!token.startsWith('--dsw-alias-')) {
+      // 非 alias 命名空间目前只允许面板阴影（theme 的 elevation 块，定义在 body,body *）
+      assert.deepEqual([token], ['--dsw-elevation-panel'], `未预期的非 alias token: ${token}`)
+      continue
+    }
+    assert.ok(DSH_ALIAS_TOKEN_WHITELIST.has(token), `token 名不在 DSH 白名单里（拼错了？）：${token}`)
+  }
+})
+
+test('主题：三个出口都用 token 上色（视图 / 配置卡片 / 悬浮面板）', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  // ① 悬浮面板：带定位 + 浮层底
+  assert.match(css, /#lingxu-ctf-panel\{position:fixed;[^}]*color:var\(--dsw-alias-label-primary\)/)
+  // ② 配置卡片：卡片底 + 分隔边框（不再自带定位）
+  assert.match(css, /\.lx-config\{[^}]*background:var\(--dsw-alias-bg-layer-1\)[^}]*\}/)
+  // ③ 视图：会话区里自己滚动（ui-conversation 的 viewArea 是 overflow:hidden 的弹性盒）
+  assert.match(css, /\.lx-view\{[^}]*height:100%[^}]*overflow-y:auto[^}]*\}/)
+  // 主题 token 一旦缺失，三处都会变成透明底 —— 所以三处都必须直接引用 token
+  for (const surface of ['#lingxu-ctf-panel{', '.lx-config{', '.lx-view{']) {
+    const block = new RegExp(`${surface.replace(/[.#]/g, '\\$&')}([^}]*)\\}`).exec(css)
+    assert.ok(block, `应有 ${surface} 基础块`)
+    assert.match(block[1], /var\(--dsw-alias-/, `${surface} 必须直接用 DSH token 上色`)
+  }
+})
+
+test('主题：状态徽章用三级色配对（浅底深字，暗色自动反转）', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  assert.match(css, /\.lx-pill-solved,[^{]*\{color:var\(--dsw-alias-state-success-primary\);background:var\(--dsw-alias-state-success-tertiary\);\}/)
+  assert.match(css, /\.lx-pill-working,[^{]*\{color:var\(--dsw-alias-state-business-primary\);background:var\(--dsw-alias-state-business-tertiary\);\}/)
+  assert.match(css, /\.lx-pill-pending[^{]*\{color:var\(--dsw-alias-label-tertiary\);background:var\(--dsw-alias-bg-layer-2\);\}/)
+})
+
+test('主题：白名单与 DSH 真源码逐字一致（有解包源码时才跑）', async (t) => {
+  // 本机把 DSH 解包在 /tmp/dsh-src（见 docs/DSH-API-NOTES.md）；有就顺手校验白名单没抄漏。
+  const themePath = '/tmp/dsh-src/dsh-client-ui-theme/lib/client.js'
+  if (!existsSync(themePath)) {
+    t.skip('未找到解包的 DSH 主题源码（/tmp/dsh-src），跳过白名单对账')
+    return
+  }
+  const source = readFileSync(themePath, 'utf8')
+  const actual = new Set([...source.matchAll(/--dsw-alias-[a-z0-9-]+/g)].map((match) => match[0]))
+  assert.equal(
+    actual.size, DSH_ALIAS_TOKEN_WHITELIST.size,
+    `白名单数量与 DSH 源码不一致（源码 ${actual.size} / 白名单 ${DSH_ALIAS_TOKEN_WHITELIST.size}）`,
+  )
+  for (const token of actual) {
+    assert.ok(DSH_ALIAS_TOKEN_WHITELIST.has(token), `白名单漏了 DSH 真实 token：${token}`)
+  }
 })
 
 test('配置卡片：布局 —— 布尔独占开关行，workDir 占两列，网格固定三列', async () => {
@@ -1490,8 +1617,8 @@ test('配置卡片：布局 —— 布尔独占开关行，workDir 占两列，�
   // 窄屏降级
   assert.match(css, /@media \(max-width:760px\)\{\.lx-config-grid\{grid-template-columns:repeat\(2/)
   assert.match(css, /@media \(max-width:520px\)\{\.lx-config-grid\{grid-template-columns:minmax\(0,1fr\)/)
-  // 开关行独立、带分隔线
-  assert.match(css, /\.lx-config-toggles\{display:flex;flex-wrap:wrap;align-items:center;gap:8px 22px;padding-top:12px;border-top:1px solid var\(--lx-border\);\}/)
+  // 开关行独立、带分隔线（分隔线用 DSH 的 border-l1，不再是 --lx-* 中间层）
+  assert.match(css, /\.lx-config-toggles\{display:flex;flex-wrap:wrap;align-items:center;gap:8px 22px;padding-top:12px;border-top:1px solid var\(--dsw-alias-border-l1\);\}/)
   assert.match(css, /\.lx-config-toggles:empty\{display:none;\}/, '没有开关时不留空行')
   // 开关项必须左对齐的 inline-flex，不能是会被拉伸的块
   assert.match(css, /\.lx-config-check\{display:inline-flex;align-items:center;/)
@@ -2282,13 +2409,14 @@ test('悬浮面板：配置读取失败 / 非 JSON / 404 一律按「不挂」',
 
 // ── 样式作用域 ──
 
-test('视图 CSS：作用域限定在 .lx-view / .lx-view-host，且不含任何定位声明', async () => {
+test('视图 CSS：作用域限定在 .lx-v* / .lx-view*，且不含任何定位声明', async () => {
   const { api } = await loadClientModule()
   const css = api.panelCss()
   assert.match(css, /\.lx-view\{/)
-  assert.match(css, /\.lx-view-host\{display:block;width:100%;\}/)
+  // 宿主（ui-conversation 的 viewArea）是 overflow:hidden 的弹性盒 → 视图自己滚动
+  assert.match(css, /\.lx-view-host\{display:block;width:100%;height:100%;min-height:0;\}/)
   // 视图样式里不能出现 position（尤其 fixed）—— 会话区里的视图一旦定位就会盖住别的 UI
-  const viewBlocks = [...css.matchAll(/\.lx-view[a-z-]*\{([^}]*)\}/g)].map((match) => match[1])
+  const viewBlocks = [...css.matchAll(/\.lx-v[a-z-]*\{([^}]*)\}/g)].map((match) => match[1])
   assert.ok(viewBlocks.length > 0)
   for (const block of viewBlocks) {
     assert.equal(block.includes('position:'), false, `视图样式不得含定位：${block}`)
@@ -2297,8 +2425,8 @@ test('视图 CSS：作用域限定在 .lx-view / .lx-view-host，且不含任何
   // 全局扫描：position:fixed 仍然只能出现在面板块里（历史坑的回归防线）
   const fixedBlocks = [...css.matchAll(/([^{}]+)\{[^}]*position:fixed/g)].map((match) => match[1].trim())
   assert.deepEqual(fixedBlocks, ['#lingxu-ctf-panel'])
-  // 深色主题变量要覆盖视图
-  assert.match(css, /@media \(prefers-color-scheme:dark\)\{\.lx-view\{/)
+  // 视图的暗色不靠自己写媒体查询，而是 DSH token 自己切（见「主题」用例）
+  assert.equal(css.includes('prefers-color-scheme'), false)
 })
 
 test('理论题状态：交卷后必须显示「已交卷」，不能显示「未开始」', () => {
