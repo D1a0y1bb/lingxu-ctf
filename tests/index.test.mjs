@@ -7,6 +7,7 @@ import path from 'node:path'
 import {
   apply, normalizeConfig, slugify, maskFlag, injectClientScript, buildPanelState,
   name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
+  describeConfigFields, readJsonBody,
 } from '../lib/index.js'
 
 /** 最小 Cordis Context 替身：收集注册项，effect 立即执行并记录 disposer。 */
@@ -163,10 +164,11 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
 
   const routes = ctx._collected.routes.map((r) => r.path).sort()
   assert.equal(routes.includes('/lingxu-ctf/state'), true, '状态路由必须注册')
+  assert.equal(routes.includes('/lingxu-ctf/config'), true, '配置读写路由必须注册（设置页表单用）')
   // client.js 路由仅在 lib/client.js 存在时注册（优雅降级）；taps 数量与之一致
   const hasBundle = routes.includes('/lingxu-ctf/client.js')
   assert.equal(ctx._collected.taps.length, hasBundle ? 1 : 0)
-  assert.equal(routes.length, hasBundle ? 2 : 1)
+  assert.equal(routes.length, hasBundle ? 3 : 2)
   assert.equal(ctx._collected.commands.length, 1)
   assert.equal(ctx._collected.commands[0].name, 'ctf-status')
 })
@@ -577,4 +579,38 @@ test('默认导出必须携带 Config/inject/apply —— Loader 只认 default 
   assert.equal(def.name, 'dsh-lingxu-ctf')
   // default 上的 Config 必须能解析出默认值（否则 Loader 校验会失败）
   assert.equal(plainConfigValue(def.Config({})).concurrency, 4)
+})
+
+// ────────────────────────────────────────────── 设置页配置读写接口
+
+test('describeConfigFields：12 个字段，含类型/说明/secret 标记/下拉选项', () => {
+  const fields = describeConfigFields()
+  assert.equal(fields.length, 12)
+  const byKey = Object.fromEntries(fields.map((f) => [f.key, f]))
+
+  assert.deepEqual(byKey.platform.options, ['lingxu', 'ctfd'], 'union-of-consts 应给出下拉选项')
+  assert.equal(byKey.cookie.role, 'secret')
+  assert.equal(byKey.token.role, 'secret')
+  assert.equal(byKey.dedupeFlags.type, 'boolean')
+  assert.equal(byKey.eventId.type, 'number')
+  assert.equal(byKey.baseUrl.type, 'string')
+  // 每个字段都要有中文说明，设置页才有提示文字
+  for (const f of fields) assert.equal(f.description.length > 0, true, `${f.key} 缺 description`)
+})
+
+test('readJsonBody：解析 JSON、空体、非法体、超限', async () => {
+  const { EventEmitter } = await import('node:events')
+  const mk = (chunks) => {
+    const req = new EventEmitter()
+    req.destroy = () => {}
+    queueMicrotask(() => {
+      for (const c of chunks) req.emit('data', Buffer.from(c))
+      req.emit('end')
+    })
+    return req
+  }
+  assert.deepEqual(await readJsonBody(mk(['{"a":1}'])), { a: 1 })
+  assert.deepEqual(await readJsonBody(mk(['   '])), {}, '空体应为 {}')
+  await assert.rejects(() => readJsonBody(mk(['{not json'])), /不是合法 JSON/)
+  await assert.rejects(() => readJsonBody(mk(['x'.repeat(300)]), { maxBytes: 10 }), /过大/)
 })
