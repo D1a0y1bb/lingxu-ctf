@@ -2703,3 +2703,51 @@ test('理论题状态：交卷后必须显示「已交卷」，不能显示「�
   const noLabel = mk([{ id: 3, name: '理论题', count: 100, isBegin: false, status: 'submitted' }])
   assert.match(renderTheoryHtml(noLabel), /已交卷/)
 })
+
+test('watchFloatingPanel：配置开关实时生效（无需刷新页面）', async () => {
+  // 真实 bug：floatingPanelEnabled() 只在装配时读一次配置，用户在设置里打开开关后
+  // 不刷新页面看不到变化（用户反馈「选了没反应」）。
+  const dom = createDom()
+  let enabled = false
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ ok: true, fields: [], values: { enableFloatingPanel: enabled }, secretsSet: {} }) })
+  const { api } = await loadClientModule()
+
+  const stop = api.watchFloatingPanel({ doc: dom.document, fetchImpl, watchIntervalMs: 15 })
+  const panel = () => {
+    try { return api.getPanel() } catch { return null }
+  }
+
+  const settle = async (ms = 60) => { await new Promise((r) => setTimeout(r, ms)) }
+
+  // ① 配置为 false → 不挂
+  await settle()
+  assert.equal(panel()?.mounted === true, false, '关闭时不应挂载')
+
+  // ② 用户切到 true（模拟设置页保存）→ 轮询后自动挂上
+  enabled = true
+  await settle()
+  assert.equal(panel()?.mounted, true, '打开后应自动挂载')
+
+  // ③ 再切回 false → 自动卸载
+  enabled = false
+  await settle()
+  assert.equal(panel()?.mounted === true, false, '关闭后应自动卸载')
+
+  stop()
+  const panelAfterStop = panel()
+  if (panelAfterStop && panelAfterStop.destroyed !== true) panelAfterStop.destroy()
+})
+
+test('watchFloatingPanel：显式开关或 watchFloating=false 时不轮询', async () => {
+  const dom = createDom()
+  let calls = 0
+  const fetchImpl = async () => { calls += 1; return { ok: true, json: async () => ({ ok: true, values: {} }) } }
+  const { api } = await loadClientModule()
+
+  const off1 = api.watchFloatingPanel({ doc: dom.document, fetchImpl, enableFloating: true, watchIntervalMs: 10 })
+  const off2 = api.watchFloatingPanel({ doc: dom.document, fetchImpl, enableFloatingPanel: false, watchIntervalMs: 10 })
+  const off3 = api.watchFloatingPanel({ doc: dom.document, fetchImpl, watchFloating: false, watchIntervalMs: 10 })
+  await new Promise((r) => setTimeout(r, 50))
+  assert.equal(calls, 0, '显式指定开关或禁用 watch 时不应发起轮询请求')
+  off1(); off2(); off3()
+})
