@@ -3,7 +3,7 @@
 #
 # 三种方式（任选其一）：
 #   1) 让会话里的 agent 调用 plugin_manager 工具（推荐，无需手工敲命令）：
-#        action=install_bundle  target=/Users/d1a0y1bb/Desktop/lingxu-ctf
+#        action=install_bundle  target=/path/to/dsh-lingxu-ctf   ← 换成你自己的仓库路径
 #   2) 本脚本（走 dsh CLI；desktop profile 被 Electron 独占时需要应用私有 CLI）
 #   3) 手工把包塞进 profile（最后手段，见文末）
 #

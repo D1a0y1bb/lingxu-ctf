@@ -16,7 +16,7 @@ import path from 'node:path'
 
 import {
   buildToolSpecs, TOOL_NAMES, SESSION_EXPIRED_TEXT,
-  connectionOriginLines,
+  connectionOriginLines, resolveWorkDirInfo, workDirNoticeLines,
 } from '../lib/tools.js'
 import { AWD_TOOL_NAMES, CFS_TOOL_NAMES, buildAwdToolSpecs, buildCfsToolSpecs, recommendStageTools } from '../lib/stage-tools.js'
 import { CtfStore } from '../lib/store.js'
@@ -2297,4 +2297,108 @@ test('connectionOriginLines：Cookie 来自同平台连接时解释一句（且�
   assert.match(text, /- 连接来源: 设置页配置｜Cookie 来源: 同平台连接 lingxu:h:8000:4/)
   assert.match(text, /Cookie 是\*\*平台级\*\*会话凭据，与具体赛事无关，所以复用了同平台的 lingxu:h:8000:4/)
   assert.equal(text.includes('super-secret-value'), false, '⚠️ 绝不能把 cookie 值写进输出')
+})
+
+// ────────────────────────────────────────────── 工作区路径 / 赛事隔离 / 多赛事（task-31）
+
+test('resolveWorkDirInfo：会话 cwd 优先，绝不用 process.cwd()（插件软链场景）', () => {
+  // ① 显式配置（绝对路径）
+  assert.equal(resolveWorkDirInfo({ config: { workDir: '/tmp/my-work' } }, {}).dir, '/tmp/my-work')
+  // ① 相对配置 → 按会话 cwd 解析
+  const relative = resolveWorkDirInfo({ config: { workDir: 'work/sub' } }, { cwd: '/tmp/session' })
+  assert.equal(relative.dir, path.join('/tmp/session', 'work/sub'))
+  assert.equal(relative.source, 'config-relative')
+  // ② exec.cwd（DSH 传给工具的调用者会话工作目录）
+  const byExec = resolveWorkDirInfo({ config: {} }, { cwd: '/tmp/session' })
+  assert.equal(byExec.dir, path.join('/tmp/session', 'lingxu-ctf-work'))
+  assert.equal(byExec.source, 'exec-cwd')
+  assert.equal(byExec.fallback, false)
+  // ③ 会话 header 里的 cwd
+  const byHeader = resolveWorkDirInfo({ config: {} }, { agent: { session: { header: { cwd: '/tmp/ws' } } } })
+  assert.equal(byHeader.dir, path.join('/tmp/ws', 'lingxu-ctf-work'))
+  assert.equal(byHeader.source, 'session-cwd')
+  // ④ 都没有 → 家目录兜底 + 标记 fallback（工具输出里会警告用户）
+  const home = resolveWorkDirInfo({ config: {} }, {})
+  assert.equal(home.dir, path.join(os.homedir(), 'lingxu-ctf-work'))
+  assert.equal(home.fallback, true)
+  assert.notEqual(home.dir, path.join(process.cwd(), 'lingxu-ctf-work'), '⚠️ 不能落到插件进程目录')
+  assert.match(workDirNoticeLines(home)[0], /workDir 未配置且拿不到会话工作目录/)
+  assert.deepEqual(workDirNoticeLines(byExec), [])
+})
+
+test('ctf_solve_start：把会话 cwd 解析出的绝对 workDir 传给编排器（teammate 才不会写错地方）', async () => {
+  const calls = []
+  const adapter = createAdapter()
+  const { tools } = createHarness({
+    adapter,
+    deps: {
+      orchestrator: {
+        async start(args) {
+          calls.push(args)
+          return '## 编排已启动\n（mock）'
+        },
+      },
+    },
+  })
+  await tools.ctf_solve_start.execute({ limit: 1 }, { cwd: '/Users/someone/Desktop/我的比赛' })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].workDir, path.join('/Users/someone/Desktop/我的比赛', 'lingxu-ctf-work'))
+
+  // 没有会话 cwd 时给出兜底 + 警告行
+  await tools.ctf_solve_start.execute({ limit: 1 }, {})
+  assert.equal(calls[1].workDir, path.join(os.homedir(), 'lingxu-ctf-work'))
+})
+
+test('ctf_writeup：把会话 workDir 传给 writeup 引擎（原来的 process.cwd() 会写到插件目录）', async () => {
+  const calls = []
+  const { tools } = createHarness({
+    deps: {
+      writeup: {
+        async generate(args) {
+          calls.push(args)
+          return '✅ WP 已生成'
+        },
+      },
+    },
+  })
+  const out = await tools.ctf_writeup.execute({ id: 5, body: 'x' }, { cwd: '/tmp/ws' })
+  assert.match(out, /WP 已生成/)
+  assert.equal(calls[0].workDir, '/tmp/ws', '传会话 cwd（writeup 内部再拼 lingxu-ctf-work）')
+})
+
+test('ctf_status：提交审计按当前赛事过滤 + 多赛事可见性（②）', async () => {
+  const dir = await makeTmpDir()
+  const store = new CtfStore({ dir })
+  const A = 'lingxu:h:8000:4'
+  const B = 'lingxu:h:8000:7'
+  await store.upsertConnection({ platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 4, cookie: 'sessionid=a', label: '题目测试' })
+  await store.recordSubmission({ connKey: A, challengeId: '1', flag: 'flag{a}', status: 'correct' })
+  await store.recordSubmission({ connKey: A, challengeId: '2', flag: 'flag{a2}', status: 'incorrect' })
+  await store.recordSubmission({ connKey: B, challengeId: '9', flag: 'flag{b}', status: 'correct' })
+
+  const adapter = createAdapter()
+  const connection = { platform: 'lingxu', baseUrl: 'https://h:8000', eventId: 7, label: '数信杯 Agent 测试赛', key: B, originText: '设置页配置' }
+  const { tools } = createHarness({ adapter, store, connection })
+  const out = await tools.ctf_status.execute({})
+
+  assert.match(out, /- 提交审计: 本赛事 1 次（成功 1 \/ 错误 0）/, '只统计当前赛事（B 那 1 条）')
+  assert.match(out, /另有 2 条其它赛事的提交记录/, '其它赛事的记录要说明而不是混进来')
+  assert.doesNotMatch(out, /本赛事 3 次/)
+  // ② 多赛事：当前 + 其它可用连接 + 切换方式
+  // 当前赛事来自设置页（store 里还没有）→ 列表要把它补进「已知赛事」并提示可以记住它
+  assert.match(out, /- 已知赛事（2）：当前 ✅ lingxu:h:8000:7（数信杯 Agent 测试赛）/)
+  assert.match(out, /- lingxu:h:8000:4（题目测试） eventId=4｜切换：ctf_connect baseUrl=https:\/\/h:8000 eventId=4 cookie=<你的 sessionid>/)
+  assert.match(out, /ℹ️ 当前赛事来自设置页、还没存进本地/)
+
+  // 只有一条已知连接时给添加提示
+  const single = await createHarness({ adapter, store: await makeStore(), connection })
+  assert.match(await single.tools.ctf_status.execute({}), /- 已知赛事: 只有当前这一条/)
+})
+
+test('resolveAdapterFor：解析后记下「当前赛事」（submissions/面板靠它隔离）', async () => {
+  const store = new CtfStore({ dir: await makeTmpDir() })
+  const adapter = createAdapter()
+  const { tools } = createHarness({ adapter, store, connection: { ...CONNECTION, key: 'lingxu:h:8000:7' } })
+  await tools.ctf_challenges.execute({})
+  assert.equal(await store.getActiveConnKey(), 'lingxu:h:8000:7')
 })

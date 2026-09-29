@@ -4,7 +4,10 @@ import { promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { CtfStore, connectionKey, emptyState, TEAM_MESSAGE_LIMIT, TEAM_MESSAGE_TEXT_LIMIT } from '../lib/store.js'
+import {
+  CtfStore, connectionKey, emptyState, eventIdOf, parseEventIdFromConnKey,
+  TEAM_MESSAGE_LIMIT, TEAM_MESSAGE_TEXT_LIMIT,
+} from '../lib/store.js'
 
 async function tempDir() {
   return fsp.mkdtemp(path.join(os.tmpdir(), 'ctf-store-'))
@@ -237,4 +240,71 @@ test('getActiveConnection：只看活动连接（供 ctf_connect 新鲜度判断
   const fallback = await store.getActiveConnection()
   assert.equal(fallback.eventId, 7, '退化时取 updatedAt 最新的一条')
   assert.ok(dir)
+})
+
+// ────────────────────────────────────────────── 赛事隔离（task-31 ①）
+
+test('★ 提交审计按赛事隔离：两个连接的提交互不串', async () => {
+  const dir = await tempDir()
+  const store = new CtfStore({ dir })
+  const A = 'lingxu:a:8000:4'
+  const B = 'lingxu:a:8000:7'
+
+  await store.recordSubmission({ connKey: A, challengeId: '1', flag: 'flag{a}', status: 'correct' })
+  await store.recordSubmission({ connKey: B, challengeId: '9', flag: 'flag{b}', status: 'incorrect' })
+  await store.recordSubmission({ connKey: A, challengeId: '2', flag: 'flag{a2}', status: 'incorrect' })
+
+  // 记录里带上 eventId（显式或从 connKey 反推）
+  const all = await store.recentSubmissions(10, { all: true })
+  assert.deepEqual(all.map((s) => s.eventId), [4, 7, 4], 'eventId 从 connKey 反推')
+
+  await store.noteActiveConnection(B)
+  const mine = await store.recentSubmissions(10)
+  assert.equal(mine.length, 1, '默认只返回当前赛事')
+  assert.equal(mine[0].connKey, B)
+  assert.equal(mine[0].eventId, 7)
+
+  await store.noteActiveConnection(A)
+  assert.deepEqual((await store.recentSubmissions(10)).map((s) => s.challengeId), ['1', '2'])
+  // 显式指定连接优先于 activeConnKey
+  assert.deepEqual((await store.recentSubmissions(10, { connKey: B })).map((s) => s.challengeId), ['9'])
+  // all:true 才看全量
+  assert.equal((await store.recentSubmissions(10, { all: true })).length, 3)
+})
+
+test('提交审计：老记录（无 eventId）读取时兜底；无 connKey 的归「未知赛事」默认不显示', async () => {
+  const dir = await tempDir()
+  const store = new CtfStore({ dir })
+  // 模拟 task-31 之前的历史数据：有 connKey 但没 eventId
+  store.state.submissions.push(
+    { at: '2026-09-01T00:00:00.000Z', connKey: 'lingxu:a:8000:7', challengeId: '1', flag: 'flag{x}', status: 'correct' },
+    { at: '2026-09-01T00:01:00.000Z', connKey: null, challengeId: '2', flag: 'flag{old}', status: 'correct' },
+  )
+  await store.save()
+  await store.noteActiveConnection('lingxu:a:8000:7')
+
+  const mine = await store.recentSubmissions(10)
+  assert.equal(mine.length, 1, '无 connKey 的极老记录不归到当前赛事（宁可不显示也不串）')
+  assert.equal(eventIdOf(mine[0]), 7, '读时用 connKey 反推 eventId')
+  assert.equal(parseEventIdFromConnKey('lingxu:a:8000:7'), 7)
+  assert.equal(parseEventIdFromConnKey('weird'), null)
+
+  const withUnknown = await store.recentSubmissions(10, { includeUnknown: true })
+  assert.equal(withUnknown.length, 2)
+  assert.equal((await store.recentSubmissions(10, { all: true })).length, 2)
+})
+
+test('noteActiveConnection：设置页那种「store 里还没有的连接」也能记住（不写 activeConnection）', async () => {
+  const dir = await tempDir()
+  const store = new CtfStore({ dir })
+  await store.upsertConnection({ platform: 'lingxu', baseUrl: 'https://a:8000', eventId: 4, cookie: 'sessionid=x' })
+  await store.noteActiveConnection('lingxu:a:8000:7') // 设置页配的赛事，store 里没有
+  assert.equal(await store.getActiveConnKey(), 'lingxu:a:8000:7')
+  const active = await store.getActiveConnection()
+  assert.equal(active.eventId, 4, 'activeConnection 不会被不存在的 key 覆盖（保持原语义）')
+
+  // 换成 store 里有的连接 → activeConnection 跟着走
+  await store.noteActiveConnection('lingxu:a:8000:4')
+  assert.equal((await store.getActiveConnection()).eventId, 4)
+  assert.equal((await store.getActiveConnKey()), 'lingxu:a:8000:4')
 })

@@ -308,6 +308,12 @@ const {
   VIEW_LOCALE_NS,
   VIEW_LABEL_FALLBACK,
   TEAM_URL,
+  THEORY_URL,
+  formatRelativeSeconds,
+  formatElapsed,
+  STALE_AFTER_SECONDS,
+  taskElapsedSeconds,
+  renderViewUsageNoteHtml,
   REPORTS_URL,
   createCtfView,
   registerCtfView,
@@ -2127,7 +2133,7 @@ test('视图：Agent 活动 / 协同通信在无团队或 ok:false 时给空态�
   assert.match(renderViewAgentsHtml({ state, team, board: [], reports: normalizeReports(null) }), /HTTP 404/)
 })
 
-test('视图：协同通信时间线按时间升序并带 from → to / kind 标签', () => {
+test('视图：协同通信按「对话对」分组，组内从早到晚，带 from → to / kind 标签', () => {
   const state = normalizeState(fullSnapshot())
   const team = normalizeTeam(teamPayload())
   const html = renderViewMessagesHtml({ state, team, board: [], reports: normalizeReports(null) })
@@ -2138,9 +2144,13 @@ test('视图：协同通信时间线按时间升序并带 from → to / kind 标
   assert.match(html, /汇报/)
   assert.match(html, /lx-vmsg-spawn/)
   assert.match(html, /lx-vmsg-report/)
-  const first = html.indexOf('去做 Web 题')
-  const last = html.indexOf('顺手看下 Misc')
-  assert.ok(first > 0 && last > first, '时间线应从早到晚')
+  // task-30：按「谁 ↔ 谁」分组，一眼看出协同关系（用户问题 11）
+  assert.match(html, /lx-vmsg-groups/)
+  assert.match(html, /lx-vmsg-group-head/)
+  assert.match(html, /lead ↔ solver-web-01/, '同一对话对应聚合到一组')
+  // 组内仍是时间升序
+  const group = html.slice(html.indexOf('lead ↔ solver-web-01'))
+  assert.ok(group.indexOf('去做 Web 题') < group.indexOf('拿到 flag 了'), '组内应从早到晚')
 })
 
 test('视图：提交审计渲染状态徽章与明文 flag；报告可展开正文', () => {
@@ -2490,7 +2500,15 @@ test('环境模型：env 字段缺失 / 垃圾输入不崩，且 known=false（�
 })
 
 test('环境模型：limit/held/free 推导与「已满」判定', () => {
-  assert.deepEqual(normalizeEnv({ limit: 2, held: 1, free: 1 }), { known: true, limit: 2, held: 1, free: 1, full: false, blocked: false })
+  assert.deepEqual(normalizeEnv({ limit: 2, held: 1, free: 1 }), {
+    known: true, limit: 2, held: 1, free: 1, full: false, blocked: false,
+    blockedAt: null, heldScope: 'plugin', blockedReason: null,
+  })
+  // task-30：blocked 的语义 + 原因要透传（文案靠它解释「为什么 0/2 却满了」）
+  const blockedEnv = normalizeEnv({ limit: 2, held: 0, free: 2, blocked: true, blockedReason: '别的会话占着' })
+  assert.equal(blockedEnv.blocked, true)
+  assert.equal(blockedEnv.blockedReason, '别的会话占着')
+  assert.equal(blockedEnv.heldScope, 'plugin', 'held 只统计本插件起的实例')
   assert.equal(normalizeEnv({ limit: 2, held: 2, free: 0 }).full, true)
   // free 缺失时用 limit - held 推导
   assert.equal(normalizeEnv({ limit: 3, held: 1 }).free, 2)
@@ -2574,11 +2592,12 @@ test('★ 看板卡片：题型徽章 + 环境剩余（橙 / 红 / 正常）都�
 
 test('★ 摘要指标行：环境 held/limit；free === 0 时高亮', () => {
   const normal = renderViewMetaHtml(envModel(envSnapshot()))
-  assert.match(normal, /环境 1\/2/)
+  // 文案刻意写明「本插件」：held 只统计插件自己起的实例，与平台侧配额是两回事
+  assert.match(normal, /环境（本插件）1\/2/)
   assert.equal(normal.includes('lx-vmetric-warn'), false, '没满时不告警')
 
   const full = renderViewMetaHtml(envModel(envSnapshot({ env: { limit: 2, held: 2, free: 0 } })))
-  assert.match(full, /环境 2\/2/)
+  assert.match(full, /环境（本插件）2\/2/)
   assert.match(full, /已满/)
   assert.match(full, /lx-vmetric-warn/)
 })
@@ -2621,7 +2640,7 @@ test('★ 「环境」子视图：只列环境型题目，按告警/剩余排序
   const model = envModel(envSnapshot(), team)
   const html = renderViewEnvHtml(model)
 
-  assert.match(html, /环境配额 1\/2（空闲 1）/)
+  assert.match(html, /本插件占用 1\/2（空闲 1）/)
   assert.match(html, /Pwn-A/)
   assert.match(html, /Pwn-B/)
   assert.match(html, /Pwn-C/)
@@ -2645,7 +2664,7 @@ test('「环境」子视图：没有环境时给空态；配额满时给提示',
   assert.equal(runningEnvCount(empty.board), 0)
 
   const full = envModel(envSnapshot({ env: { limit: 2, held: 2, free: 0 } }))
-  assert.match(renderViewEnvHtml(full), /配额已满 · 新环境起不来，先释放一个/)
+  assert.match(renderViewEnvHtml(full), /本插件配额已满 · 新环境起不来，先释放一个/)
 })
 
 test('环境数据容错：challenges 里混入 null / 垃圾字段不崩', () => {
@@ -2669,7 +2688,7 @@ test('环境视图控制器：切到 env tab 渲染环境面板', async () => {
   await view.refresh()
   view.setTab('env')
   const text = collectText(dom.document.body)
-  assert.match(text, /环境配额 1\/2/)
+  assert.match(text, /本插件占用 1\/2/)
   assert.match(text, /Pwn-B/)
   assert.match(text, /环境已过期/)
   assert.equal(view.state.tab, 'env')
@@ -2876,7 +2895,8 @@ test('★ 头部：只有居中标题 + 一行指标，不含平台名 / URL / �
   assert.equal(text.includes('更新于'), false)
   assert.equal(text.includes('赛事 #'), false, '赛事 ID 不该出现')
   assert.equal(html.includes('lx-vrefresh'), false, '刷新按钮已删除')
-  assert.equal(text.includes('刷新'), false)
+  // 注意：页脚会写「每 5 秒自动刷新」（这是数据新鲜度说明，不是按钮）
+  assert.equal(/<button[^>]*>\s*刷新\s*<\/button>/.test(html), false, '不该有手动刷新按钮')
   assert.equal(html.includes('lx-vlive'), false, '连接绿点已删除')
 
   // 保留的有用信息
@@ -3036,7 +3056,7 @@ test('★ 防漂移：两族头部都不含平台名 / 赛事 ID / URL / 更新�
   }
   // 有用的信息两边都要有
   for (const [name, html] of [['面板', panelMeta], ['视图', viewMeta]]) {
-    for (const label of ['得分 4200', '排名 1/4', '剩余 ', '环境 1/2']) {
+    for (const label of ['得分 4200', '排名 1/4', '剩余 ', '环境（本插件）1/2']) {
       assert.ok(html.includes(label), `${name}头部应含「${label}」`)
     }
   }
@@ -3301,7 +3321,15 @@ test('★ 布局：理论题是独立子 tab（不再塞在看板末尾）', asy
   assert.match(html, /理论题 B/)
   assert.match(html, /100 题/)
   assert.match(html, /已交卷/)
-  assert.equal(html, api.renderTheoryHtml(state), '视图与面板的理论题条目必须逐字一致（共享片段）')
+  // 防漂移：试卷行仍由 renderTheoryItemsHtml 唯一实现 —— 面板行是视图卡片的前缀，
+  // 视图只是在行尾多塞了「加载题目概要」按钮 + 题目容器（动作槽）。
+  const panelRow = api.renderTheoryHtml(state)
+  assert.ok(html.startsWith(panelRow.slice(0, panelRow.indexOf('</div>'))), '试卷行的单元格必须与面板一致（共享实现）')
+  assert.match(html, /lx-vtheory-load/)
+  assert.match(html, /lx-vquestions/)
+  // 源码里只允许一处拼 lx-theory-name（防两族各写一遍）
+  const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.equal((source.match(/<span class="lx-theory-name"/g) || []).length, 1, '试卷行只能有一份实现（CSS 里的类名不算）')
 
   // 角标 = 题量（100 + 50）
   assert.equal(api.renderViewTabCount('theory', model), 150)
@@ -3350,6 +3378,282 @@ test('★ 布局：间距只用 4/6/8/10/12/14/16/20/24（防随手写 13px 之�
     }
   }
   assert.deepEqual([...offenders], [], `出现了非约定间距值：${[...offenders].join(', ')}`)
+})
+
+// ══════════════════════════════════════ 15. task-30：实时信息 / 报告 / 环境 / 耗时 / 协同
+
+test('★ task-30：相对时间与耗时格式化', async () => {
+  const { api } = await loadClientModule()
+  assert.equal(api.formatRelativeSeconds(0), '刚刚')
+  assert.equal(api.formatRelativeSeconds(4), '刚刚')
+  assert.equal(api.formatRelativeSeconds(45), '45 秒前')
+  assert.equal(api.formatRelativeSeconds(90), '1 分钟前')
+  assert.equal(api.formatRelativeSeconds(3600 * 3), '3 小时前')
+  assert.equal(api.formatRelativeSeconds(-5), '刚刚', '时钟漂移不能出负数')
+  assert.equal(api.formatElapsed(754), '12 分 34 秒')
+  assert.equal(api.formatElapsed(3900), '1 小时 5 分')
+  assert.equal(api.formatElapsed(9), '9 秒')
+  assert.equal(api.STALE_AFTER_SECONDS, 300)
+})
+
+test('★ task-30：agent 活动显示「在做啥」+ 相对时间 + 停滞标记', async () => {
+  const { api } = await loadClientModule()
+  const state = api.normalizeState({ connection: { key: 'k' }, challenges: [], leaderboard: [], submissions: [] })
+  const team = api.normalizeTeam({
+    ok: true,
+    runtime: { startedAt: '2026-09-29T04:00:00Z', elapsedSeconds: 754, lastActivityAt: '2026-09-29T04:12:30Z', idleSeconds: 12 },
+    members: [
+      { name: 'solver-a', status: 'running', challengeId: 7, challengeName: 'NeuroVault', currentAction: '正在解「NeuroVault」', lastActivityAt: '2026-09-29T04:12:30Z', staleSeconds: 12 },
+      { name: 'solver-b', status: 'running', challengeName: null, currentAction: '发送消息：我在做 Web', lastActivityAt: '2026-09-29T04:00:00Z', staleSeconds: 900 },
+      { name: 'solver-c', status: 'inactive', currentAction: '', lastActivityAt: null, staleSeconds: null },
+    ],
+    tasks: [
+      { id: 't1', subject: '解出 NeuroVault', status: 'completed', owner: 'solver-a', challengeId: 7, challengeName: 'NeuroVault', createdAt: '2026-09-29T04:00:00Z', updatedAt: '2026-09-29T04:05:00Z' },
+      { id: 't2', subject: '解出 Web', status: 'in_progress', owner: 'solver-b', challengeId: 9, challengeName: 'Web', createdAt: '2026-09-29T04:10:00Z', updatedAt: '2026-09-29T04:11:00Z' },
+    ],
+    messages: [],
+  })
+  const model = { state, team, board: [], reports: api.normalizeReports(null) }
+  const html = api.renderViewAgentsHtml(model)
+
+  // 当前在做什么（宿主推断的 currentAction 优先）
+  assert.match(html, /在做：正在解「NeuroVault」/)
+  assert.match(html, /在做：发送消息：我在做 Web/)
+  // 相对时间 + 停滞警示（>5 分钟）
+  assert.match(html, /最后活动 12 秒前/)
+  assert.match(html, /最后活动 15 分钟前 · 已停滞/)
+  assert.match(html, /lx-vwarn/, '停滞的 agent 要有警示色')
+  // 完全没有活动记录 → 如实标注，不编时间
+  assert.match(html, /最后活动 无活动记录/)
+  // 本轮耗时 + token 如实说明
+  assert.match(html, /本轮已运行 12 分 34 秒/)
+  assert.match(html, /团队最后活动 12 秒前/)
+  assert.match(html, /token 用量：宿主未提供/)
+  assert.match(html, /DSH 未向插件暴露 token 统计/)
+  assert.equal(/token 用量：\d/.test(html), false, '拿不到就不得编造数字')
+
+  // 任务耗时：已完成 = updatedAt-createdAt；进行中 = now-createdAt
+  assert.equal(api.taskElapsedSeconds({ status: 'completed', createdAt: '2026-09-29T04:00:00Z', updatedAt: '2026-09-29T04:05:00Z' }), 300)
+  assert.equal(api.taskElapsedSeconds({ status: 'pending', createdAt: '' }), null)
+  assert.match(html, /耗时 5 分 0 秒/)
+})
+
+test('★ task-30：报告显示正文预览与生成时间；没有正文时如实说明', async () => {
+  const { api } = await loadClientModule()
+  const withBody = api.normalizeReports({
+    ok: true,
+    writeups: [{
+      challengeId: 102,
+      challengeName: 'GuardBot',
+      path: 'lingxu-ctf-work/writeups/guardbot-102.md',
+      bytes: 26799,
+      bodyChars: 12000,
+      bodyPreview: '# GuardBot\n\n用了「说」动词绕过规则。\n',
+      modifiedAt: '2026-09-29T10:29:10.894Z',
+      submitted: false,
+    }],
+  })
+  const model = { state: api.normalizeState({ connection: { key: 'k' } }), team: api.normalizeTeam(null), board: [], reports: withBody }
+  const html = api.renderViewReportsHtml(model)
+  assert.match(html, /GuardBot/)
+  assert.match(html, /用了「说」动词绕过规则/, '正文预览必须渲染出来（此前只有元信息）')
+  assert.match(html, /生成 09-29 18:29:10/)
+  assert.match(html, /26799 字节/)
+  assert.match(html, /预览前 \d+ 字符，全文 12000 字符/)
+  assert.match(html, /仅本地/)
+
+  // 老宿主只回元信息（无 bodyPreview）→ 明确说「宿主未返回正文预览」，而不是显示「（无正文）」
+  const noBody = api.normalizeReports({ ok: true, writeups: [{ challengeId: 1, challengeName: 'X', bytes: 2048, modifiedAt: '2026-09-29T01:00:00Z' }] })
+  const noBodyHtml = api.renderViewReportsHtml({ ...model, reports: noBody })
+  assert.match(noBodyHtml, /宿主未返回正文预览（文件 2048 字节/)
+
+  // 空态：说明「还没生成过」
+  const emptyHtml = api.renderViewReportsHtml({ ...model, reports: api.normalizeReports({ ok: true, writeups: [] }) })
+  assert.match(emptyHtml, /暂无 writeup/)
+  assert.match(emptyHtml, /还没生成过 writeup/)
+  assert.match(emptyHtml, /ctf_writeup/)
+})
+
+test('★ task-30：环境显示不再自相矛盾（本地计数 vs 平台已满分开讲）', async () => {
+  const { api } = await loadClientModule()
+  const state = api.normalizeState({
+    connection: { key: 'k' },
+    // 本地 0/2，但平台侧报过满（别的会话占着）—— 这正是用户截图里的矛盾场景
+    env: { limit: 2, held: 0, free: 2, blocked: true, blockedReason: '平台环境配额已满：本插件的 0/2 只统计它自己起的实例' },
+    challenges: [],
+    leaderboard: [],
+    submissions: [],
+  })
+  const model = { state, team: api.normalizeTeam(null), board: [], reports: api.normalizeReports(null) }
+  const html = api.renderViewMetaHtml(model)
+  assert.match(html, /环境（本插件）0\/2/)
+  assert.match(html, /⚠ 平台环境配额已满/)
+  assert.match(html, /只统计它自己起的实例/, 'tooltip 必须解释为什么 0/2 却满了')
+  // 关键：不能把两者塞进同一句（用户看到的「环境 0/2 · 平台已满」）
+  assert.equal(html.includes('0/2 · 平台已满'), false)
+
+  const envHtml = api.renderViewEnvHtml(model)
+  assert.match(envHtml, /本插件占用 0\/2（空闲 2）/)
+  assert.match(envHtml, /⚠ 平台环境配额已满/)
+})
+
+test('★ task-30：环境视图只列需要关注的题，并说明省略了多少', async () => {
+  const { api } = await loadClientModule()
+  const state = api.normalizeState({
+    connection: { key: 'k' },
+    env: { limit: 2, held: 0, free: 2 },
+    challenges: [
+      { id: 1, name: '已解无环境题A', category: 'Pwn', taskType: 1, solved: true },
+      { id: 2, name: '未解环境题', category: 'Pwn', taskType: 1 },
+      { id: 3, name: '跑着环境', category: 'Pwn', taskType: 1, envRemainingSeconds: 900 },
+      { id: 4, name: '普通题', category: 'Web', taskType: 2 },
+    ],
+    leaderboard: [],
+    submissions: [],
+  })
+  const board = api.mergeChallengeBoard(state.challenges, api.normalizeTeam(null))
+  const html = api.renderViewEnvHtml({ state, board, team: api.normalizeTeam(null), reports: api.normalizeReports(null) })
+  assert.match(html, /未解环境题/)
+  assert.match(html, /跑着环境/)
+  assert.equal(html.includes('lx-venv-name">已解无环境题A'), false, '已解且没有环境的题不该占位置（省略提示里可能提到「已解…」字样，所以按行断言）')
+  assert.match(html, /已省略 1 道已解且无环境的环境型题目/)
+})
+
+test('★ task-30：协同通信按对话对分组；数据少时说明原因', async () => {
+  const { api } = await loadClientModule()
+  const state = api.normalizeState({ connection: { key: 'k' }, challenges: [], leaderboard: [], submissions: [] })
+  const team = api.normalizeTeam({
+    ok: true,
+    members: [],
+    tasks: [],
+    messages: [
+      { at: '2026-09-29T04:00:00Z', from: 'lead', to: 'team', kind: 'spawn', text: '拉起 3 个 agent' },
+      { at: '2026-09-29T04:05:00Z', from: 'solver-a', to: 'lead', kind: 'report', text: '解出 NeuroVault' },
+      { at: '2026-09-29T04:06:00Z', from: 'lead', to: 'solver-b', kind: 'send', text: '看看 Web' },
+    ],
+  })
+  const html = api.renderViewMessagesHtml({ state, team, board: [], reports: api.normalizeReports(null) })
+  assert.match(html, /lx-vmsg-groups/)
+  assert.match(html, /lead ↔ solver-a/)
+  assert.match(html, /lead ↔ solver-b/)
+  assert.match(html, /lead ↔ team/)
+  assert.match(html, /解出 NeuroVault/)
+
+  // 空态：说清「没数据」以及**为什么**（send_message 不进这个数组）
+  const emptyTeam = api.normalizeTeam({ ok: true, members: [], tasks: [], messages: [] })
+  const emptyHtml = api.renderViewMessagesHtml({ state, team: emptyTeam, board: [], reports: api.normalizeReports(null) })
+  assert.match(emptyHtml, /暂无协同记录/)
+  assert.match(emptyHtml, /send_message/)
+  assert.match(emptyHtml, /数据源限制/)
+})
+
+test('★ task-30：页脚显示数据新鲜度（优先宿主 cachedAt / fromCache）', async () => {
+  // 场景 1：宿主给了 cachedAt（面板缓存）→ 用它的年龄 + 「缓存」标记
+  const state = api_nonnull(await loadClientModule())
+  void state
+
+  const { impl } = viewFetch({
+    state: {
+      ...fullSnapshot(),
+      cachedAt: new Date(Date.now() - 8000).toISOString(),
+      fromCache: true,
+    },
+  })
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+  const text = collectText(dom.document.body)
+  assert.match(text, /数据 8 秒前 · 缓存/)
+  assert.match(text, /每 5 秒自动刷新/)
+  view.destroy()
+})
+
+function api_nonnull(mod) {
+  return mod.api
+}
+
+test('★ task-30：理论题按需加载题目概要（不在轮询里自动拉）', async () => {
+  const calls = []
+  const { impl } = (() => {
+    const base = viewFetch({
+      state: {
+        ...fullSnapshot(),
+        theory: [{ id: 4, name: '理论题', count: 100, isBegin: true, remainingSeconds: 3600 }],
+      },
+    })
+    const wrapped = async (url, init) => {
+      calls.push(url)
+      if (String(url).startsWith(THEORY_URL)) {
+        return jsonResponse({
+          ok: true,
+          testId: 4,
+          total: 100,
+          answered: 37,
+          questions: [
+            { id: 1, type: '单选题', stem: '以下哪个是 SQL 注入的典型特征？', answered: true, optionsCount: 4 },
+            { id: 2, type: '判断题', stem: 'HTTPS 一定能防止注入。', answered: false, optionsCount: 0 },
+          ],
+        })
+      }
+      return base.impl(url, init)
+    }
+    return { impl: wrapped }
+  })()
+
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+  view.setTab('theory')
+  // 轮询阶段**不得**请求 theory 路由（100 道题的题面很大，不能自动全量拉）
+  assert.equal(calls.some((url) => String(url).startsWith(THEORY_URL)), false, '轮询不得自动拉题目')
+
+  const text0 = collectText(dom.document.body)
+  assert.match(text0, /加载题目概要/)
+  assert.match(text0, /不会自动拉取/)
+
+  // 点按钮才请求，并且渲染题目列表（题干摘要 / 题型 / 已答状态）
+  const find = (cls) => {
+    const stack = [view.element()]
+    while (stack.length > 0) {
+      const node = stack.pop()
+      if (node && String(node.className || '').split(/\s+/).includes(cls)) return node
+      for (const child of (node && node.children) || []) stack.push(child)
+    }
+    return null
+  }
+  // stub DOM 不解析 innerHTML，找到容器后派发一个「点击了按钮」的合成事件
+  const bodyEl = find('lx-vbody')
+  assert.ok(bodyEl, '应有视图内容容器')
+  assert.match(collectHtml(bodyEl), /lx-vtheory-load/, '应有「加载题目概要」按钮')
+  bodyEl.dispatch('click', {
+    target: {
+      className: 'lx-vbtn lx-vtheory-load',
+      getAttribute: (name) => (name === 'data-test-id' ? '4' : null),
+    },
+  })
+  await flush()
+  await flush()
+
+  assert.equal(calls.some((url) => String(url).startsWith(THEORY_URL)), true, '点击后才请求')
+  const text = collectText(dom.document.body)
+  assert.match(text, /以下哪个是 SQL 注入的典型特征/)
+  assert.match(text, /单选题/)
+  assert.match(text, /已答/)
+  assert.match(text, /未答/)
+  assert.match(text, /共 100 题、已答 37 题/)
+  view.destroy()
+})
+
+test('★ task-30：理论题空态区分「没有赛段」与「试卷未开启」', async () => {
+  const { api } = await loadClientModule()
+  const noTheory = api.normalizeState({ connection: { key: 'k' }, theory: [] })
+  const model = { state: noTheory, team: api.normalizeTeam(null), board: [], reports: api.normalizeReports(null) }
+  assert.match(api.renderViewTheoryHtml(model), /本赛事没有理论题赛段/)
+
+  // 未开启的试卷：按钮禁用并说明平台不再开放题目列表
+  const notBegun = api.normalizeState({ connection: { key: 'k' }, theory: [{ id: 9, name: '复赛加试', count: 20, isBegin: false }] })
+  const html = api.renderViewTheoryHtml({ ...model, state: notBegun })
+  assert.match(html, /未开始/)
+  assert.match(html, /disabled/)
+  assert.match(html, /平台不再开放题目列表/)
 })
 
 test('理论题状态：交卷后必须显示「已交卷」，不能显示「未开始」', () => {
@@ -3497,8 +3801,12 @@ test('环境配额：blocked（平台侧已满）比本地计数可信', async (
     challenges: [], submissions: [], theory: [], leaderboard: [], stats: {},
   })
   const html = renderViewMetaHtml({ state, team: normalizeTeam(null), board: [], reports: normalizeReports(null) })
-  assert.match(html, /平台已满/, 'blocked 时指标行应明说「平台已满」')
+  // 问题 13：不能把「0/2」和「已满」写进同一句（自相矛盾）——
+  // 现在拆成两条：本插件占用 + 平台侧已满告警（含原因 tooltip）
+  assert.match(html, /环境（本插件）0\/2/)
+  assert.match(html, /⚠ 平台环境配额已满/)
   assert.match(html, /lx-vmetric-warn/, '并高亮')
+  assert.match(html, /只统计它自己起的实例|其他会话或手工起的实例/, 'tooltip 要解释为什么 0/2 却满了')
 })
 
 test('★ 回归：createConfigCard 必须自行注入样式表（不依赖视图/悬浮面板的 mount）', async () => {

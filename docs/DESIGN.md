@@ -3,8 +3,10 @@
 DSH 插件：把凌虚竞赛平台（Lingxu event CTF）接入 DSH，实现「给一个平台地址 + sessionid，
 自动枚举赛题 / 排行榜 / 理论题，拉起并发解题 agent 团队，自动交 flag，自动写 WP」。
 
-- 宿主版本基线：DSH Desktop `0.2.0-rc.1`（`@deepseek-ai/dsh-*` 全部 `0.2.0-rc.1`，Cordis `4.0.4`）
+- 宿主版本基线：DSH Desktop `0.2.0-rc.1`（`@deepseek-ai/dsh-*` 全部 `0.2.0-rc.1`，Cordis `4.0.4`）；
+  当前开发机实测 `0.2.0-rc.2`；上游报告在 `0.1.7-rc.1` 上可用（本仓库未复现）—— 兼容策略见 §10
 - 目标 profile：`desktop`
+- 分发渠道：**只有 GitHub**（`1.0.3` / tag `v1.0.3`）；npm 未发布（见 §10）
 - 参考实现：`HuntingBlade`（凌虚 API 逆向来源）、`howmp/dsh-pentest`（bundle 打包范式）
 
 ---
@@ -20,6 +22,7 @@ DSH 插件：把凌虚竞赛平台（Lingxu event CTF）接入 DSH，实现「�
 | 并发 | 默认 **4** 个解题 agent，可配置 |
 | 环境生命周期 | 时长**以平台下发为准**（`env_start_min`，实测 30 分钟）；剩余 <30 分钟可延时（+30 分钟/次），`envAutoDelay` 默认自动延一次 |
 | 环境配额 | 平台 `env_limit` 默认 **2**；**只有环境型题目**受配额约束，非环境题不限量 |
+| 分发方式 | **只发 GitHub**（clone / codeload tarball 钉 tag）；**npm 暂不发布**（用户决策），README 不提供 npm 安装路径 |
 | 解题环境 | 本机 workspace，按需安装工具链（**不用 Docker**） |
 
 > 非阻塞护栏（不违反"全自动"选择）：flag 去重、提交审计日志、每题错误次数统计并在面板展示。
@@ -416,3 +419,63 @@ CFS = 场景化闯关：一道题下有多个**关卡**（`CFSFlag`，每关一�
 - 理论题 `finish` 不可逆，按用户决策不加二次确认；交卷后平台不再开放题目列表。
 - 顶部「CTF」视图 tab 只在 CTF 预设会话里出现；拿不到 `ctx.sessions` 或快照无 preset 信息时降级为始终显示。
 
+
+---
+
+## 10. 分发与安装（分发组的决策与实测）
+
+### 10.1 只发 GitHub，不发 npm
+
+- npm registry 实测：`GET https://registry.npmjs.org/dsh-lingxu-ctf` → **404**（该包从未发布）。
+- 因此 README / INSTALL 里**不出现任何「用 npm 装」的路径**，也不提供版本范围写法（`^1.0.3` 之类会装不上）。
+- `package.json` 里的 `publishConfig.access: public` **保留**：它是「将来若发布」的声明，不是「已发布」的暗示；
+  文档已明确写清当前未发布（JSON 不能写注释，所以这条约束由 README + INSTALL 承担）。
+- 分发形态：
+  - `git clone https://github.com/D1a0y1bb/lingxu-ctf.git`（公开仓库，无需凭据）；
+  - **codeload tarball 钉 commit/tag**（推荐给 pnpm 用户）：
+    `https://codeload.github.com/D1a0y1bb/lingxu-ctf/tar.gz/<sha>` 或 `.../tar.gz/refs/tags/v1.0.3`；
+  - 本地目录 `file:<绝对路径>`（开发态）；
+  - `npm pack` 产出的 `.tgz`（离线分发；`files` 决定包内容：`lib/`、`docs/`、`cordis.patch.yml`、`README.md`、`LICENSE`、`package.json`）。
+- ⚠️ **`scripts/` 不在 npm 包里**（只在 git 仓库）：`scripts/install.sh`（安装助手）、`scripts/verify.sh`（交付自检）
+  都是 **bash-only**，Windows 默认不可用 —— 所以文档把「安装」全部收敛到 `plugin_manager`，
+  手工步骤同时给出 PowerShell 版本（见 INSTALL.md §6）。
+
+### 10.2 版本锚点：**用 tag，不要用「本地 HEAD」**
+
+- 发布版本 `1.0.3` = tag `v1.0.3` = commit `3702de70a771fd0d430916dea03d5e09bfd7ef0d`（codeload 实测 200）。
+- 教训：文档里给用户**钉版本的 SHA 必须是「远端存在的 ref」**。开发机 HEAD 可能领先于已推送的提交
+  （本项目就出现过：本地 HEAD 的 commit 未推送，拿它拼 codeload URL 会 404）。
+  文档与 release note 一律以 **tag / 远端 ref** 为准，并给出自查命令
+  `git ls-remote https://github.com/D1a0y1bb/lingxu-ctf.git`。
+
+### 10.3 pnpm 的 `github:` 依赖退化成 SSH（上游实测）
+
+- 现象：spec `github:D1a0y1bb/lingxu-ctf` 在 `pnpm update/install` 时被解析成
+  `git+ssh://git@github.com/D1a0y1bb/lingxu-ctf.git` 去 `git ls-remote`，没有 SSH key 的用户直接
+  `Host key verification failed`（exit 128），且报错不含「HTTPS 被转成 SSH」这一关键信息。
+- 绕法（文档已收录，按推荐顺序）：codeload tarball 钉版本 / `git+https://…#v1.0.3` /
+  配 SSH key 或 `git config url."https://github.com/".insteadOf "ssh://git@github.com/"`。
+- 取舍：**不改本插件去迎合 `github:` spec**（那是 pnpm 的解析行为），只在文档里给出可用写法。
+
+### 10.4 Windows
+
+- 运行时**没有平台分支**：`lib/**` 不读 `process.platform`，路径统一走 `node:path`；
+  `process.platform` 只出现在 `cordis.patch.yml`（预设里在 bash / pwsh 两个工具行之间二选一）。
+- `package.json` **没有** `os` / `cpu` 限制字段 —— 包管理器不会因平台拒绝安装；`engines` 只要求 `node >= 18`。
+- 已知障碍：`scripts/*.sh` 是 bash（安装助手 / 自检），以及手工安装时的**符号链接**步骤
+  （`ln -sfn`；Windows 用 `New-Item -ItemType Junction` 可免管理员权限）。
+- 「Windows 用 GUI / 浏览器 web 安装报错」：**仓库侧无法复现，也未能定位确切原因**。
+  文档采取诚实的处理：列出已排除项 + 需要用户提供的报错清单（INSTALL.md §10），不做猜测性归因。
+
+### 10.5 版本兼容策略
+
+| DSH Desktop | 状态 | 处理 |
+|---|---|---|
+| `0.2.0-rc.1` | 开发基线（Cordis `4.0.4`） | 主要验证目标 |
+| `0.2.0-rc.2` | 当前开发机实测 | README 行为描述以此为准 |
+| `0.1.7-rc.1` | 上游报告可用、未复现 | 文档标注「⚠️ 未复现」并列出旧版本可能的表现（客户端半静默降级） |
+| 更早 | 未验证 | 明确写「配置卡片 / 顶部 tab 可能不出现」，不承诺 |
+
+- 客户端半依赖 `dsh.client.inject` 的三个包名（`dsh-client-modules` / `dsh-client-locale` /
+  `dsh-client-ui-conversation`）：**只在 `0.2.0-rc.2` 的安装包里核实过存在**；旧版本是否存在不写死结论。
+- 宿主侧能力（16 个基础工具 + 预设）不依赖客户端装配，跨版本更稳。

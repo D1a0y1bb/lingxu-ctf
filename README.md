@@ -5,10 +5,11 @@
 
 | 项目 | 说明 |
 |---|---|
-| 适用版本 | DSH Desktop `0.2.0-rc.1`（Cordis `4.0.4`），目标 profile `desktop` |
+| 适用版本 | DSH Desktop `0.2.0-rc.1`（开发基线）/ `0.2.0-rc.2`（本机实测）；`0.1.7-rc.1` 上游报告可用但**未复现** —— 见[适用版本与兼容性](#适用版本与兼容性) |
+| 当前版本 | `1.0.3`（GitHub tag `v1.0.3`，commit `3702de70a771fd0d430916dea03d5e09bfd7ef0d`） |
 | 平台支持 | **只支持凌虚赛事平台**（`sessionid` Cookie 认证） |
 | 依赖 | 零第三方依赖：只用 Node 内置能力 + DSH 官方 `@deepseek-ai/schemastery`（配置表单 schema），无构建步骤 |
-| 安装 | 用 `plugin_manager` 装 bundle：本地目录 `file:<你的插件目录>` / tarball / npm 包名 |
+| 分发 | **只通过 GitHub**：`git clone` 或 codeload tarball。⚠️ **npm 上没有发布**，不要用 `npm i` |
 | 提供 | **16 个基础 `ctf_*` 工具** + **按赛段动态加载**的 AWD（9 个）/ CFS（7 个）工具 · 「CTF 解题模式」agent 预设 · Web 界面（顶部「CTF」视图 tab + 设置页配置卡片；右下角浮动面板可选，默认关闭） |
 
 ## 目录
@@ -19,7 +20,7 @@
 - [工具清单（16 个基础工具与赛段工具）](#工具清单16-个基础工具与赛段工具)
 - [AWD 与 CFS 赛段](#awd-与-cfs-赛段)
 - [「CTF 解题模式」预设](#ctf-解题模式预设)
-- [配置项（13 项）](#配置项13-项)
+- [配置项（14 项）](#配置项14-项)
 - [Web 界面](#web-界面)
 - [多场赛事](#多场赛事)
 - [注意事项](#注意事项)
@@ -54,26 +55,89 @@
 插件以 **bundle** 形式安装：`plugin_manager` 会把它写进 `desktop` profile 的 `package.json` 依赖与
 `dsh.profile.bundles`，仓库里的 `cordis.patch.yml` 会同时并入宿主插件行与「CTF 解题模式」预设行。
 
-对 DSH 说一句话就能装（把 `<...>` 换成你的实际情况）：
+> **分发渠道只有 GitHub**（当前版本 `1.0.3`，tag `v1.0.3`）。
+> ⚠️ **npm 上没有发布这个包**（`https://registry.npmjs.org/dsh-lingxu-ctf` 实测 404），
+> 所以不要 `npm i dsh-lingxu-ctf`、也不要在 profile 里写 `"dsh-lingxu-ctf": "^1.0.3"`。
+> 完整的安装方式、升级回滚与排错见 **[`docs/INSTALL.md`](docs/INSTALL.md)**。
 
-```
-用 plugin_manager 安装这个 bundle：<target>
-```
-
-`<target>` 支持三种写法：
-
-| 场景 | `<target>` 怎么写 | 说明 |
-|---|---|---|
-| 本地目录（开发态） | `file:<你的插件目录>` | 例如插件在 `~/dsh-lingxu-ctf`，就填 `file:~/dsh-lingxu-ctf`（建议用绝对路径） |
-| 分发包（tarball） | 指向 `dsh-lingxu-ctf-0.1.0.tgz` 的路径 | 在插件目录执行 `npm pack` 生成 tgz，再把 tgz 路径交给 `install_bundle` |
-| npm 包名 | `dsh-lingxu-ctf` | 该包已发布到 npm（或你配置的 registry）时可用 |
-
-打包成 tarball 分发：
+### 方式 A：GitHub clone（推荐）
 
 ```bash
-cd <你的插件目录>
-npm pack            # 产出 dsh-lingxu-ctf-0.1.0.tgz
+git clone https://github.com/D1a0y1bb/lingxu-ctf.git
+cd lingxu-ctf
+git checkout v1.0.3     # 可选：钉在发布版本上（不写就跟着 master 走）
+pwd                     # 记下绝对路径，下一步要用
 ```
+
+然后在会话里对 DSH 说（`file:` 后面填**绝对路径**）：
+
+```
+用 plugin_manager 安装这个 bundle：file:/绝对路径/lingxu-ctf
+```
+
+### 方式 B：钉 commit 的 tarball（pnpm 用户推荐）
+
+不 clone、不需要 git/SSH，一行 URL 直接装：
+
+```
+用 plugin_manager 安装这个 bundle：https://codeload.github.com/D1a0y1bb/lingxu-ctf/tar.gz/3702de70a771fd0d430916dea03d5e09bfd7ef0d
+```
+
+- 这个 SHA 就是 `v1.0.3` 的发布提交，实测可下载（HTTP 200）；
+- 想用 tag 也行：`https://codeload.github.com/D1a0y1bb/lingxu-ctf/tar.gz/refs/tags/v1.0.3`。
+
+### 方式 C：本地目录 / 离线 tarball
+
+开发态直接用 `file:` 指目录；离线分发先打包再给路径（需要本机有 `npm`）：
+
+```bash
+cd lingxu-ctf
+npm pack            # 产出 dsh-lingxu-ctf-1.0.3.tgz
+```
+
+```
+用 plugin_manager 安装这个 bundle：/绝对路径/dsh-lingxu-ctf-1.0.3.tgz
+```
+
+### ⚠️ pnpm 用户注意：`github:` 依赖会退化成 SSH
+
+如果 profile 里写的是 `github:D1a0y1bb/lingxu-ctf`，`pnpm install` / `pnpm update` 可能这样失败：
+
+```
+[ERROR] Command failed with exit code 128:
+  git ls-remote "git+ssh://git@github.com/D1a0y1bb/lingxu-ctf.git" HEAD "HEAD^{}"
+Host key verification failed.
+```
+
+**原因**：pnpm 解析 `github:` 简写时会用 **SSH 形式**探测 ref，本机没有 GitHub SSH key 就会失败，
+而报错里完全没提「HTTPS 依赖被转成了 SSH」。**三种绕法**（任选其一）：
+
+| 绕法 | 怎么做 |
+|---|---|
+| ✅ 推荐：改用 codeload tarball | 用上面[方式 B](#方式-b钉-commit-的-tarballpnpm-用户推荐) 的 URL（可钉 commit 或 `refs/tags/v1.0.3`） |
+| 改用 `git+https://` 显式写法 | profile 依赖写 `git+https://github.com/D1a0y1bb/lingxu-ctf.git#v1.0.3`（要 git，不要 SSH key） |
+| 配置 SSH / 改写 git URL | 配 GitHub SSH key，或 `git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"` |
+
+> ⚠️ 钉版本时**别用「你本地 HEAD 的 SHA」**：commit 没推到 GitHub 的话 codeload 会 404。
+> 先 `git ls-remote https://github.com/D1a0y1bb/lingxu-ctf.git` 确认远端真有这个 ref（能看到 `refs/tags/v1.0.3`）。
+
+### Windows 安装
+
+插件运行时**不挑平台**，但仓库里的 `scripts/*.sh` 是 **bash 脚本**，Windows 默认跑不了：
+
+- `scripts/install.sh`（手工安装助手）：Windows 上请改用 [方式 A](#方式-agithub-clone推荐) /
+  [方式 B](#方式-b钉-commit-的-tarballpnpm-用户推荐) 的 `plugin_manager` 路径；
+  确实要手工装，用 [`docs/INSTALL.md`](docs/INSTALL.md) 里的 **PowerShell 版本**（`New-Item -ItemType Junction`，
+  普通用户即可，不需要管理员 / 开发者模式）。
+- `npm run verify`（= `bash scripts/verify.sh`）：Windows 默认没有 bash，这条会失败；
+  跑 `node --test` 即可覆盖它的核心检查（单测），`verify.sh` 是交付前的开发自检，不是安装步骤。
+
+> ⚠️ 关于「**Windows 用 GUI / 浏览器 web 安装报错**」：我们**还没定位到确切原因**，
+> 仓库侧能排除的只有：`package.json` 没有 `os` / `cpu` 限制（不会被包管理器拒绝）、
+> 业务代码没有平台分支（`process.platform` 只出现在 `cordis.patch.yml` 里用于选 bash/pwsh 工具）、
+> 路径处理走 `node:path`。
+> 如果你是 Windows 用户且装不上，请按 [`docs/INSTALL.md`](docs/INSTALL.md) 的
+> 「给维护者报错时请带上」清单提供**完整报错**，我们才能修。
 
 ### ⚠️ 装完必须重启 DSH
 
@@ -96,6 +160,27 @@ profile 的 **bundle 列表在启动时读取**，安装后不会热生效：
 > 连上平台后，如果这场赛事含 AWD / CFS 赛段，工具列表会**再长出** 9 个 `ctf_awd_*` / 7 个 `ctf_cfs_*`
 > —— 见 [AWD 与 CFS 赛段](#awd-与-cfs-赛段)。纯 CTF 赛事就只有 16 个，不会白占上下文。
 
+### 适用版本与兼容性
+
+| DSH Desktop | 状态 | 说明 |
+|---|---|---|
+| `0.2.0-rc.1` | ✅ 开发基线 | 插件最初按它开发并验证（Cordis `4.0.4`、目标 profile `desktop`） |
+| `0.2.0-rc.2` | ✅ 本机实测 | 当前开发机（`runtime.json` 的 `desktopVersion`），本 README 的所有行为描述都来自它 |
+| `0.1.7-rc.1` | ⚠️ 上游报告可用、**本仓库未复现** | 见下方「旧版本上的已知差异」 |
+| 更早版本 | ❌ 未验证 | 早期版本没有 `@deepseek-ai/dsh-client-modules` 这类客户端装配机制，配置卡片 / 顶部 CTF tab 可能不出现 |
+
+**旧版本上的已知差异**：
+
+- 顶部 CTF tab 与设置页配置卡片依赖 `package.json` 的 `dsh.client.inject` 里那三个包名
+  （`@deepseek-ai/dsh-client-modules` / `dsh-client-locale` / `dsh-client-ui-conversation`）。
+  我们在 `0.2.0-rc.2` 的安装包里确认过它们存在；**`0.1.7-rc.1` 的包里有没有同名包，本仓库没有环境可核实**。
+  解析不到时 `dsh-client-modules` 会**静默跳过**（不报错），症状是「工具能用但看不到 tab / 配置卡片」，
+  或者「tab 在任何会话都出现」（会话门控拿不到 `ctx.sessions` 时降级为始终显示，属于设计内行为）。
+- **工具与预设不受影响**：它们走宿主侧注册与 `cordis.patch.yml`，与客户端装配无关。
+
+自查方法：重启后能列出 16 个工具即宿主侧正常；界面问题看 `GET /lingxu-ctf/diag`
+（同源路由，例如 GUI 在 `http://127.0.0.1:19387` 就访问 `http://127.0.0.1:19387/lingxu-ctf/diag`）。
+
 ---
 
 ## 怎么用（5 步跑起来）
@@ -117,8 +202,8 @@ profile 的 **bundle 列表在启动时读取**，安装后不会热生效：
 | `Cookie（sessionid）` | 浏览器复制的完整 Cookie，**必须含 `sessionid=`**（怎么拿见下方） |
 | `并发解题 Agent 数` | 同时解几道题，默认 4，可填 1–8 |
 
-其余字段（错误提交上限 / **环境数上限** / **环境自动延时** / flag 去重 / 工作目录 / 请求超时 / Web 面板与浮动面板开关）
-都有合理默认值，先不用管，需要时看[配置项](#配置项13-项)。
+其余字段（错误提交上限 / **环境数上限** / **复用闲置 agent** / **环境自动延时** / flag 去重 / 工作目录 / 请求超时 / Web 面板与浮动面板开关）
+都有合理默认值，先不用管，需要时看[配置项](#配置项14-项)。
 
 > `Cookie` 是 **secret 字段**：只写不读，保存后设置页只显示「已设置」，留空表示「不修改」。
 > 凭据只落在本机 `~/.dsh/storages/lingxu-ctf/`，不会进插件目录、不会进 git。
@@ -327,7 +412,7 @@ bundle 自带一个 agent 预设 `ctf`（名称「CTF 解题模式」，`order: 
 
 ---
 
-## 配置项（13 项）
+## 配置项（14 项）
 
 **推荐在设置页改**：**设置 → 内置插件 → 插件列表 → `dsh-lingxu-ctf`**（表单由插件自带的配置卡片渲染）。
 也可以直接改 profile 里 `cordis.patch.yml` 的 `lingxu-ctf` 行 `config:`（profile 层实时重载）。
@@ -341,6 +426,7 @@ bundle 自带一个 agent 预设 `ctf`（名称「CTF 解题模式」，`order: 
 | `concurrency` | `4` | 并发解题 agent 数，1–8（硬上限 8） |
 | `maxWrongAttempts` | `0` | 每题 flag 最大错误提交次数；`0` = 不限制，`punish: true` 的赛事建议设 3 左右 |
 | `envLimit` | `2` | **同时可运行的环境数上限**（平台 `env_limit`，实测本赛事为 2）；编排只按它限制**环境型**题目，非环境题不受影响。填 `0` = 让插件从平台报错里自动学习真实值 |
+| `reuseAgents` | `true` | **复用闲置 agent 接新题**（而不是每题都新建）。DSH 的 teammate 名额是**累计且不可回收**的，一场比赛几十道题，关掉会很快耗尽名额 —— 一般不要关 |
 | `envAutoDelay` | `true` | **环境到期自动延时**：起环境后若剩余已不足 30 分钟，自动调一次延时接口（每次 +30 分钟）。平台只允许剩余 <30 分钟时延时 |
 | `dedupeFlags` | `true` | 提交前做「同题同 flag」去重，已成功提交过的 flag 不再请求平台 |
 | `workDir` | `''` | 附件 / 元数据 / WP 的落盘根目录；留空 = 当前工作区下的 `lingxu-ctf-work/` |
@@ -597,12 +683,19 @@ node --check lib/writeup.js
 
 > Node 24 起测试运行器不再接受目录参数：`node --test tests/` 会报 `MODULE_NOT_FOUND`，
 > 用 `node --test`（自动发现）或 `node --test "tests/*.test.mjs"`。
-> 若 `node` 不在 PATH，可用 DSH 自带的 Node：
+> 若 `node` 不在 PATH，可用 DSH 自带的 Node（下面这条是 **macOS 应用包布局**的示例）：
 > `"<DSH 安装目录>/Contents/Resources/runtime/primary-runtime/dependencies/node/bin/node" --test`
+> —— Windows 上 DSH 的 Node 不在 `Contents/Resources` 下，用 `where.exe node` 找，
+> 或者干脆装一个 Node 24 到 PATH 里。
+
+> ⚠️ **仓库里的 `scripts/*.sh` 是 bash 脚本**（`scripts/install.sh` 安装助手、`scripts/verify.sh` 交付自检）：
+> macOS / Linux 直接 `bash scripts/verify.sh`；**Windows 默认跑不了**（`npm run verify` 也会失败），
+> 用 `node --test` 代替它的核心检查。它们**不随 npm 包分发**，只存在于 git 仓库里。
 
 文档：
 
-- [`docs/DESIGN.md`](docs/DESIGN.md) — 设计文档（用户决策、平台 API、模块划分、编排设计、验收标准）；
+- [`docs/INSTALL.md`](docs/INSTALL.md) — 安装与排错手册（三种装法 / pnpm SSH 绕法 / Windows / 升级回滚 / 报错对照表）；
+- [`docs/DESIGN.md`](docs/DESIGN.md) — 设计文档（用户决策、平台 API、模块划分、编排设计、分发方式、验收标准）；
 - [`docs/DSH-API-NOTES.md`](docs/DSH-API-NOTES.md) — DSH 插件 API 契约（工具注册、Agent Teams、预设、Web 路由、存储、打包安装）。
 
 模块划分（依赖方向单向，反向依赖禁止）：
@@ -625,6 +718,11 @@ lib/index.js       装配（配置归一化 + 依赖注入 + 路由 + 赛段工�
 ## 已知限制
 
 - **只支持凌虚赛事平台**，没有其他平台的适配器（历史遗留的非 `lingxu` 连接记录会直接报错，不静默降级）。
+- **分发只有 GitHub**：`1.0.3` 对应 tag `v1.0.3`；**npm 上没有发布**（registry 返回 404），
+  升级请按 [`docs/INSTALL.md`](docs/INSTALL.md) 用 codeload tarball 钉版本，别在 profile 里写版本范围。
+- **Windows 上 `scripts/*.sh`（安装助手 / 交付自检）不可用**（bash-only，且不随包分发）；
+  安装请走 `plugin_manager`，手工装用 INSTALL.md 里的 PowerShell 步骤。
+  「Windows 用 GUI / 浏览器 web 安装报错」目前**未定位到确切原因**，需用户提供完整报错。
 - **没有 Docker / pwntools**：插件按「本机工作区 + 按需装工具链」设计，不用容器。
   pwn / rev 类题目需要自己准备环境（`pip install pwntools`、`brew install gdb`、
   `apt install gdb-multiarch`，或按题目要求装解释器 / JDK）。

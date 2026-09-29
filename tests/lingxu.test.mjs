@@ -30,6 +30,13 @@ import {
   ctfSharedLabel,
   ctfTaskTypeLabel,
   AWD_DYNAMIC_STATUS_LABELS,
+  DEFAULT_RATE_LIMIT,
+  REQUEST_PRIORITIES,
+  currentRequestPriority,
+  getLingxuRateLimit,
+  lingxuRateLimitStats,
+  setLingxuRateLimit,
+  withRequestPriority,
   AWD_STATUS_LABELS,
   EVENT_TEST_TYPE_LABELS,
   EVENT_TYPE_CODES,
@@ -1600,4 +1607,241 @@ test('cfsRank / cfsChart / cfsDynamic', async () => {
       id: 9, name: 'xiyi', testName: '靶场渗透', flagTestName: '第一关', subTime: '12:00:00',
     })
   } finally { restore() }
+})
+
+// ══════════════════════════════════════════════ task-33：全局限流 + 429 退避
+// 背景：面板 5s 轮询 × 6 次请求 + 8 个 agent → 平台会话被打爆（真实事故：全队 403）。
+
+const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+test('限流：连发 20 个请求，实际发起间隔 ≥ 配置的最小间隔', async () => {
+  const starts = []
+  const [restore] = withFetch(() => {
+    starts.push(Date.now())
+    return jsonResponse({ ok: true })
+  })
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://rl-interval.test',
+      eventId: 4,
+      cookie: 'sessionid=a',
+      minIntervalMs: 30,
+      maxConcurrent: 2,
+    })
+    for (let i = 0; i < 20; i += 1) await c.request('/event/4/info/')
+    assert.equal(starts.length, 20)
+    const gaps = starts.slice(1).map((t, i) => t - starts[i])
+    const minGap = Math.min(...gaps)
+    assert.ok(minGap >= 28, `最小间隔应 ≥ 28ms（配置 30ms），实测 ${minGap}ms，gaps=${gaps.join(',')}`)
+  } finally { restore() }
+})
+
+test('限流：并发上限生效（同时 10 个请求，在途 ≤ 2）', async () => {
+  let active = 0
+  let maxActive = 0
+  const [restore] = withFetch(async () => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    await sleepMs(8)
+    active -= 1
+    return jsonResponse({ ok: true })
+  })
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://rl-concurrency.test',
+      eventId: 4,
+      cookie: 'sessionid=a',
+      minIntervalMs: 0,
+      maxConcurrent: 2,
+    })
+    await Promise.all(Array.from({ length: 10 }, (_, i) => c.request(`/event/4/ctf/${i}/info/`)))
+    assert.equal(maxActive, 2, `在途请求应被压到 2，实测 ${maxActive}`)
+    const stats = lingxuRateLimitStats().find((s) => s.host === 'https://rl-concurrency.test')
+    assert.equal(stats.sent, 10)
+    assert.equal(stats.maxInFlight, 2)
+    assert.equal(stats.queued, 0, '跑完队列应清空')
+  } finally { restore() }
+})
+
+test('限流：interactive 优先于 background（面板让路给 agent）', async () => {
+  const order = []
+  const [restore] = withFetch(async (url) => {
+    order.push(String(url).replace('https://rl-priority.test/event/4/', '').replace(/\/$/, ''))
+    await sleepMs(5)
+    return jsonResponse({ ok: true })
+  })
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://rl-priority.test',
+      eventId: 4,
+      cookie: 'sessionid=a',
+      minIntervalMs: 0,
+      maxConcurrent: 1,
+    })
+    // 先占住唯一的并发名额
+    const blocker = c.request('/event/4/blocker/')
+    await sleepMs(1)
+    // 名额被占时排队：两个后台 + 一个交互（交互后入队但应先跑）
+    const bg1 = withRequestPriority('background', () => c.request('/event/4/bg1/'))
+    const bg2 = withRequestPriority('background', () => c.request('/event/4/bg2/'))
+    const interactive = c.request('/event/4/mine/')
+    await Promise.all([blocker, bg1, bg2, interactive])
+    assert.deepEqual(order, ['blocker', 'mine', 'bg1', 'bg2'], '交互请求必须插到后台请求前面')
+  } finally { restore() }
+})
+
+test('withRequestPriority / currentRequestPriority：优先级随 async 上下文传递', async () => {
+  assert.equal(currentRequestPriority(), 'interactive')
+  const seen = await withRequestPriority('background', async () => {
+    await sleepMs(1)
+    return currentRequestPriority()
+  })
+  assert.equal(seen, 'background', '必须跨 await 保持')
+  assert.equal(currentRequestPriority(), 'interactive', '出了作用域要恢复')
+})
+
+test('退避：429 → 指数退避后重试成功，且计数可读', async () => {
+  let calls = 0
+  const [restore] = withFetch(() => {
+    calls += 1
+    if (calls <= 2) return jsonResponse({ detail: 'too many requests' }, 429)
+    return jsonResponse({ ok: true })
+  })
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://rl-backoff.test',
+      eventId: 4,
+      cookie: 'sessionid=a',
+      minIntervalMs: 0,
+      maxConcurrent: 1,
+      maxRetries: 2,
+      backoffBaseMs: 20,
+    })
+    const started = Date.now()
+    const result = await c.request('/event/4/info/')
+    const elapsed = Date.now() - started
+    assert.deepEqual(result, { ok: true })
+    assert.equal(calls, 3, '两次 429 后第三次成功')
+    assert.ok(elapsed >= 40, `退避应至少等 20+40ms，实测 ${elapsed}ms`)
+    const stats = lingxuRateLimitStats().find((s) => s.host === 'https://rl-backoff.test')
+    assert.equal(stats.retries, 2)
+    assert.equal(stats.rateLimited, 2)
+    assert.equal(stats.sent, 3)
+  } finally { restore() }
+})
+
+test('退避：平台文案说「请求过于频繁」也重试；超过 maxRetries 才抛', async () => {
+  const [restore] = withFetch(() => jsonResponse({ error: '请求过于频繁，请稍后再试' }, 400))
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://rl-backoff2.test',
+      eventId: 4,
+      cookie: 'sessionid=a',
+      minIntervalMs: 0,
+      maxRetries: 1,
+      backoffBaseMs: 5,
+    })
+    await assert.rejects(() => c.request('/event/4/info/'), /请求过于频繁/)
+  } finally { restore() }
+
+  let calls = 0
+  const [restore2] = withFetch(() => {
+    calls += 1
+    return jsonResponse({ error: '请求过于频繁，请稍后再试' }, 400)
+  })
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://rl-backoff3.test',
+      eventId: 4,
+      cookie: 'sessionid=a',
+      minIntervalMs: 0,
+      maxRetries: 1,
+      backoffBaseMs: 5,
+    })
+    await assert.rejects(() => c.request('/event/4/info/'))
+    assert.equal(calls, 2, '首次 + 1 次重试')
+  } finally { restore2() }
+})
+
+test('★ 403「未登录」是会话失效：绝不退避重试，直接抛 session-expired', async () => {
+  let calls = 0
+  const [restore] = withFetch(() => {
+    calls += 1
+    return jsonResponse({ detail: '未登录' }, 403)
+  })
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://rl-session.test',
+      eventId: 4,
+      cookie: 'sessionid=dead',
+      minIntervalMs: 0,
+      maxRetries: 3, // 就算允许重试也不能重试会话失效
+      backoffBaseMs: 5,
+    })
+    await assert.rejects(
+      () => c.request('/event/4/info/'),
+      (error) => {
+        assert.equal(error.code, LINGXU_CODES.SESSION_EXPIRED)
+        assert.equal(error.httpStatus, 403)
+        return true
+      },
+    )
+    assert.equal(calls, 1, '会话失效只发一次请求（重试没有意义）')
+    const stats = lingxuRateLimitStats().find((s) => s.host === 'https://rl-session.test')
+    assert.equal(stats.sent, 1)
+    assert.equal(stats.retries, 0)
+  } finally { restore() }
+})
+
+test('限流计数通过 lingxuRateLimitStats() 可读（diag 用）', async () => {
+  const [restore] = withFetch(async () => {
+    await sleepMs(3)
+    return jsonResponse({ ok: true })
+  })
+  try {
+    const c = new LingxuClient({
+      baseUrl: 'https://rl-stats.test',
+      eventId: 4,
+      cookie: 'sessionid=a',
+      minIntervalMs: 0,
+      maxConcurrent: 2,
+    })
+    await Promise.all([c.request('/a/'), c.request('/b/'), c.request('/c/')])
+    const stats = lingxuRateLimitStats()
+    const mine = stats.find((s) => s.host === 'https://rl-stats.test')
+    assert.ok(mine, 'stats 里应有该 host')
+    assert.equal(mine.sent, 3)
+    assert.equal(mine.inFlight, 0)
+    assert.equal(mine.queued, 0)
+    assert.equal(mine.minIntervalMs, 0)
+    assert.equal(mine.maxConcurrent, 2)
+    assert.ok(mine.peakQueued >= 1, '有排队过')
+    assert.equal(typeof mine.waitedMs, 'number')
+  } finally { restore() }
+})
+
+test('限流器按 host 分桶：不同平台互不影响；set/getLingxuRateLimit 可配', async () => {
+  const [restore] = withFetch(() => jsonResponse({ ok: true }))
+  try {
+    const a = new LingxuClient({ baseUrl: 'https://host-a.test', eventId: 4, cookie: 'sessionid=a', minIntervalMs: 0 })
+    const b = new LingxuClient({ baseUrl: 'https://host-b.test', eventId: 4, cookie: 'sessionid=a', minIntervalMs: 0 })
+    await Promise.all([a.request('/x/'), b.request('/x/')])
+    const stats = lingxuRateLimitStats()
+    assert.ok(stats.some((s) => s.host === 'https://host-a.test'))
+    assert.ok(stats.some((s) => s.host === 'https://host-b.test'))
+
+    const before = getLingxuRateLimit()
+    const applied = setLingxuRateLimit({ minIntervalMs: 7, maxConcurrent: 3 })
+    assert.equal(applied.minIntervalMs, 7)
+    assert.equal(getLingxuRateLimit().maxConcurrent, 3)
+    setLingxuRateLimit({ minIntervalMs: before.minIntervalMs, maxConcurrent: before.maxConcurrent })
+  } finally { restore() }
+})
+
+test('默认限流参数：生产默认有最小间隔，node:test 下自动放开', () => {
+  assert.equal(DEFAULT_RATE_LIMIT.maxConcurrent, 4)
+  assert.equal(DEFAULT_RATE_LIMIT.maxRetries, 2)
+  // 测试运行器里默认 0（否则 550 个用例每个请求都要干等），生产默认 100ms
+  assert.equal(DEFAULT_RATE_LIMIT.minIntervalMs, process.env.NODE_TEST_CONTEXT ? 0 : 100)
+  assert.deepEqual(REQUEST_PRIORITIES, ['interactive', 'background'])
 })

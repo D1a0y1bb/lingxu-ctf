@@ -12,6 +12,13 @@ import {
   createStageToolRegistry,
   pickConnection, createResolveAdapter, cookieLooksUsable, normalizeCookie, settingsHasPlatform,
   CONNECTION_ORIGIN_TEXT,
+  createPanelSnapshotCache,
+  instrumentStoreWrites,
+  panelRevisionOf,
+  PANEL_CACHE_TTL_MS,
+  PANEL_PLATFORM_REFRESH_MS,
+  PANEL_LOUD_COOLDOWN_MS,
+  PANEL_MAX_REFRESHES_PER_MINUTE,
 } from '../lib/index.js'
 import { CtfStore } from '../lib/store.js'
 
@@ -138,11 +145,12 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.equal(routes.includes('/lingxu-ctf/beacon'), true, '客户端回传探针路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/team'), true, '顶部「CTF」视图的团队数据路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/reports'), true, '顶部「CTF」视图的报告路由必须注册')
+  assert.equal(routes.includes('/lingxu-ctf/theory'), true, '理论题题目概要路由必须注册（按需拉取，视图不自动全量请求）')
   // client.js 路由仅在 lib/client.js 存在时注册（优雅降级）
   const hasBundle = routes.includes('/lingxu-ctf/client.js')
   // 客户端半改走官方 dsh.client 机制，**不再**注册 tapIndex
   assert.equal(ctx._collected.taps.length, 0, '不得再注册 tapIndex 注入（会被宿主权威 graph 覆盖）')
-  assert.equal(routes.length, hasBundle ? 7 : 6)
+  assert.equal(routes.length, hasBundle ? 8 : 7)
   assert.equal(ctx._collected.commands.length, 1)
   assert.equal(ctx._collected.commands[0].name, 'ctf-status')
 })
@@ -760,17 +768,29 @@ test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 
   assert.equal(state.ok, true)
   assert.equal(state.generatedAt, '2026-09-29T05:02:45.143Z')
   assert.deepEqual(state.connection, { key: TEAM_CONN_KEY, label: '数信杯测试赛' })
-  assert.deepEqual(Object.keys(state).sort(), ['connection', 'counts', 'generatedAt', 'members', 'messages', 'ok', 'tasks'])
+  assert.deepEqual(Object.keys(state).sort(), ['connection', 'counts', 'generatedAt', 'members', 'messages', 'ok', 'runtime', 'tasks', 'tokenUsage'])
 
   // ── members：listMembers 透传 + work/description 映射出题目
   assert.equal(state.members.length, 3)
   for (const member of state.members) {
-    assert.deepEqual(Object.keys(member).sort(), ['category', 'challengeId', 'challengeName', 'description', 'name', 'role', 'status'])
+    assert.deepEqual(
+      Object.keys(member).sort(),
+      ['category', 'challengeId', 'challengeName', 'currentAction', 'description', 'lastActivityAt', 'name', 'role', 'staleSeconds', 'status'],
+      '成员多出 currentAction / lastActivityAt / staleSeconds —— task-30 的「agent 在干啥 + 多久没动」',
+    )
   }
-  assert.deepEqual(state.members[0], {
-    name: 'lead', role: 'lead', status: 'running', description: '',
-    challengeId: null, challengeName: null, category: null,
-  })
+  const lead = state.members[0]
+  assert.deepEqual(
+    { ...lead, currentAction: undefined, lastActivityAt: undefined, staleSeconds: undefined },
+    {
+      name: 'lead', role: 'lead', status: 'running', description: '',
+      challengeId: null, challengeName: null, category: null,
+      currentAction: undefined, lastActivityAt: undefined, staleSeconds: undefined,
+    },
+  )
+  // 活动信息（task-30）：lead 收到过一条团队消息 → 有 lastActivityAt 与动作描述
+  assert.equal(typeof lead.lastActivityAt, 'string')
+  assert.match(lead.currentAction, /消息|暂无活动记录/)
   const solver = state.members[1]
   assert.equal(solver.name, 'solver-neurosign-1')
   assert.equal(solver.role, 'teammate')
@@ -780,10 +800,18 @@ test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 
   assert.equal(solver.challengeName, 'NeuroSign')
   assert.equal(solver.category, 'Crypto')
   // 没有 work 记录 + 没有 description → 一律 null，不崩
-  assert.deepEqual(state.members[2], {
-    name: 'solver-web-2', role: 'teammate', status: 'inactive', description: '',
-    challengeId: null, challengeName: null, category: null,
-  })
+  const idle = state.members[2]
+  assert.deepEqual(
+    { ...idle, currentAction: undefined, lastActivityAt: undefined, staleSeconds: undefined },
+    {
+      name: 'solver-web-2', role: 'teammate', status: 'inactive', description: '',
+      challengeId: null, challengeName: null, category: null,
+      currentAction: undefined, lastActivityAt: undefined, staleSeconds: undefined,
+    },
+  )
+  // 完全没有活动记录时如实标注，不编时间
+  assert.equal(idle.lastActivityAt, null)
+  assert.equal(idle.currentAction, '暂无活动记录')
 
   // ── tasks
   assert.equal(state.tasks.length, 2)
@@ -978,7 +1006,7 @@ test('buildReportsState：按 store 记录列出本地 WP，文件不存在则�
   assert.equal(state.writeups.length, 2, '文件不存在的记录要跳过')
 
   const byId = Object.fromEntries(state.writeups.map((w) => [w.challengeId, w]))
-  assert.deepEqual(Object.keys(byId[1]).sort(), ['absPath', 'bytes', 'category', 'challengeId', 'challengeName', 'modifiedAt', 'path', 'submitted'])
+  assert.deepEqual(Object.keys(byId[1]).sort(), ['absPath', 'bodyChars', 'bodyPreview', 'bytes', 'category', 'challengeId', 'challengeName', 'modifiedAt', 'path', 'submitted'])
   assert.equal(byId[1].challengeName, 'NeuroSign')
   assert.equal(byId[1].category, 'Crypto')
   assert.equal(byId[1].absPath, existing)
@@ -1482,4 +1510,303 @@ test('createResolveAdapter：同平台 cookie 回退走真实 store（切赛事�
   assert.equal(connection.cookie, 'sessionid=platform-level', 'Cookie 来自同平台的 store 连接')
   assert.equal(connection.cookieFrom, '同平台连接 lingxu:h:8000:4')
   assert.equal(seen[0].cookie, 'sessionid=platform-level', '适配器真的拿到了可用 cookie')
+})
+
+// ══════════════════════════════════════════════ task-33：面板缓存 / 单飞 / 写入穿透
+// 背景：悬浮面板 + CTF 视图各自 5s 轮询，每次快照打 6 次平台 → ~140 请求/分钟
+// → 平台把会话打爆（403「未登录」）→ 全队掉线。
+
+test('createPanelSnapshotCache：TTL 内命中缓存，过期后重新拉取（minRefreshMs=0 的纯 TTL 语义）', async () => {
+  let nowMs = 1_000_000
+  let loads = 0
+  const cache = createPanelSnapshotCache({ ttlMs: 4000, minRefreshMs: 0, now: () => nowMs })
+  const loader = async () => { loads += 1; return { ok: true, n: loads } }
+
+  const first = await cache.load('k', loader, 'w0')
+  assert.equal(first.fromCache, false)
+  assert.equal(first.shared, false)
+  assert.equal(typeof first.cachedAt, 'string')
+  assert.equal(loads, 1)
+
+  nowMs += 1000 // TTL 内
+  const second = await cache.load('k', loader, 'w0')
+  assert.equal(loads, 1, 'TTL 内不得再打平台')
+  assert.equal(second.fromCache, true)
+  assert.equal(second.cachedAt, first.cachedAt)
+
+  nowMs += 4000 // 超过 TTL
+  const third = await cache.load('k', loader, 'w0')
+  assert.equal(loads, 2, '过期后必须重新拉取')
+  assert.equal(third.fromCache, false)
+  assert.equal(cache.stats.hits, 1)
+  assert.equal(cache.stats.misses, 2)
+})
+
+test('createPanelSnapshotCache：单飞 —— 并发 5 个请求只打一次平台', async () => {
+  let loads = 0
+  const cache = createPanelSnapshotCache({ ttlMs: 4000 })
+  const loader = async () => {
+    loads += 1
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    return { ok: true, n: loads }
+  }
+  const results = await Promise.all(Array.from({ length: 5 }, () => cache.load('same-key', loader, 'w0')))
+  assert.equal(loads, 1, '并发请求必须共享同一次平台拉取')
+  assert.equal(cache.stats.shared, 4, '后到 4 个标记为 shared')
+  assert.equal(results[0].shared, false)
+  assert.equal(results[1].shared, true)
+  assert.ok(results.every((r) => r.n === 1))
+})
+
+test('createPanelSnapshotCache：刷新下限 —— TTL 过期但未到下限时给 stale 数据，不打平台', async () => {
+  let nowMs = 0
+  let loads = 0
+  const cache = createPanelSnapshotCache({ ttlMs: 4000, minRefreshMs: 15000, now: () => nowMs })
+  const loader = async () => { loads += 1; return { ok: true, n: loads } }
+
+  await cache.load('k', loader, 'w0')
+  assert.equal(loads, 1)
+
+  nowMs = 5000 // 刚过 TTL，但远没到 15s 刷新下限
+  const stale = await cache.load('k', loader, 'w0')
+  assert.equal(loads, 1, '刷新下限内不得打平台')
+  assert.equal(stale.fromCache, true)
+  assert.equal(stale.stale, true, '必须如实标记「这是旧数据」')
+
+  nowMs = 15001 // 到下限
+  const fresh = await cache.load('k', loader, 'w0')
+  assert.equal(loads, 2, '到刷新下限后必须重新拉取')
+  assert.equal(fresh.fromCache, false)
+  assert.equal(fresh.stale, false)
+  assert.equal(cache.stats.staleHits, 1)
+})
+
+test('createPanelSnapshotCache：★ loud 写操作穿透刷新下限（交 flag 面板马上变），且受 5s 冷却约束', async () => {
+  let nowMs = 0
+  let loads = 0
+  const cache = createPanelSnapshotCache({
+    ttlMs: 4000,
+    minRefreshMs: 60_000,
+    loudCooldownMs: 5000,
+    now: () => nowMs,
+  })
+  const loader = async () => { loads += 1; return { ok: true, n: loads } }
+
+  await cache.load('k', loader, 'w0', { loudRevision: 0 })
+  nowMs = 5000
+
+  // 普通写入（agent 的 work 记录更新）：只标脏，不打平台
+  const quiet = await cache.load('k', loader, 'w1', { loudRevision: 0 })
+  assert.equal(loads, 1, '普通写入不穿透（否则 8 个 agent 会把平台打爆）')
+  assert.equal(quiet.stale, true)
+
+  // 用户可见写入（ctf_submit_flag / ctf_connect）：立即穿透
+  const loud = await cache.load('k', loader, 'w2', { loudRevision: 1 })
+  assert.equal(loads, 2, 'loud 写操作必须立即重新拉取')
+  assert.equal(loud.fromCache, false)
+  assert.equal(loud.stale, false)
+  assert.equal(cache.stats.loudRefreshes, 1)
+
+  // 冷却期内再来一次 loud：不重复打平台（把放大上限压住）
+  nowMs = 6000
+  const burst = await cache.load('k', loader, 'w3', { loudRevision: 2 })
+  assert.equal(loads, 2, '5s 冷却内的连续 loud 不得再打平台')
+  assert.equal(burst.stale, true)
+
+  // 冷却过后恢复立即穿透
+  nowMs = 11000
+  await cache.load('k', loader, 'w4', { loudRevision: 3 })
+  assert.equal(loads, 3, '冷却结束后 loud 可再次穿透')
+})
+
+test('★ createPanelSnapshotCache：每分钟刷新硬上限（数学上保证 ≤30 次平台请求/分钟）', async () => {
+  let nowMs = 0
+  let loads = 0
+  const cache = createPanelSnapshotCache({
+    ttlMs: 0,
+    minRefreshMs: 0,
+    loudCooldownMs: 0,
+    maxRefreshesPerMinute: 4,
+    now: () => nowMs,
+  })
+  const loader = async () => { loads += 1; return { ok: true, n: loads } }
+
+  // 疯狂轮询 60 秒：每 1 秒一次，共 60 次
+  for (let t = 0; t < 60_000; t += 1000) {
+    nowMs = t
+    await cache.load('k', loader, 'w0')
+  }
+  assert.equal(loads, 4, `一圈最多 4 次刷新（=24 次 HTTP），实测 ${loads}`)
+  assert.equal(cache.refreshesInWindow(59_000), 4)
+  assert.ok(cache.stats.budgetBlocked >= 50, '其余请求被预算挡住并拿到 stale')
+
+  // 滚出窗口后额度恢复
+  nowMs = 61_000
+  await cache.load('k', loader, 'w0')
+  assert.equal(loads, 5, '窗口滚动后恢复刷新')
+})
+
+test('PANEL_PLATFORM_REFRESH_MS / PANEL_LOUD_COOLDOWN_MS / PANEL_MAX_REFRESHES_PER_MINUTE：流量与响应性的折中值', () => {
+  // 单快照 = 6 次平台请求；20s 下限 → 纯轮询 ≤24 次/分钟（验收要求 ≤30）
+  assert.ok(PANEL_PLATFORM_REFRESH_MS >= 15000, `实测 ${PANEL_PLATFORM_REFRESH_MS}`)
+  assert.ok(PANEL_LOUD_COOLDOWN_MS >= 1000 && PANEL_LOUD_COOLDOWN_MS <= 10000, `实测 ${PANEL_LOUD_COOLDOWN_MS}`)
+  // 4 次刷新 × 6 次 HTTP = 24 ≤ 30（留出边界余量）
+  assert.ok(PANEL_MAX_REFRESHES_PER_MINUTE * 6 <= 30, `实测 ${PANEL_MAX_REFRESHES_PER_MINUTE}`)
+})
+
+test('instrumentStoreWrites：原地包装 save()，幂等且不改对象身份', async () => {
+  const store = new CtfStore({ dir: await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-probe-')) })
+  const originalSave = store.save
+  const probe = instrumentStoreWrites(store)
+  assert.equal(probe.instrumented, true)
+  assert.notEqual(store.save, originalSave, '包装了 save')
+  assert.equal(instrumentStoreWrites(store), probe, '重复调用返回同一探针（幂等）')
+
+  const before = probe.revision
+  await store.save()
+  assert.equal(probe.revision, before + 1, '每次 save 自增')
+  assert.equal(panelRevisionOf(store, probe), `w${probe.revision}`)
+
+  // 没有 save() 的替身：退化为 updatedAt 指纹，不抛错
+  const fake = { state: { updatedAt: 'T1' } }
+  const fakeProbe = instrumentStoreWrites(fake)
+  assert.equal(fakeProbe.instrumented, false)
+  assert.equal(panelRevisionOf(fake, fakeProbe), 'tT1')
+})
+
+/** 面板快照用的平台 mock：按路径返回最小可用数据，并统计请求次数。 */
+function panelFetchMock({ delayMs = 0 } = {}) {
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const raw = String(url)
+    const json0 = (body) => ({
+      status: 200,
+      ok: true,
+      async text() { return JSON.stringify(body) },
+      async json() { return body },
+      async arrayBuffer() { return new ArrayBuffer(0) },
+    })
+    // 别的用例/插件后台遗留的调用（例如真实平台连接）不归本 mock 管，也不计入统计
+    if (!raw.startsWith('https://panel.test:8000')) return json0({})
+    const pathname = raw.replace('https://panel.test:8000', '')
+    calls.push(pathname)
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+    const json = (body) => ({
+      status: 200,
+      ok: true,
+      async text() { return JSON.stringify(body) },
+      async json() { return body },
+      async arrayBuffer() { return new ArrayBuffer(0) },
+    })
+    if (pathname === '/event/4/info/') {
+      return json({ status: 0, start_seconds: 0, end_seconds: 3600, user: { username: 'xiyi', number: 'lx_1' }, test_type: { 2: { name: 'CTF', size: 1 } }, punish: false })
+    }
+    if (pathname === '/event/4/') return json({ name: '面板缓存测试赛', start_time: 'a', end_time: 'b' })
+    if (pathname.startsWith('/event/4/ctf/') && pathname.includes('?')) {
+      return json({ count: 1, next: null, results: [{ id: 1, name: 'A', classify: 'Web', score: 100, is_parse: false, parse_count: 0, is_begin: false }] })
+    }
+    if (pathname.startsWith('/event/4/ctf/') && pathname.endsWith('/flag/')) return json({ status: 1 })
+    if (pathname.startsWith('/event/4/user/rank/')) {
+      return json({ count: 1, results: [{ id: 2, username: 'xiyi', score: 0, ctf_score: 0, test_score: 0, parse_count: 0, is_self: true }] })
+    }
+    if (pathname === '/event/4/test/') return json([])
+    if (pathname.startsWith('/event/4/ctf/')) return json({ count: 0, next: null, results: [] })
+    return json({})
+  }
+  return { calls, restore: () => { globalThis.fetch = original } }
+}
+
+test('★ GET /lingxu-ctf/state：TTL 缓存 + 单飞（并发 5 个请求只打一次平台）', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-panel-'))
+  process.env.DSH_HOME = dir
+  // 给平台响应加 5ms 延迟：让 5 个并发请求真的**重叠**，才能验证单飞（否则它们会串行命中 TTL 缓存）
+  const platform = panelFetchMock({ delayMs: 5 })
+  const ctx = mockCtx()
+  try {
+    apply(ctx, { baseUrl: 'https://panel.test:8000', eventId: 4, cookie: 'sessionid=panel-test', workDir: dir })
+    const route = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/state')
+    assert.ok(route, 'state 路由必须注册')
+
+    const responses = await Promise.all(Array.from({ length: 5 }, () => callRoute(route, { url: '/lingxu-ctf/state' })))
+    const payloads = responses.map((r) => JSON.parse(r.body))
+    const platformCalls = platform.calls.length
+    assert.ok(platformCalls > 0, '首次必须真打平台')
+    assert.ok(platformCalls <= 8, `5 个并发请求只应打一次平台快照（≤8 次 HTTP），实测 ${platformCalls}`)
+    const owners = payloads.filter((p) => p.fromCache === false && p.shared === false)
+    const joined = payloads.filter((p) => p.shared === true)
+    assert.equal(owners.length, 1, '只有一个是真正的拉取者')
+    assert.equal(joined.length, 4, '后到 4 个共享同一次拉取（单飞）')
+    assert.ok(payloads.every((p) => typeof p.cachedAt === 'string'))
+
+    // TTL 内的第二次：完全命中缓存，不再打平台
+    const again = JSON.parse((await callRoute(route, { url: '/lingxu-ctf/state' })).body)
+    assert.equal(platform.calls.length, platformCalls, 'TTL 内不得再打平台')
+    assert.equal(again.fromCache, true)
+  } finally {
+    platform.restore()
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+test('★ 缓存穿透：写操作（ctf_submit_flag 落审计）后，面板必须重新拉取', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-panel-w-'))
+  process.env.DSH_HOME = dir
+  const platform = panelFetchMock()
+  const ctx = mockCtx()
+  try {
+    apply(ctx, { baseUrl: 'https://panel.test:8000', eventId: 4, cookie: 'sessionid=panel-test', workDir: dir })
+    const route = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/state')
+    await callRoute(route, { url: '/lingxu-ctf/state' })
+    const afterFirst = platform.calls.length
+
+    // TTL 内直接命中
+    const cached = JSON.parse((await callRoute(route, { url: '/lingxu-ctf/state' })).body)
+    assert.equal(cached.fromCache, true)
+    assert.equal(platform.calls.length, afterFirst)
+
+    // 真调 ctf_submit_flag（走真实 store.recordSubmission → save → revision 自增）
+    const submit = ctx._collected.tools.find((t) => t.name === 'ctf_submit_flag')
+    const submitText = await submit.execute({ id: 1, flag: 'flag{panel-cache}' }, {})
+    assert.match(submitText, /flag 正确/)
+
+    const refreshed = JSON.parse((await callRoute(route, { url: '/lingxu-ctf/state' })).body)
+    assert.equal(refreshed.fromCache, false, '写操作后不得返回旧缓存')
+    assert.ok(platform.calls.length > afterFirst, '写操作后必须重新拉平台')
+  } finally {
+    platform.restore()
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+test('GET /lingxu-ctf/diag：暴露限流与面板缓存计数', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-diag-'))
+  process.env.DSH_HOME = dir
+  const platform = panelFetchMock()
+  const ctx = mockCtx()
+  try {
+    apply(ctx, { baseUrl: 'https://panel.test:8000', eventId: 4, cookie: 'sessionid=panel-test', workDir: dir })
+    const state = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/state')
+    await callRoute(state, { url: '/lingxu-ctf/state' })
+
+    const diagRes = await callRoute(ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/diag'), { url: '/lingxu-ctf/diag' })
+    const body = JSON.parse(diagRes.body)
+    assert.equal(body.ok, true)
+    assert.ok(Array.isArray(body.rateLimit), 'diag.rateLimit 应是数组')
+    const entry = body.rateLimit.find((row) => row.host === 'https://panel.test:8000')
+    assert.ok(entry, '应有该 host 的限流计数')
+    assert.ok(entry.sent >= 1, '已发出请求数')
+    assert.equal(typeof entry.queued, 'number')
+    assert.equal(typeof entry.inFlight, 'number')
+    assert.ok(body.panelCache && typeof body.panelCache === 'object')
+    assert.ok(body.panelCache.misses >= 1, '至少一次未命中')
+    assert.equal(typeof body.panelCache.ttlMs, 'number')
+  } finally {
+    platform.restore()
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+test('PANEL_CACHE_TTL_MS：略小于前端 5 秒轮询', () => {
+  assert.ok(PANEL_CACHE_TTL_MS >= 3000 && PANEL_CACHE_TTL_MS <= 5000, `实测 ${PANEL_CACHE_TTL_MS}`)
 })

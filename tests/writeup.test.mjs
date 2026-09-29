@@ -117,10 +117,17 @@ test('slugify：与 lib/index.js 的规则逐字一致（跨模块契约）', ()
   }
 })
 
-test('resolveWorkDir：未配置时回退到 cwd/lingxu-ctf-work', () => {
+test('resolveWorkDir：绝不用 process.cwd()（插件进程 cwd 是 DSH profile 目录）', () => {
+  // ① 显式配置（绝对路径原样）
   assert.equal(resolveWorkDir({ workDir: '/tmp/custom' }), '/tmp/custom')
-  assert.equal(resolveWorkDir({}), path.join(process.cwd(), 'lingxu-ctf-work'))
-  assert.equal(resolveWorkDir(), path.join(process.cwd(), 'lingxu-ctf-work'))
+  // ① 相对配置 → 按会话 cwd（hint）解析
+  assert.equal(resolveWorkDir({ workDir: 'my-work' }, '/tmp/session'), path.join('/tmp/session', 'my-work'))
+  // ② 有会话 cwd → <会话 cwd>/lingxu-ctf-work
+  assert.equal(resolveWorkDir({}, '/tmp/session'), path.join('/tmp/session', 'lingxu-ctf-work'))
+  // ③ 都没有 → 家目录兜底（调用方会警告用户），**不是 process.cwd()**
+  const fallback = resolveWorkDir({})
+  assert.equal(fallback, path.join(os.homedir(), 'lingxu-ctf-work'))
+  assert.notEqual(fallback, path.join(process.cwd(), 'lingxu-ctf-work'), 'task-31：不能落到插件进程目录')
 })
 
 // ------------------------------------------------------------------ generate

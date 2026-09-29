@@ -2473,3 +2473,41 @@ test('Agent 池：离线准备槽单独显示（不写 teammate，但别显示�
   assert.match(report, /### 🧩 Agent 池（1 槽：活跃 0 \/ 闲置可复用 0 \/ 占用不可挪 0 \/ 准备槽 1）/)
   assert.match(report, /- prep-ready-7：🌙 准备槽（#7 prep-target 等环境配额/)
 })
+
+// ---------------------------------------------------------------- 工作区路径（task-31 ③）
+
+test('start：workDir 用会话 cwd 的绝对路径（teammate prompt 里也是绝对路径）', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const flat = [makeChallenge({ id: 1, name: 'c-1', score: 100 })]
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({ challenges: flat, teams, config: { concurrency: 1 } })
+
+  const sessionDir = '/Users/someone/Desktop/我的比赛/lingxu-ctf-work'
+  await orchestrator.start({ __agent: AGENT, workDir: sessionDir })
+  const prompt = calls.spawn[0].request.prompt.map((b) => b.text).join('\n')
+  assert.match(prompt, new RegExp(`${sessionDir}/challenges/c-1-1`), 'prompt 里必须是绝对路径')
+  assert.doesNotMatch(prompt, /工作目录：lingxu-ctf-work\//, '不能再出现相对路径（会写到 teammate 自己的 cwd）')
+  assert.match(prompt, new RegExp(`只允许在这里写文件`))
+})
+
+test('PREP.md 检测也跟着 workDir 走（会话目录里有 PREP.md 才算「已就绪」）', async () => {
+  const workDir = await makeTmpDir()
+  const challenge = makeChallenge({ id: 1300, name: 'ready-one', score: 100 })
+  await fsp.mkdir(path.join(workDir, 'challenges', 'ready-one-1300'), { recursive: true })
+  await fsp.writeFile(path.join(workDir, 'challenges', 'ready-one-1300', 'PREP.md'), '# P0\n', 'utf8')
+
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const details = detailsFor([[1300, 1]])
+  const store = await makeStore()
+  // 环境配额被别的题占满（envLimit=1 → 本轮配额 0），这样「已就绪」才会走等待分支
+  await store.upsertChallengeWork(CONNECTION.key, '9999', {
+    envStarted: true, envReleased: false, connectionInfo: 'nc 1.1.1.1 1',
+  })
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [challenge], teams, store, details, config: { concurrency: 2, envLimit: 1 },
+  })
+  const summary = await orchestrator.start({ __agent: AGENT, workDir })
+  assert.equal(calls.spawn.length, 0, '已有 PREP.md（在会话 workDir 下）→ 不再派准备 agent')
+  assert.match(summary, /就绪待环境（1 题/)
+})
