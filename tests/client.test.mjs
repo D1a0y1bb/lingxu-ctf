@@ -73,6 +73,8 @@ function createDom() {
       },
       setAttribute(key, value) { this.attrs[key] = String(value) },
       getAttribute(key) { return key in this.attrs ? this.attrs[key] : null },
+      removeAttribute(key) { delete this.attrs[key] },
+      hasAttribute(key) { return key in this.attrs },
       addEventListener(type, fn) {
         this._listeners[type] = (this._listeners[type] || []).concat(fn)
       },
@@ -2750,4 +2752,39 @@ test('watchFloatingPanel：显式开关或 watchFloating=false 时不轮询', as
   await new Promise((r) => setTimeout(r, 50))
   assert.equal(calls, 0, '显式指定开关或禁用 watch 时不应发起轮询请求')
   off1(); off2(); off3()
+})
+
+test('视图模式隐藏输入框：CSS 用宿主的稳定属性 data-composer-seat', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  // 必须用 data-composer-seat（稳定 data 属性），不能用带构建哈希的 className
+  assert.match(css, /body\[data-lx-view='on'\]\s*\[data-composer-seat\]\{display:none;\}/)
+  // 不能误伤：隐藏规则必须**且只能**挂在 body[data-lx-view='on'] 前缀下，
+  // 否则正常聊天（标记未挂）也会把输入框藏掉。
+  const hits = css.match(/[^{}]*\[data-composer-seat\]\{display:none;\}/g) || []
+  assert.equal(hits.length, 1, `应只有一条隐藏规则，实际 ${hits.length}`)
+  assert.match(hits[0], /body\[data-lx-view='on'\]/, '隐藏规则必须带 body[data-lx-view=\'on\'] 前缀')
+})
+
+test('watchViewVisibility：按实际可见性挂/摘 body 标记', async () => {
+  const dom = createDom()
+  const { api } = await loadClientModule()
+  const body = dom.document.body
+
+  // 不可见的宿主（getClientRects 为空）
+  const hidden = { getClientRects: () => [] }
+  const stop1 = api.watchViewVisibility(hidden, dom.document)
+  assert.equal(body.getAttribute('data-lx-view'), null, '不可见时不应挂标记')
+  stop1()
+
+  // 可见的宿主
+  const visible = { getClientRects: () => [{ width: 10, height: 10 }] }
+  const stop2 = api.watchViewVisibility(visible, dom.document)
+  assert.equal(body.getAttribute('data-lx-view'), 'on', '可见时应挂标记')
+  stop2()
+  assert.equal(body.getAttribute('data-lx-view'), null, '停止跟踪后应摘掉标记')
+
+  // 脏输入不能抛
+  assert.doesNotThrow(() => api.watchViewVisibility(null, dom.document)())
+  assert.doesNotThrow(() => { const s = api.watchViewVisibility({ getClientRects: () => { throw new Error('x') } }, dom.document); s() })
 })
