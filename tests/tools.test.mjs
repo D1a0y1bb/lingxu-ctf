@@ -2195,3 +2195,17 @@ test('ctf_solve_start / ctf_solve_status 的描述写清 teammate 上限的来�
   const status = tools.ctf_solve_status.description
   assert.match(status, /成员 N\/M（上限来源：运行时配置 maxMembers \/ 报错自学习 \/ 默认值）/)
 })
+
+test('ctf_solve_start / ctf_solve_status 的描述写清 Agent 池（复用闲置槽）', () => {
+  const { tools } = createHarness()
+  const start = tools.ctf_solve_start.description
+  assert.match(start, /Agent 池/)
+  assert.match(start, /可复用的执行槽/)
+  assert.match(start, /累计且不可回收/)
+  assert.match(start, /峰值并发/)
+  assert.match(start, /reuseAgents=false/)
+  assert.match(start, /完全忽略/)
+  const status = tools.ctf_solve_status.description
+  assert.match(status, /Agent 池/)
+  assert.match(status, /闲置可复用/)
+})

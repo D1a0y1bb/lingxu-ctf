@@ -25,11 +25,13 @@ import {
   parseMemberDescription,
   parseTaskSubject,
   pathSlug,
+  collectReusableSlots,
   parseMemberLimit,
   prepFileFor,
   resolveMaxTeamMembers,
   scoreChallenge,
   solverDirFor,
+  takeSlotFor,
   sanitizeSlug,
   probeSession,
   selectChallenges,
@@ -73,7 +75,9 @@ function makeChallenge(overrides = {}) {
 }
 
 function makeTeams({ members = [], spawnImpl = null, createTaskImpl = null } = {}) {
-  const calls = { spawn: [], createTask: [], listTasks: 0, listMembers: 0, interrupt: [], updateTask: [] }
+  const calls = {
+    spawn: [], createTask: [], listTasks: 0, listMembers: 0, interrupt: [], updateTask: [], sendMessage: [],
+  }
   const taskList = []
   let seq = 0
   const teams = {
@@ -118,7 +122,8 @@ function makeTeams({ members = [], spawnImpl = null, createTaskImpl = null } = {
       return { previousStatus: 'running' }
     },
     async sendMessage(caller, request) {
-      return { id: 'msg-1', caller, request }
+      calls.sendMessage.push({ caller, request })
+      return { id: `msg-${calls.sendMessage.length}`, caller, request }
     },
   }
   return { teams, calls, taskList }
@@ -159,9 +164,11 @@ async function makeOrchestrator({
   resolveError = null,
   details = null,
   existsSync = null,
+  maxMembersOverride = null,
 } = {}) {
   const { adapter, calls } = makeAdapter(challenges, { releaseImpl, details })
   const resolved = { fail: Boolean(resolveError) }
+  if (maxMembersOverride != null && teams) teams.config = { maxMembers: maxMembersOverride }
   const deps = {
     config: { concurrency: 4, ...config },
     teams,
@@ -552,7 +559,7 @@ test('start：建任务 + 按 concurrency 拉起 agent + 摘要', async () => {
   // 摘要
   assert.match(summary, /编排已启动/)
   assert.match(summary, /新建 4 个任务/)
-  assert.match(summary, /本轮拉起 2 个/)
+  assert.match(summary, /本轮分配 2 个（♻️ 复用 0 \/ 🆕 新建 2）/)
   assert.match(summary, /solver-pwn-hard-2/)
   assert.match(summary, /排队中（2 题/)
   assert.match(summary, /环境调度：同时最多 2 个环境/)
@@ -797,7 +804,7 @@ test('start：已有 teammate 在跑时按并发总量扣减', async () => {
   })
   const summary = await orchestrator.start({ __agent: AGENT })
   assert.equal(calls.spawn.length, 1, '已有 2 个在跑 → 本轮只能再起 1 个')
-  assert.match(summary, /本轮拉起 1 个/)
+  assert.match(summary, /本轮分配 1 个（♻️ 复用 0 \/ 🆕 新建 1）/)
 })
 
 test('start：没有符合条件的题目 → 不建任务不起 agent', async () => {
@@ -2149,4 +2156,320 @@ test('ctf_solve_status：显示成员 N/M 与上限来源', async () => {
   const fallback = await makeOrchestrator({ challenges: [], teams: plain.teams, config: { concurrency: 4 } })
   const fallbackReport = await fallback.orchestrator.status({ __agent: AGENT })
   assert.match(fallbackReport, /上限 16（来源：默认值）/)
+})
+
+// ---------------------------------------------------------------- Agent 池：复用闲置槽（task-23）
+//
+// 为什么必须复用：DSH 的 roster 是 **append-only + 累计计数**
+// （README：「maxMembers = 一支团队最多可**曾创建过**的 teammate 数，含失败的」；
+//   roster.js: `state.members.length >= maxMembers` 判定，`ctf_solve_stop` 也不会释放名额）。
+// 算一笔账：**78 道题、不复用 = 需要 78 个名额**；复用闲置槽后 roster 增长 ≈ **峰值并发**（concurrency 4~8 个），
+// 32 个名额也就够跑完整场比赛（不复用的话 32 个名额在 32 道题后就必然撞墙）。
+
+/** 造一批「有闲置槽」的 mock：lead + N 个 inactive teammate，各自名下有一道**已解**的题。 */
+function makePoolMembers({ idle = 0, running = 0, failed = 0, busyInactive = 0, startId = 900 } = {}) {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const assignments = []
+  let id = startId
+  for (let i = 0; i < idle; i += 1) {
+    const name = `solver-idle-${i}`
+    members.push({ name, role: 'teammate', status: 'inactive' })
+    assignments.push({ name, challengeId: String(id), solved: true })
+    id += 1
+  }
+  for (let i = 0; i < running; i += 1) {
+    const name = `solver-run-${i}`
+    members.push({ name, role: 'teammate', status: 'running' })
+    assignments.push({ name, challengeId: String(id), solved: false })
+    id += 1
+  }
+  for (let i = 0; i < failed; i += 1) {
+    const name = `solver-failed-${i}`
+    members.push({ name, role: 'teammate', status: 'failed' })
+    assignments.push({ name, challengeId: String(id), solved: true })
+    id += 1
+  }
+  // inactive 但原题**没结束**（例如正在等环境配额）→ 绝不能挪用
+  for (let i = 0; i < busyInactive; i += 1) {
+    const name = `solver-waiting-${i}`
+    members.push({ name, role: 'teammate', status: 'inactive' })
+    assignments.push({ name, challengeId: String(id), solved: false })
+    id += 1
+  }
+  return { members, assignments }
+}
+
+/** 把 mock 成员的「名下题目」写进 work 记录，并让平台列表带上「已解」标记。 */
+async function seedPool({ store, assignments, extraChallenges = [] }) {
+  const map = new Map(extraChallenges.map((c) => [String(c.id), c]))
+  for (const item of assignments) {
+    await store.upsertChallengeWork(CONNECTION.key, item.challengeId, {
+      challengeId: item.challengeId,
+      teammate: item.name,
+      status: 'solving',
+      subject: `[pwn] old-${item.challengeId} (100分)`,
+      writeScope: `lingxu-ctf-work/challenges/old-${item.challengeId}`,
+      taskType: 3,
+    })
+    if (!map.has(String(item.challengeId))) {
+      map.set(String(item.challengeId), makeChallenge({
+        id: Number(item.challengeId), name: `old-${item.challengeId}`, score: 100, solved: item.solved,
+      }))
+    }
+  }
+  return [...map.values()]
+}
+
+test('collectReusableSlots：inactive + 原题已结束 才算闲置；failed / running / 原题未结束都不算', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ idle: 2, running: 1, failed: 1, busyInactive: 1 })
+  const challenges = await seedPool({ store, assignments })
+  const work = await store.listChallengeWork(CONNECTION.key)
+  const workByChallenge = new Map(work.map((row) => [String(row.challengeId), row]))
+  const solvedIds = new Set(challenges.filter((c) => c.solved === true).map((c) => String(c.id)))
+
+  const slots = collectReusableSlots({
+    members: members.filter((m) => m.role !== 'lead'),
+    workByChallenge,
+    solvedIds,
+    completedIds: new Set(),
+  })
+  assert.deepEqual(slots.map((slot) => slot.name).sort(), ['solver-idle-0', 'solver-idle-1'])
+  assert.equal(slots[0].previousId, '900')
+  assert.equal(slots[0].category, 'pwn', '分类从 subject 的 [pwn] 前缀取（同类优先复用用）')
+
+  // 任务板 completed 也算「原题结束」
+  const completed = collectReusableSlots({
+    members: members.filter((m) => m.role !== 'lead'),
+    workByChallenge,
+    solvedIds: new Set(),
+    completedIds: new Set(assignments.map((item) => String(item.challengeId))),
+  })
+  assert.equal(completed.length, 3, '任务完成也算结束（2 个 idle + 1 个在等配额的 inactive；running/failed 仍被排除）')
+})
+
+test('Agent 池：2 个闲置槽 + 2 道新题 → spawnTeammate 0 次、sendMessage 2 次（不新建）', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ idle: 2 })
+  const oldChallenges = await seedPool({ store, assignments })
+  const fresh = [1, 2].map((id) => makeChallenge({ id, name: `new-${id}`, score: 500 - id }))
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator, adapterCalls } = await makeOrchestrator({
+    challenges: [...oldChallenges, ...fresh], teams, store, config: { concurrency: 4 },
+  })
+  const summary = await orchestrator.start({ __agent: AGENT })
+
+  assert.equal(calls.spawn.length, 0, '有闲置槽就不该新建 teammate（roster 名额要省着用）')
+  assert.equal(calls.sendMessage.length, 2, '两道题各唤醒一个闲置槽')
+  assert.deepEqual(
+    calls.sendMessage.map((call) => call.request.target).sort(),
+    ['solver-idle-0', 'solver-idle-1'],
+  )
+  // sendMessage 的服务层契约：content 是 ContentBlock[]，且必须带 signal
+  for (const call of calls.sendMessage) {
+    assert.equal(Array.isArray(call.request.content), true)
+    assert.equal(call.request.content[0].type, 'text')
+    assert.ok(call.request.signal, '缺 signal 会 TypeError（mailbox 里 AbortSignal.any）')
+  }
+  assert.match(summary, /♻️ 复用闲置槽（2 个/)
+  assert.match(summary, /本轮分配 2 个（♻️ 复用 2 \/ 🆕 新建 0）/)
+  assert.equal(adapterCalls.detail.length <= 12, true)
+})
+
+test('Agent 池：1 个闲置槽 + 2 道题 → 1 次 sendMessage + 1 次 spawn（不够才新建）', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ idle: 1 })
+  const oldChallenges = await seedPool({ store, assignments })
+  const fresh = [1, 2].map((id) => makeChallenge({ id, name: `new-${id}`, score: 500 - id }))
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [...oldChallenges, ...fresh], teams, store, config: { concurrency: 4 },
+  })
+  const summary = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.sendMessage.length, 1)
+  assert.equal(calls.spawn.length, 1)
+  assert.match(summary, /本轮分配 2 个（♻️ 复用 1 \/ 🆕 新建 1）/)
+})
+
+test('Agent 池：running 的槽不能被抢；原题未结束的 inactive 槽也不能挪用', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ running: 2, busyInactive: 2 })
+  const oldChallenges = await seedPool({ store, assignments })
+  const fresh = [1, 2].map((id) => makeChallenge({ id, name: `new-${id}`, score: 500 - id }))
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [...oldChallenges, ...fresh], teams, store, config: { concurrency: 8 },
+  })
+  const summary = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.sendMessage.length, 0, '一个槽都不能挪（running 在干活，inactive 但原题没结束）')
+  assert.equal(
+    calls.spawn.filter((call) => call.request.name.includes('new-')).length,
+    2,
+    '两道新题只能靠新建（老题那两道未解的也会各自新建）',
+  )
+  assert.match(summary, /闲置可复用 0 个/)
+})
+
+test('Agent 池：failed 成员不复用，但占名额（teamRoom 要扣掉）', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ failed: 3 })
+  const oldChallenges = await seedPool({ store, assignments })
+  const fresh = [1, 2, 3, 4].map((id) => makeChallenge({ id, name: `new-${id}`, score: 500 - id }))
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [...oldChallenges, ...fresh], teams, store,
+    config: { concurrency: 8, envLimit: 2 }, maxMembersOverride: 5,
+  })
+  const summary = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.sendMessage.length, 0, 'failed 的槽不可复用')
+  assert.equal(calls.spawn.length, 2, 'maxMembers=5、已有 3 个 failed → 只剩 2 个名额（failed 照样占名额）')
+  assert.match(summary, /roster 3\/5/)
+})
+
+test('Agent 池：换题消息第一句就要求「完全忽略」上一题（防上下文污染）+ 迁移 work 记录', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ idle: 1 })
+  const oldChallenges = await seedPool({ store, assignments })
+  const fresh = [makeChallenge({ id: 77, name: 'FreshTarget', category: 'crypto', score: 400 })]
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [...oldChallenges, ...fresh], teams, store, config: { concurrency: 2 },
+  })
+  await orchestrator.start({ __agent: AGENT })
+
+  const message = calls.sendMessage[0].request.content.map((block) => block.text).join('\n')
+  assert.match(message, /^⚠️ 你之前在做 #900（old-900）/, '第一句必须是换题声明')
+  assert.match(message, /完全忽略/)
+  assert.match(message, /重新完整读一遍/)
+  assert.match(message, /不要碰 #900/)
+  assert.match(message, /ctf_challenge id=77/)
+  assert.match(message, /challenges\/freshtarget-77\//, '产物要写进新题目录')
+  assert.match(message, /解出 CTF 题目「FreshTarget」/, '新题任务书要完整（自包含）')
+
+  // work 记录迁移：旧题标 reassignedTo 且清掉 teammate；新题记 reassignedFrom
+  const oldRecord = (await store.listChallengeWork(CONNECTION.key)).find((row) => String(row.challengeId) === '900')
+  assert.equal(oldRecord.status, 'reassigned')
+  assert.equal(oldRecord.reassignedTo, '77')
+  assert.equal(oldRecord.previousTeammate, 'solver-idle-0')
+  assert.equal(Boolean(oldRecord.teammate), false, 'teammate 要清空，否则旧题永远派不出去')
+  const newRecord = (await store.listChallengeWork(CONNECTION.key)).find((row) => String(row.challengeId) === '77')
+  assert.equal(newRecord.teammate, 'solver-idle-0')
+  assert.equal(newRecord.reassignedFrom, '900')
+  assert.equal(newRecord.status, 'solving')
+})
+
+test('Agent 池：reuseAgents=false → 退回每题新建（并提示名额会耗尽）', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ idle: 2 })
+  const oldChallenges = await seedPool({ store, assignments })
+  const fresh = [1, 2].map((id) => makeChallenge({ id, name: `new-${id}`, score: 500 - id }))
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [...oldChallenges, ...fresh], teams, store, config: { concurrency: 4, reuseAgents: false },
+  })
+  const summary = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.sendMessage.length, 0, '关掉复用就只 spawn')
+  assert.equal(calls.spawn.length, 2)
+  assert.match(summary, /reuseAgents=false/)
+  assert.match(summary, /每题新建 agent/)
+})
+
+test('ctf_solve_status：Agent 池视图（活跃 / 闲置可复用 / 占用不可挪 / failed + 当前题目）', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ idle: 1, running: 1, busyInactive: 1, failed: 1 })
+  const challenges = await seedPool({ store, assignments })
+  const { teams, taskList } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges, teams, store, config: { concurrency: 4 },
+  })
+  const report = await orchestrator.status({ __agent: AGENT })
+  assert.match(report, /### 🧩 Agent 池（4 槽：活跃 1 \/ 闲置可复用 1 \/ 占用不可挪 1 \/ failed 1）/)
+  assert.match(report, /- solver-idle-0：♻️ 闲置可复用（原 #900 old-900 已结束/)
+  assert.match(report, /- solver-run-0：🏃 活跃（当前 #901 old-901）/)
+  assert.match(report, /- solver-waiting-0：🔒 占用中（#903 old-903 未结束，不可挪用/)
+  assert.match(report, /- solver-failed-0：⛔ failed（不可复用，但仍占名额）/)
+  assert.match(report, /roster 是\*\*累计且不可回收\*\*/)
+  assert.equal(taskList.length, 0, 'status 只读，不该建任务')
+})
+
+test('Agent 池：ctf_solve_stop 中断后，槽变成「闲置可复用」（工作记录标 abandoned）', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ running: 1 })
+  const challenges = await seedPool({ store, assignments })
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, store, config: { concurrency: 4 } })
+  await orchestrator.stop({ __agent: AGENT })
+  assert.equal(calls.interrupt.length, 1, '中断了 1 个槽')
+  const record = (await store.listChallengeWork(CONNECTION.key)).find((row) => String(row.challengeId) === '900')
+  assert.equal(record.status, 'abandoned')
+  assert.equal(Boolean(record.teammate), false)
+
+  // 下一轮：这个槽已经闲置 → 直接复用到新题（不再新建）
+  // ⚠️ 真实 DSH 里 interrupt 之后成员 status 会变成 inactive；mock 不会自动改，手动同步一下
+  members[1].status = 'inactive'
+  const fresh = [makeChallenge({ id: 55, name: 'AfterStop', score: 300 })]
+  const second = makeTeams({ members })
+  const next = await makeOrchestrator({
+    challenges: [...challenges, ...fresh], teams: second.teams, store, config: { concurrency: 2 },
+  })
+  const afterStop = await next.orchestrator.start({ __agent: AGENT })
+  // 新题（300 分）优先级更高 → 复用这个刚闲置的槽；被放弃的旧题（100 分）则重新新建一个槽
+  assert.equal(second.calls.sendMessage.length, 1)
+  assert.equal(second.calls.sendMessage[0].request.target, 'solver-run-0')
+  assert.match(second.calls.sendMessage[0].request.content.map((b) => b.text).join('\n'), /完全忽略/)
+  assert.equal(second.calls.spawn.length, 1, '被放弃的题重新排队 → 新建一个槽')
+  assert.match(afterStop, /本轮分配 2 个（♻️ 复用 1 \/ 🆕 新建 1）/)
+})
+
+test('Agent 池：同一道题被中断后重新派回 → 用「重启」消息（接着旧成果，不是「忽略上一题」）', async () => {
+  const store = await makeStore()
+  const { members, assignments } = makePoolMembers({ running: 1 })
+  const challenges = await seedPool({ store, assignments })
+  const { teams } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, store, config: { concurrency: 2 } })
+  await orchestrator.stop({ __agent: AGENT })
+  members[1].status = 'inactive'
+
+  // 只留被中断的那道题（不加新题）→ 重新派回原题
+  const second = makeTeams({ members })
+  const next = await makeOrchestrator({ challenges, teams: second.teams, store, config: { concurrency: 2 } })
+  await next.orchestrator.start({ __agent: AGENT })
+  assert.equal(second.calls.spawn.length, 0)
+  assert.equal(second.calls.sendMessage.length, 1)
+  const message = second.calls.sendMessage[0].request.content.map((b) => b.text).join('\n')
+  assert.match(message, /这\*\*不是新题\*\*，是\*\*重启\*\*上一轮被中断的进度/)
+  assert.match(message, /PREP\.md/)
+  assert.doesNotMatch(message, /完全忽略/, '同一道题不能说「忽略上一题」')
+})
+
+test('Agent 池：同类优先复用（做过 Crypto 的槽优先接 Crypto 新题）', () => {
+  const slots = [
+    { name: 'solver-pwn-1', previousId: '1', category: 'Pwn' },
+    { name: 'solver-crypto-2', previousId: '2', category: 'Crypto' },
+    { name: 'solver-misc-3', previousId: '3', category: 'Misc' },
+  ]
+  const picked = takeSlotFor(slots, { id: 9, category: 'Crypto' })
+  assert.equal(picked.name, 'solver-crypto-2', '同类槽优先（上一题的领域上下文可能反而是优势）')
+  assert.equal(slots.length, 2, '取走的槽要从池里移除')
+  const fallback = takeSlotFor(slots, { id: 10, category: 'Web' })
+  assert.equal(fallback.name, 'solver-pwn-1', '没有同类 → 取第一个')
+  assert.equal(takeSlotFor([], { id: 11, category: 'Web' }), null)
+})
+
+test('Agent 池：离线准备槽单独显示（不写 teammate，但别显示成「状态未知」）', async () => {
+  const store = await makeStore()
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    { name: 'prep-ready-7', role: 'teammate', status: 'inactive' },
+  ]
+  const challenges = [makeChallenge({ id: 7, name: 'prep-target', score: 300 })]
+  await store.upsertChallengeWork(CONNECTION.key, '7', {
+    challengeId: '7', taskType: 1, status: 'prep', prepTeammate: 'prep-ready-7',
+    subject: '[Pwn] prep-target (300分)', writeScope: 'lingxu-ctf-work/challenges/prep-target-7',
+  })
+  const { teams } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, store, config: { concurrency: 4 } })
+  const report = await orchestrator.status({ __agent: AGENT })
+  assert.match(report, /### 🧩 Agent 池（1 槽：活跃 0 \/ 闲置可复用 0 \/ 占用不可挪 0 \/ 准备槽 1）/)
+  assert.match(report, /- prep-ready-7：🌙 准备槽（#7 prep-target 等环境配额/)
 })

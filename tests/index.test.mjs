@@ -450,7 +450,7 @@ test('Config schema：每个字段都标了 volatile —— 否则设置页根�
   // volatileForm 只在 schema 本身或某个字段带 meta.volatile 时才返回表单。
   // 只导出 Config 不加 volatile 的表现是「插件能跑，但设置里找不到任何配置项」。
   const fields = Object.entries(Config.dict ?? {})
-  assert.equal(fields.length, 13, `应有 13 个字段，实际 ${fields.length}`)
+  assert.equal(fields.length, 14, `应有 14 个字段，实际 ${fields.length}`)
   const notVolatile = fields.filter(([, child]) => child.meta?.volatile !== true).map(([k]) => k)
   assert.deepEqual(notVolatile, [], `这些字段缺 .volatile()，会导致设置页不显示：${notVolatile.join(', ')}`)
   // 外层 object 不能也标 volatile（schemastery 会直接抛 ValidationError）
@@ -554,9 +554,9 @@ test('默认导出必须携带 Config/inject/apply —— Loader 只认 default 
 
 // ────────────────────────────────────────────── 设置页配置读写接口
 
-test('describeConfigFields：13 个字段，含中文标签/类型/说明/secret 标记', () => {
+test('describeConfigFields：14 个字段，含中文标签/类型/说明/secret 标记', () => {
   const fields = describeConfigFields()
-  assert.equal(fields.length, 13)
+  assert.equal(fields.length, 14)
   const byKey = Object.fromEntries(fields.map((f) => [f.key, f]))
 
   assert.equal(byKey.cookie.role, 'secret')
