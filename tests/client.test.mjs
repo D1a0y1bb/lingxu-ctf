@@ -222,6 +222,9 @@ let loadSeq = 0
  *
  * 每次用不同 query，让 ESM 求值一份**全新实例**（模块级单例互不干扰）。
  */
+/** React 元素标记，供断言使用。 */
+const ELEMENT = Symbol.for('react.element')
+
 async function loadClientModule({ react = null } = {}) {
   const captured = []
   assert.ok(globalThis.window, 'loadClientModule 需要先安装 window stub')
@@ -1242,15 +1245,21 @@ test('配置卡片：没有 slots 服务时安全跳过（不抛错）', () => {
 test('配置卡片：slot 渲染 —— 有 React 给元素，无 React 退化为纯 DOM', () => {
   // 有 React：返回组件函数，调用后得到挂载点元素
   const react = {
-    createElement(type, props, ...children) { return { type, props, children } },
+    createElement(type, props, ...children) { return { $$typeof: ELEMENT, type, props, children } },
     useRef: () => ({ current: null }),
     useEffect: () => {},
   }
-  const component = renderConfigSlot({ view: 'page' }, { react, doc: createDom().document })
-  assert.equal(typeof component, 'function', '有 React 时应返回组件函数')
-  const element = component()
-  assert.equal(element.type, 'div')
-  assert.equal(element.props.className, 'lx-config-host')
+  const element = renderConfigSlot({ view: 'page' }, { react, doc: createDom().document })
+  // ⚠️ 必须返回**元素**。渲染器是 `const Comp = entry.component; renderEntry(..., Comp, ...)`，
+  // React 直接调用 slot 函数并把返回值当 React child；返回函数会抛
+  // "Functions are not valid as a React child" → SlotErrorBoundary 捕获 →
+  // reportEntryError({abdicate:true}) → 该 key 被退休 → 只剩空的 <div data-slot-error>。
+  assert.notEqual(typeof element, 'function', '不能返回组件函数')
+  assert.equal(element && element.$$typeof, ELEMENT, '必须返回 React 元素')
+  assert.equal(typeof element.type, 'function')
+  const inner = element.type({})
+  assert.equal(inner.type, 'div')
+  assert.equal(inner.props.className, 'lx-config-host')
 
   // 无 React：直接给纯 DOM 节点
   const dom = createDom()
@@ -1293,4 +1302,69 @@ test('apply(ctx)：同时注册配置卡片与浮动面板', () => {
   } finally {
     env.restore()
   }
+})
+
+// ────────────────────────────────────────────── 配置卡片必须返回 React 元素
+
+test('renderConfigSlot(page) 必须返回 React 元素，而不是组件函数', async () => {
+  // 渲染器是 `const Comp = entry.component; renderEntry(slotKey, Comp, ...)`：
+  // React 直接调用 slot 函数，把返回值当 React child。
+  // 返回函数会抛 "Functions are not valid as a React child" →
+  // SlotErrorBoundary 捕获 → reportEntryError({abdicate:true}) → 该 key 被退休 →
+  // 只剩一个空的 <div data-slot-error>（表现为一段空白，卡片永不出现）。
+  const { api } = await loadClientModule()
+  const created = []
+  const react = {
+    createElement(type, props, ...children) {
+      created.push({ type, props })
+      return { $$typeof: ELEMENT, type, props: props ?? {}, children }
+    },
+    useRef: () => ({ current: null }),
+    useEffect: () => {},
+  }
+
+  const out = api.renderConfigSlot({ view: 'page' }, { react })
+
+  assert.notEqual(typeof out, 'function', '不能返回组件函数')
+  assert.equal(out && out.$$typeof, ELEMENT, '必须返回 React 元素')
+  assert.equal(typeof out.type, 'function', '元素类型应是我们的组件函数')
+
+  // 真正被 React 调用的是元素 type，调用后必须仍返回元素（不是函数/DOM）
+  const rendered = out.type({})
+  assert.equal(rendered && rendered.$$typeof, ELEMENT, '组件调用后也必须返回元素')
+  assert.equal(rendered.type, 'div')
+  assert.equal(rendered.props.className, 'lx-config-host')
+})
+
+test('renderConfigSlot(summary) 返回字符串（React 可直接渲染）', async () => {
+  const { api } = await loadClientModule()
+  const out = api.renderConfigSlot({ view: 'summary' }, {})
+  assert.equal(typeof out, 'string')
+  assert.equal(out.length > 0, true)
+})
+
+test('CSS 作用域：面板布局不得泄漏到配置卡片上', async () => {
+  // 卡片渲染在插件页里（不在 #lingxu-ctf-panel 内）。
+  // 若面板的 position:fixed 等布局声明与主题变量同处 `#panel,.lx-config{}`，
+  // 卡片会变成右下角浮层、布局全乱（用户看到的「CSS 丢失」）。
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+
+  // 主题变量块允许同时作用于面板与卡片
+  assert.match(css, /#lingxu-ctf-panel,\.lx-config\{/)
+  // 但 position:fixed 只能出现在 #lingxu-ctf-panel 块里
+  const fixedBlocks = [...css.matchAll(/([^{}]+)\{[^}]*position:fixed/g)].map((m) => m[1].trim())
+  assert.deepEqual(fixedBlocks, ['#lingxu-ctf-panel'], `position:fixed 只能作用于面板，实际: ${JSON.stringify(fixedBlocks)}`)
+  // 卡片自己的块不得含任何定位
+  const cardBlock = /\.lx-config\{([^}]*)\}/.exec(css)
+  assert.ok(cardBlock, '应有 .lx-config 基础块')
+  for (const bad of ['position:', 'z-index:', 'right:', 'bottom:']) {
+    assert.equal(cardBlock[1].includes(bad), false, `.lx-config 不得含 ${bad}`)
+  }
+})
+
+test('CSS 作用域：暗色主题变量同时覆盖面板与卡片', async () => {
+  const { api } = await loadClientModule()
+  const css = api.panelCss()
+  assert.match(css, /@media \(prefers-color-scheme:dark\)\{#lingxu-ctf-panel,\.lx-config\{/)
 })
