@@ -2183,3 +2183,15 @@ test('ctf_solve_start / ctf_solve_status 的描述写清两阶段调度', () => 
   assert.match(status, /环境占用异常/)
   assert.match(status, /只提示不自动抢占/)
 })
+
+test('ctf_solve_start / ctf_solve_status 的描述写清 teammate 上限的来源与降级建议（task-22）', () => {
+  const { tools } = createHarness()
+  const start = tools.ctf_solve_start.description
+  assert.match(start, /maxMembers/)
+  assert.match(start, /不含 lead/)
+  assert.match(start, /DSH 默认 16/)
+  assert.match(start, /不静默丢题/)
+  assert.match(start, /ctf_solve_stop/)
+  const status = tools.ctf_solve_status.description
+  assert.match(status, /成员 N\/M（上限来源：运行时配置 maxMembers \/ 报错自学习 \/ 默认值）/)
+})

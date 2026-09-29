@@ -25,7 +25,9 @@ import {
   parseMemberDescription,
   parseTaskSubject,
   pathSlug,
+  parseMemberLimit,
   prepFileFor,
+  resolveMaxTeamMembers,
   scoreChallenge,
   solverDirFor,
   sanitizeSlug,
@@ -776,7 +778,8 @@ test('start：成员上限错误 → 立即停止 spawn，不反复重试', asyn
   })
   const summary = await orchestrator.start({ __agent: AGENT })
   assert.equal(calls.spawn.length, 1, '成员上限时只尝试一次')
-  assert.match(summary, /成员上限/)
+  assert.match(summary, /已达 teammate 上限/)
+  assert.match(summary, /maxMembers=16/)
 })
 
 test('start：已有 teammate 在跑时按并发总量扣减', async () => {
@@ -2004,4 +2007,146 @@ test('ctf_solve_status：显示「就绪待环境」与「准备中」段', asyn
   assert.match(report, /### 🔧 准备中（1 题/)
   assert.match(report, /prep-prepping-one-1501/)
   assert.match(report, /- P0 就绪待环境：1 题｜准备中：1 题/)
+})
+
+// ---------------------------------------------------------------- teammate 上限（task-22）
+
+test('resolveMaxTeamMembers：读运行时配置，缺失/垃圾值退回默认', () => {
+  assert.equal(resolveMaxTeamMembers({ config: { maxMembers: 8 } }), 8, '用户 profile 覆盖成 8 时必须读到 8')
+  assert.equal(resolveMaxTeamMembers({ config: { maxMembers: 3.9 } }), 3, '取整')
+  assert.equal(resolveMaxTeamMembers({}), LIMITS.maxTeamMembers, '没有 config → 退回默认 16')
+  assert.equal(resolveMaxTeamMembers(null), LIMITS.maxTeamMembers)
+  for (const bad of ['x', 0, -1, NaN, null, undefined, {}]) {
+    assert.equal(
+      resolveMaxTeamMembers({ config: { maxMembers: bad } }),
+      LIMITS.maxTeamMembers,
+      `垃圾值 ${String(bad)} 应退回默认`,
+    )
+  }
+  // 自定义 fallback
+  assert.equal(resolveMaxTeamMembers({}, 4), 4)
+  // 读 config 抛错（Cordis Proxy / 异形服务）也要退回默认
+  const throwing = { get config() { throw new Error('proxy boom') } }
+  assert.equal(resolveMaxTeamMembers(throwing), LIMITS.maxTeamMembers)
+})
+
+test('parseMemberLimit：从 DSH 报错里解析真实上限（解析不到就返回 null）', () => {
+  assert.equal(parseMemberLimit(new Error('Team member limit 8 reached')), 8)
+  assert.equal(parseMemberLimit(new Error('member limit 16 reached')), 16)
+  assert.equal(parseMemberLimit({ message: 'TEAM_MEMBER_LIMIT: Team member limit 8 reached' }), 8)
+  assert.equal(parseMemberLimit(new Error('Team member limit 8 reached'), 'cause: member limit 8 reached'), 8)
+  assert.equal(parseMemberLimit(new Error('member limit reached')), null, '没有数字就别瞎设')
+  assert.equal(parseMemberLimit(new Error('boom')), null)
+  assert.equal(parseMemberLimit(null), null)
+})
+
+test('teammate 上限：读运行时配置 maxMembers=8 —— 已有 6 个 teammate 时最多再派 2 个', async () => {
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    ...Array.from({ length: 6 }, (_, i) => ({ name: `solver-x-${i}`, role: 'teammate', status: 'inactive' })),
+  ]
+  const { teams, calls } = makeTeams({ members })
+  teams.config = { maxMembers: 8 } // 用户 profile 覆盖（DSH 语义：不含 lead）
+  const challenges = Array.from({ length: 6 }, (_, i) => makeChallenge({ id: 2000 + i, name: `c-${i}`, score: 100 - i }))
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, config: { concurrency: 8 } })
+
+  const summary = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 2, '8 - 6 = 只剩 2 个名额（lead 不算）')
+  assert.match(summary, /团队余量：teammate 6\/8（上限来源：运行时配置 maxMembers/)
+  assert.match(summary, /DSH 的 maxMembers \*\*不含 lead\*\*，含 lead 共 7 人/)
+  assert.match(summary, /可用名额 2/)
+})
+
+test('teammate 上限：默认 16 时不因为多派准备 agent 就越界（含两阶段派发回归）', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const envs = Array.from({ length: 10 }, (_, i) => makeChallenge({ id: 2100 + i, name: `e-${i}`, score: 100 - i }))
+  const details = detailsFor(envs.map((_, i) => [2100 + i, 1]))
+  const { teams, calls } = makeTeams({ members })
+  const store = await makeStore()
+  const { orchestrator } = await makeOrchestrator({
+    challenges: envs, teams, store, details, config: { concurrency: 8, envLimit: 2 },
+  })
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 8, '默认 16 时也受「并发 8」约束：2 全程 + 6 准备')
+  assert.equal(calls.spawn.filter((c) => c.request.name.startsWith('solver-')).length, 2)
+  assert.equal(calls.spawn.filter((c) => c.request.name.startsWith('prep-')).length, 6)
+})
+
+test('teammate 上限：从报错自学习真实值，下一轮按真值算（不再超发）', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  let limit = 3 // DSH 真实上限（比默认 16 小得多）
+  const { teams, calls } = makeTeams({
+    members,
+    // ⚠️ makeTeams 已经把这次调用 push 进 calls.spawn（count 就是本次是第几次），这里不要再 push。
+    // 同时模拟 DSH 的真实行为：成功的成员会留在 roster 里（listMembers 能读到）→ 下一轮才知道名额已满。
+    spawnImpl: (request, count) => {
+      if (count > limit) {
+        const error = new Error(`Team member limit ${limit} reached`)
+        error.code = 'TEAM_MEMBER_LIMIT'
+        throw error
+      }
+      members.push({ name: request.name, role: 'teammate', status: 'running' })
+      return { name: request.name, status: 'provisioning' }
+    },
+  })
+  const store = await makeStore()
+  const challenges = Array.from({ length: 6 }, (_, i) => makeChallenge({ id: 2200 + i, name: `c-${i}`, score: 100 - i }))
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, store, config: { concurrency: 6 } })
+
+  const first = await orchestrator.start({ __agent: AGENT })
+  assert.match(first, /已达 teammate 上限/)
+  assert.match(first, /maxMembers=3（来源：报错自学习/)
+  assert.match(first, /本轮有 3 个 agent 没拉起来/)
+  assert.match(first, /建议（任选其一）：/)
+  assert.match(first, /ctf_solve_stop` 释放不再需要的 agent/)
+  assert.match(first, /maxMembers`（当前 3，DSH 默认 16）/)
+  // 学到的值落进 work 记录（排障用）
+  const learned = await store.listChallengeWork(CONNECTION.key)
+  assert.equal(learned.some((row) => row.teamLimitObserved === 3), true)
+
+  // 第二轮：按真值 3 算 teamRoom（名额已满 → 一次都不试）
+  const spawnCallsBefore = calls.spawn.length
+  assert.equal(spawnCallsBefore, 4, '第一轮：3 次成功 + 1 次撞上限（共 4 次调用）')
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, spawnCallsBefore, '上限已满，第二轮不该再试')
+})
+
+test('teammate 上限：团队余量与并发取更小者；limitHit 不吞题（清单 + 建议）', async () => {
+  // 只剩 1 个名额，但要派 4 个 → 只派 1 个，其余进「排队中」（不是上限问题）
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    ...Array.from({ length: 2 }, (_, i) => ({ name: `solver-t-${i}`, role: 'teammate', status: 'inactive' })),
+  ]
+  const { teams, calls } = makeTeams({ members })
+  teams.config = { maxMembers: 3 }
+  const challenges = Array.from({ length: 4 }, (_, i) => makeChallenge({ id: 2300 + i, name: `c-${i}`, score: 100 - i }))
+  const { orchestrator } = await makeOrchestrator({ challenges, teams, config: { concurrency: 4 } })
+  const summary = await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.length, 1, 'teammate 2/3 → 只剩 1 个名额')
+  assert.match(summary, /团队余量：teammate 2\/3/)
+  assert.match(summary, /可用名额 1/)
+  assert.doesNotMatch(summary, /已达 teammate 上限/, '名额是算准的，不该撞上限')
+  assert.match(summary, /排队中（3 题/)
+})
+
+test('ctf_solve_status：显示成员 N/M 与上限来源', async () => {
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    { name: 'solver-a-1', role: 'teammate', status: 'running' },
+    { name: 'solver-b-2', role: 'teammate', status: 'inactive' },
+  ]
+  const { teams } = makeTeams({ members })
+  teams.config = { maxMembers: 8 }
+  const { orchestrator } = await makeOrchestrator({ challenges: [], teams, config: { concurrency: 4 } })
+  const report = await orchestrator.status({ __agent: AGENT })
+  assert.match(report, /- 成员：共 2（running 1，inactive 1，provisioning 0，failed 0）/)
+  assert.match(report, /上限 8（来源：运行时配置 maxMembers）/)
+  assert.match(report, /含 lead 共 3 人/)
+  assert.match(report, /余量 6/)
+
+  // 没有运行时配置时标注「默认值」
+  const plain = makeTeams({ members })
+  const fallback = await makeOrchestrator({ challenges: [], teams: plain.teams, config: { concurrency: 4 } })
+  const fallbackReport = await fallback.orchestrator.status({ __agent: AGENT })
+  assert.match(fallbackReport, /上限 16（来源：默认值）/)
 })
