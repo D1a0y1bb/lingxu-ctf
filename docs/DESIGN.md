@@ -155,8 +155,50 @@ Base = 平台根地址，例如 `https://shuxinbei.clsadp.com:8000`（**不要**
 
 ## 8. 验收标准
 
-1. `node tests/run.mjs` 全绿（平台客户端 + 工具 + 编排的单测，mock fetch/ctx）
+1. `node --test tests/*.test.mjs` 全绿
 2. 用真实 event 4 + 真实 cookie 跑通：`ctf_status` / `ctf_challenges` / `ctf_leaderboard` 返回正确数据
 3. 插件装入 `desktop` profile 后重启，工具在会话中可见，预设「CTF 解题模式」出现在模式选择
 4. `ctf_solve_start` 能真实拉起 N 个 teammate 并建出任务板
 5. Web 面板能显示题目看板 / 进度 / 排行榜
+
+---
+
+## 9. 实现状态（截至交付）
+
+| 验收项 | 状态 | 证据 |
+|---|---|---|
+| 单元测试 | ✅ | `node --test tests/*.test.mjs` → **201 用例全绿**（含跨模块集成用例） |
+| 真实平台冒烟 | ✅ | `tests/smoke-live.mjs` 对 event 4 全通过（78 题 / 15 分类 / 排行榜 / 理论题） |
+| 端到端联调 | ✅ | `tests/e2e-live.mjs` 22/22：真实插件装配 + 真实平台，含 flag 去重护栏与面板快照 |
+| 真实 Cordis 装配 | ✅ | 用解包出的同一份 Cordis 跑 `ctx.plugin()`：注册 13 工具，可选 service 全缺失仍装配成功 |
+| 装入 profile | ✅ | `dsh-lingxu-ctf` 已在 `desktop` profile 的 `dsh.profile.bundles` + `node_modules`（link:） |
+| 重启后生效 | ⏳ | Node ESM 缓存按 URL 永久生效，**必须重启 DSH** 才会 import 新代码 |
+| 浏览器视觉验收 | ⏳ | 需人工刷新确认（面板逻辑已有 33 条测试覆盖） |
+| 真实拉起 teammate | ⏳ | 需重启后在会话里实际调用 `ctf_solve_start` 验证 |
+
+### 交付过程中修掉的真实缺陷（均由跨模块复核发现，非单测能覆盖）
+
+1. **Cordis Proxy 守卫**：`ctx.agent` 抛 `cannot get property "agent" without inject` ⇒ 插件整体
+   `fiberPhase: failed`。改为统一的 `service(ctx, name)` 兜底访问器，并加严格 Proxy 回归测试。
+2. **`ctf_solve_*` 未透传 `exec.agent`** ⇒ 三个编排工具在生产环境全不可用（单测因 mock 掉了
+   orchestrator 而全绿）。补 `__agent`/`__signal`。
+3. **环境记录形状不一致**：`ctf_start_env` 只写嵌套 `env`，而 `orchestrate.stop` 与 `writeup`
+   读顶层字段 ⇒ 停止时永不释放环境、WP 时间线永远「未记录开始时间」。改为双写。
+4. **slug 实现四份分歧**：`Baby Heap!` 在编排层是 `baby-heap!-12`，而 `ctf_challenge` 下到
+   `baby-heap-12` ⇒ solver 被指到没有附件的目录。统一为「只剔路径危险字符」流派。
+5. **`SCOPE_ID_RE` 非贪婪反解**：`challenges/baby-heap-12` 被解成 `heap-12` ⇒ status 对照错乱、
+   stop 漏释放。改贪婪前缀 + 尾部不含 `-`。
+6. **WP 提交截断**：提交/预览复用了复现脚本的 8KB 截断读取器，>8KB 的 WP 会被截断提交。
+   改为不截断读取。
+7. **`store.resolveConnection` 部分匹配**：只传 `eventId`（不带 `baseUrl`）时无法构造 key ⇒
+   永远解析不到连接。改为按已提供字段做部分匹配。
+
+### 已知限制
+
+- 凌虚登录带验证码，只支持 `sessionid` Cookie，不做账号密码自动登录。
+- `punish: true` 的赛事错误提交会扣分；护栏（去重 / 错误计数 / 审计）默认只记录不阻断
+  （按用户「全自动」决策），可用 `maxWrongAttempts` 收紧。
+- 本机无 Docker / pwntools / gdb / r2，pwn/rev 需按需自装工具链。
+- CTFd 适配器按官方 API v1 实现但**未对真实站点实测**。
+- 理论题 `finish` 不可逆，按用户决策不加二次确认。
+

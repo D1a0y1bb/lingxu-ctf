@@ -23,6 +23,32 @@ export function apply(ctx, config) {
   ```
   其中 `register` 收集 disposer 并在卸载时统一释放。
 
+### ⚠️ 读取未声明的 service 会让整个插件加载失败
+
+Cordis 的 Context 是 **Proxy**（`cordis/lib/index.js` 的 `ReflectService.handler.get`）：
+当属性既不是 special property、也不在 target 上时，会抛
+
+```
+Error: cannot get property "<name>" without inject
+```
+
+**这个错会让插件行直接 `fiberPhase: failed`，而不是降级运行。** 本项目真实踩过：
+`lib/index.js` 早期写了 `ctx?.agent?.session?.header?.cwd`（可选链**不能**阻止 get trap 抛错），
+装进 profile 后插件整体加载失败。
+
+**规矩**：
+- 硬依赖写进 `export const inject = [...]`，然后 `ctx.foo` 直接用；
+- 其余一律用 **`ctx.get('foo')`**（未知 service 返回 `undefined`，不抛）；
+- 需要兼容 mock/非 Cordis 上下文时，用本仓库 `lib/index.js` 的 `service(ctx, name)` 统一兜底；
+- 别写 `ctx?.foo`、`ctx.foo?.bar` —— 可选链只防 `undefined`，防不住 Proxy 抛错。
+- `ctx.logger` 是 Cordis 核心属性（走 `Reflect.has` 短路），安全；`ctx.tools` 等已 `inject` 的也安全。
+
+回归防线：`tests/index.test.mjs` 的 `strictCordisCtx` 用 Proxy 复刻了该守卫，
+并断言 `apply()` 在「所有可选 service 都缺失」的严格上下文下仍能注册 13 个工具。
+
+> 注：Node 的 ESM 缓存按 URL 永久生效，改了插件源码后 **必须重启 DSH** 才会重新 import；
+> `plugin_manager` 的启用/禁用切换不会让已缓存的模块失效。
+
 ## 2. 工具注册：`defineTool`
 
 ```js

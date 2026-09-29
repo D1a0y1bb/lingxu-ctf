@@ -114,6 +114,21 @@ test('injectClientScript: 不使用 __DSH_BOOT__ graph 行（0.2.0-rc.1 上是 n
   assert.equal(out.includes('application/json'), false)
 })
 
+test('injectClientScript: 必须带 type="module"（client.js 有顶层 export）', () => {
+  // lib/client.js 是 ESM（顶层 export），若被当成 classic script 加载会直接语法错误、
+  // 面板静默消失。这条断言防止有人改回 graph row / script-src 注入。
+  const out = injectClientScript('<body></body>', '/lingxu-ctf/client.js?rev=deadbeef')
+  assert.match(out, /<script type="module" /)
+  assert.equal(out.includes('type="module"'), true)
+  // 不得出现 classic script 形式（无 type 或无 src 的内联）
+  assert.equal(/<script(?![^>]*type="module")[^>]*src=/.test(out), false)
+})
+
+test('injectClientScript: 注入的 url 带内容哈希 rev，改代码后浏览器不会用旧缓存', () => {
+  const out = injectClientScript('<body></body>', '/lingxu-ctf/client.js?rev=abc123')
+  assert.match(out, /client\.js\?rev=abc123/)
+})
+
 test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份', () => {
   const ctx = mockCtx()
   apply(ctx, { workDir: '/tmp/lingxu-test', enableWebPanel: true })
@@ -165,6 +180,60 @@ test('apply: 无 agentTeams 服务时仍能加载（编排工具给出清晰报�
   const ctx = mockCtx() // services 里没有 agentTeams
   apply(ctx, { workDir: '/tmp/lingxu-test' })
   assert.equal(ctx._collected.tools.length, 13)
+})
+
+/**
+ * Cordis 的 Context 是 Proxy：读取**未在 inject 中声明**的 service 属性会直接抛
+ * `cannot get property "<name>" without inject`。
+ * 这个替身复刻该行为 —— 真实安装时 `ctx.agent` 就是这样炸掉整个插件加载的，
+ * 而当时所有测试都没覆盖到（mockCtx 是个普通对象，读什么都不会抛）。
+ */
+function strictCordisCtx(services = {}) {
+  const collected = { tools: [], sections: [], routes: [], taps: [], commands: [] }
+  const target = {
+    // 宿主自带的非 service 成员
+    logger: { info() {}, warn() {}, error() {} },
+    effect(fn) { fn(); return () => {} },
+    get(name) { return services[name] },
+    tools: {
+      register(def) { collected.tools.push(def); return () => {} },
+    },
+    _collected: collected,
+  }
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop in t) return t[prop]
+      // 任何未在 target 上的属性访问都按 Cordis 语义抛错
+      throw new Error(`cannot get property "${String(prop)}" without inject`)
+    },
+  })
+}
+
+test('apply: 在 Cordis 严格 Proxy 上下文下不触碰未 inject 的 service', () => {
+  // 真实场景：插件行挂在 profile 层，没有 ambient agent / systemPrompt / webServer 等
+  const ctx = strictCordisCtx({}) // 所有 service 都缺失
+  assert.doesNotThrow(() => apply(ctx, {}), '不得因读取未声明的 service 而炸掉加载')
+  assert.equal(ctx._collected.tools.length, 13, '工具仍应全部注册')
+})
+
+test('apply: 严格 Proxy + 完整 service 时正常装配', () => {
+  const sections = []
+  const routes = []
+  const ctx = strictCordisCtx({
+    systemPrompt: { section: (s) => { sections.push(s); return () => {} } },
+    webServer: { register: (r) => { routes.push(r); return () => {} }, tapIndex: () => () => {} },
+    commands: { register: () => () => {} },
+    agentTeams: { spawnTeammate() {}, createTask() {}, listTasks() {} },
+    agent: { session: { header: { cwd: '/tmp/strict-cwd' } } },
+  })
+  assert.doesNotThrow(() => apply(ctx, {}))
+  assert.equal(sections.length, 1)
+  assert.equal(routes.some((r) => r.path === '/lingxu-ctf/state'), true)
+})
+
+test('apply: workDir 未配置时回退到 process.cwd()，且不读 ctx.agent 之外的东西', () => {
+  const ctx = strictCordisCtx({ agent: { session: { header: { cwd: '/tmp/from-agent' } } } })
+  assert.doesNotThrow(() => apply(ctx, {}))
 })
 
 test('apply: 工具可通过 dispose 注销', () => {

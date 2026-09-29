@@ -17,6 +17,8 @@ import path from 'node:path'
 
 import { CtfStore, connectionKey } from '../lib/store.js'
 import { createWriteup, resolveWorkDir, slugify, writeupDir, writeupFileName } from '../lib/writeup.js'
+// 跨模块 slug 契约：编排层/工具层用 index.js 的 slugify 决定目录名，必须与本模块一致
+import { slugify as indexSlugify } from '../lib/index.js'
 
 const CONNECTION = { platform: 'lingxu', baseUrl: 'https://example.test:8000', eventId: 4 }
 const CONN_KEY = connectionKey(CONNECTION)
@@ -79,13 +81,34 @@ test('slugify：中文题名保留可读性，绝不返回空字符串', () => {
   assert.equal(slugify('///', 9), 'challenge-9')
   assert.equal(slugify('...', 9), 'challenge-9')
   assert.equal(slugify('../../etc/passwd', 3), 'etc-passwd')
-  assert.equal(slugify('flag{test}', 3), 'flag-test')
+  // 可读符号（! { } ( ) ☕）保留，只剔路径危险字符
+  assert.equal(slugify('flag{test}', 3), 'flag{test}')
+  assert.equal(slugify('Baby Heap!', 12), 'baby-heap!')
   assert.equal(slugify('\u0000\u0007', 5), 'challenge-5')
   // 超长截断到 60 码点以内，且不留下尾部 `-`
   const long = slugify(`${'a'.repeat(120)}中文`, 1)
   assert.ok(Array.from(long).length <= 60, `slug 长度 ${Array.from(long).length}`)
   assert.ok(!long.endsWith('-'))
   assert.ok(long.startsWith('a'))
+  // 码点截断不切断代理对（emoji）
+  const emoji = slugify(`${'x'.repeat(59)}😀😀`, 1)
+  assert.ok(!/[\uD800-\uDBFF]$/.test(emoji), '截断后不应以孤立高代理项结尾')
+  assert.equal(Array.from(emoji).length, 60)
+})
+
+test('slugify：与 lib/index.js 的规则逐字一致（跨模块契约）', () => {
+  // 契约：编排层用 index.js 的 slugify 决定 solver 工作目录，
+  // writeup 用同一个规则定位复现脚本 → 两处必须逐字一致。
+  const names = ['Baby Heap!', '签到题（Web 入门）', 'a/b:c', '长'.repeat(80)]
+  for (const name of names) {
+    assert.equal(slugify(name, 12), indexSlugify(name), `slug 不一致：${name}`)
+  }
+  for (const name of ['Sign In', 'flag{test}', '../../etc/passwd', 'café ☕ CTF', 'Web/签到 题']) {
+    assert.equal(slugify(name, 7), indexSlugify(name), `slug 不一致：${name}`)
+  }
+  // 空输入两边都回退（index.js 用 'challenge'，writeup 用 challenge-<id>）
+  assert.equal(indexSlugify('///'), 'challenge')
+  assert.equal(slugify('///', 12), 'challenge-12')
 })
 
 test('resolveWorkDir：未配置时回退到 cwd/lingxu-ctf-work', () => {
@@ -166,7 +189,9 @@ test('generate：中文题名 slug 不被清成空字符串', async () => {
   assert.equal(result.ok, true)
   assert.ok(result.slug.length > 0)
   assert.ok(result.slug.includes('签到题'), `slug=${result.slug}`)
-  assert.equal(path.basename(result.path), `签到题-web-入门-12.md`)
+  // 全角括号保留（与 index.js 规则一致），只有空白折叠成 `-`
+  assert.equal(result.slug, indexSlugify('签到题（Web 入门）'))
+  assert.equal(path.basename(result.path), `签到题（web-入门）-12.md`)
   assert.ok((await fsp.readFile(result.path, 'utf8')).startsWith('# 签到题（Web 入门）'))
 
   // 纯符号题名回退 challenge-<id>
@@ -226,18 +251,34 @@ test('generate：自动内联 workDir/scripts 下匹配题目的复现脚本', a
   assert.ok(!content.includes('nope'))
 })
 
-test('generate：内联解题目录下的脚本（含 orchestrate 的 ch-<id> 目录名）', async () => {
-  // 中文题名：writeup 的 slug 保留中文，而 orchestrate.js 会把中文清成 ch
-  const env = await makeEnv({ detail: { name: '签到题' } })
-  const solverDir = path.join(env.workDir, 'challenges', 'ch-7')
+test('generate：符号题名按共享 slug 精确命中 solver 目录（不依赖 id 兜底）', async () => {
+  // Baby Heap! → 共享 slug `baby-heap!`，与 index.js / orchestrate.pathSlug / tools.js 一致
+  const env = await makeEnv({ detail: { name: 'Baby Heap!' } })
+  const solverDir = path.join(env.workDir, 'challenges', 'baby-heap!-12')
+  await fsp.mkdir(solverDir, { recursive: true })
+  await fsp.writeFile(path.join(solverDir, 'exp.py'), 'print("heap")\n', 'utf8')
+
+  const result = await env.writeup.generate({ challengeId: 12 })
+  assert.equal(result.slug, indexSlugify('Baby Heap!'))
+  assert.equal(path.basename(result.path), 'baby-heap!-12.md')
+  assert.equal(result.scriptCount, 1)
+  assert.match(await fsp.readFile(result.path, 'utf8'), /challenges\/baby-heap!-12\/exp\.py/)
+})
+
+test('generate：slug 有分歧时按题目 id 兜底发现 solver 目录（NFKC 全角括号场景）', async () => {
+  // orchestrate.js 的 pathSlug 会做 NFKC（`（ ）` → `( )`），index/writeup 不做；
+  // 这类残留分歧由「challenges/*-<id>」动态发现兜底（锚定 `-<id>`，不会串到别的题）。
+  const env = await makeEnv({ detail: { name: '签到题（Web 入门）' } })
+  const solverDir = path.join(env.workDir, 'challenges', '签到题(web-入门)-12')
   await fsp.mkdir(solverDir, { recursive: true })
   await fsp.writeFile(path.join(solverDir, 'exp.py'), 'import requests\n', 'utf8')
   await fsp.writeFile(path.join(solverDir, 'notes.md'), '# 草稿\n', 'utf8')
 
-  const result = await env.writeup.generate({ challengeId: 7 })
+  const result = await env.writeup.generate({ challengeId: 12 })
+  assert.equal(result.slug, indexSlugify('签到题（Web 入门）'))
   assert.equal(result.scriptCount, 2)
   const content = await fsp.readFile(result.path, 'utf8')
-  assert.match(content, /challenges\/ch-7\/exp\.py/)
+  assert.match(content, /challenges\/签到题\(web-入门\)-12\/exp\.py/)
   assert.match(content, /import requests/)
 })
 
@@ -302,7 +343,8 @@ test('submit：本地没有 WP 文件时给出可操作的提示', async () => {
   assert.equal(result.ok, false)
   assert.equal(result.path, '')
   assert.match(result.message, /未找到题目 77 的本地 WP 文件/)
-  assert.match(result.message, /action=generate/)
+  assert.match(result.message, /ctf_writeup id=77 生成/)
+  assert.match(result.message, /submit=true/)
 })
 
 test('submit：大 WP（>8KB）完整提交，不被复现脚本的截断逻辑截断', async () => {
@@ -324,16 +366,31 @@ test('submit：大 WP（>8KB）完整提交，不被复现脚本的截断逻辑�
   assert.equal(skipped.bytes, Buffer.byteLength(content, 'utf8'))
 })
 
-test('submit/list：缺少 challengeId 或 resolveAdapter 时给出清晰结果', async () => {
-  const env = await makeEnv({})
-  await assert.rejects(() => env.writeup.submit({}), /challengeId/)
+test('generate/submit：接受工具层参数名 id（与 challengeId 等价）', async () => {
+  const env = await makeEnv({ detail: { name: 'Alias Case' } })
 
-  // generate 省略 challengeId = 批量模式；没有已解题目时给出可操作说明
+  // id 走单题生成，不会误入批量模式
+  const generated = await env.writeup.generate({ id: 71, body: '## 思路\n别名调用' })
+  assert.equal(generated.action, 'generate')
+  assert.equal(generated.challengeId, 71)
+  assert.equal(path.basename(generated.path), 'alias-case-71.md')
+
+  const submitted = await env.writeup.submit({ id: 71 })
+  assert.equal(submitted.ok, true)
+  assert.equal(submitted.path, generated.path)
+  assert.match(env.adapter.lastSubmit.code, /别名调用/)
+})
+
+test('submit/list：缺少 id 或 resolveAdapter 时给出清晰结果', async () => {
+  const env = await makeEnv({})
+  await assert.rejects(() => env.writeup.submit({}), /需要 id/)
+
+  // generate 省略 id = 批量模式；没有已解题目时给出可操作说明
   const batch = await env.writeup.generate({})
   assert.equal(batch.ok, false)
   assert.equal(batch.action, 'generate-batch')
   assert.match(batch.message, /没有找到已解题目/)
-  assert.match(batch.message, /challengeId/)
+  assert.match(batch.message, /显式传 id/)
 
   const broken = createWriteup({ config: {}, store: env.store })
   await assert.rejects(() => broken.list({}), /resolveAdapter/)
@@ -341,7 +398,7 @@ test('submit/list：缺少 challengeId 或 resolveAdapter 时给出清晰结果'
 
 // ------------------------------------------------------------------ 批量 / 提交联动
 
-test('generate：省略 challengeId 时按已解题目批量生成', async () => {
+test('generate：省略 id 时按已解题目批量生成（工具层 ctf_writeup 语义）', async () => {
   const env = await makeEnv({
     adapter: {
       async challenges() {

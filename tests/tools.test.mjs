@@ -16,7 +16,8 @@ import path from 'node:path'
 
 import { buildToolSpecs, TOOL_NAMES } from '../lib/tools.js'
 import { CtfStore } from '../lib/store.js'
-import { createOrchestrator } from '../lib/orchestrate.js'
+import { createOrchestrator, pathSlug } from '../lib/orchestrate.js'
+import { slugify as indexPathSlug } from '../lib/index.js'
 
 const tmpDirs = []
 after(async () => {
@@ -494,6 +495,41 @@ test('ctf_challenge：缺 id / 平台报错都返回文本', async () => {
   assert.match(await broken.tools.ctf_challenge.execute({ id: 999 }), /^❌.*题目不存在/)
 })
 
+test('ctf_challenge：附件目录名与编排层 pathSlug / index.slugify 同规则', async () => {
+  // 编排层把 `challenges/<pathSlug>-<id>` 当作 solver 的工作目录写进 writeScope；
+  // ctf_challenge 必须落在同一个目录，否则 solver 被指到没有附件的目录。
+  const trickyNames = [
+    'Baby Heap!',
+    'AIoT固件加密服务',
+    'Web 签到 (2)',
+    'Pwn/栈溢出',
+    'café ☕ CTF',
+    'a'.repeat(80),
+  ]
+  for (const name of trickyNames) {
+    const workDir = await makeTmpDir()
+    const adapter = createAdapter({
+      challengeDetail: async (id) => ({
+        id: Number(id),
+        name,
+        description: '题面',
+        attachment: 'https://example.com:8000/media/x/f.zip',
+        attachments: [],
+        requiresEnv: false,
+        connectionInfo: '',
+        checkMode: false,
+        raw: {},
+      }),
+    })
+    const { tools } = createHarness({ adapter, config: { workDir } })
+    await tools.ctf_challenge.execute({ id: 12 })
+    const dirs = await fsp.readdir(path.join(workDir, 'challenges'))
+    assert.equal(dirs.length, 1, `${name} 应生成 1 个目录`)
+    assert.equal(dirs[0], `${pathSlug(name, 12)}-12`, `目录名要与 orchestrate.pathSlug 一致：${name}`)
+    assert.equal(dirs[0], `${indexPathSlug(name)}-12`, `目录名要与 index.slugify 一致：${name}`)
+  }
+})
+
 // ------------------------------------------------------------------ 环境
 
 test('ctf_start_env：返回连接信息并记录环境状态', async () => {
@@ -823,15 +859,39 @@ test('ctf_writeup：转发给 deps.writeup.generate，submit 默认 false', asyn
       },
     },
   })
-  assert.match(await tools.ctf_writeup.execute({ challengeId: 101 }), /WP 已生成/)
+  assert.match(await tools.ctf_writeup.execute({ id: 101 }), /WP 已生成/)
   assert.equal(seen[0].submit, false)
-  assert.equal(seen[0].challengeId, 101)
+  assert.equal(seen[0].challengeId, 101, 'id 必须归一化成 writeup 模块读的 challengeId')
 
-  await tools.ctf_writeup.execute({ challengeId: 101, submit: true })
+  await tools.ctf_writeup.execute({ id: 101, submit: true })
   assert.equal(seen[1].submit, true)
 
-  await tools.ctf_writeup.execute({ challengeId: 101, body: '## 解题思路\n爆破得到 flag' })
+  await tools.ctf_writeup.execute({ id: 101, body: '## 解题思路\n爆破得到 flag' })
   assert.equal(seen[2].body, '## 解题思路\n爆破得到 flag')
+})
+
+test('ctf_writeup：参数名统一为 id，challengeId 作为旧别名仍可用', async () => {
+  const seen = []
+  const { tools } = createHarness({
+    deps: {
+      writeup: {
+        async generate(args) {
+          seen.push(args)
+          return 'ok'
+        },
+      },
+    },
+  })
+  assert.equal(Object.keys(tools.ctf_writeup.parameters)[0], 'id', '首参必须是 id')
+  assert.ok(!('challengeId' in tools.ctf_writeup.parameters), 'challengeId 不再作为声明参数')
+  assert.match(tools.ctf_writeup.description, /id 指定题目/)
+
+  await tools.ctf_writeup.execute({ id: 7 })
+  assert.equal(seen[0].challengeId, 7)
+  await tools.ctf_writeup.execute({ challengeId: 7 })
+  assert.equal(seen[1].challengeId, 7, '旧别名 challengeId 仍能走到 writeup')
+  await tools.ctf_writeup.execute({})
+  assert.equal(seen[2].challengeId, undefined, '都不传则批量生成')
 })
 
 test('ctf_writeup：未注入 writeup 时抛错说明', async () => {

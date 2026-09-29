@@ -146,7 +146,7 @@ sessionid=你的值; csrftoken=你的值
 | `ctf_solve_start` | 拉起并发解题 agent 团队（默认 4），建共享任务板 | `category`、`minScore`、`limit`、`onlyUnsolved`、`concurrency`、`connection` |
 | `ctf_solve_status` | 团队进度：任务板 + 平台状态对照 | `connection`（可选） |
 | `ctf_solve_stop` | 中断所有解题 agent、释放环境 | `reason`、`connection` |
-| `ctf_writeup` | 生成 / 提交 WP | `challengeId`（省略 = 按已解题目批量生成）、`body`（解题思路正文，建议由解题 agent 填写）、`submit`（默认 false，只生成本地文件）、`title`、`connection` |
+| `ctf_writeup` | 生成 / 提交 WP | `id`（题目 ID，省略 = 按已解题目批量生成；旧别名 `challengeId` 仍可用）、`body`（解题思路正文，建议由解题 agent 填写）、`submit`（默认 false，只生成本地文件）、`title`、`connection` |
 
 > 需要指定赛事时，绝大多数工具都接受可选的 `connection`（连接 key，形如 `lingxu:host:4`）；
 > 不传就用当前激活连接。
@@ -191,6 +191,11 @@ lingxu-ctf-work/
 ├── scripts/                    # 复现脚本（生成 WP 时自动内联）
 └── writeups/<slug>-<id>.md     # 生成的 WP
 ```
+
+> `<slug>` 由题名清洗而来：**保留中文与 `!()` 等可读符号**，只把路径危险字符
+> `<>:"/\|?*` 与控制字符替换成 `-`，空白折叠为 `-`，最多 60 字符（不切断 emoji），
+> 题名为空时回退 `challenge-<id>`。编排层、工具层与 WP 用的是**同一条规则**，
+> 所以目录名和 WP 文件名总是对得上。
 
 ---
 

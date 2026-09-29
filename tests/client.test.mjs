@@ -427,6 +427,42 @@ test('渲染片段：空数据时给出空态而不是崩溃', () => {
   assert.match(renderBoardHtml(normalizeState(fullSnapshot()), { query: '不存在' }), /没有符合筛选条件/)
 })
 
+test('渲染片段标签闭合平衡（innerHTML 结构不会破损）', () => {
+  // 因为所有插值都经过 escapeHtml，属性值里不会出现裸 '>'，可以安全地做朴素标签扫描。
+  const VOID = new Set(['br', 'hr', 'img', 'input', 'meta', 'link'])
+  const imbalance = (html) => {
+    const stack = []
+    const re = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)\b[^>]*?(\/?)>/g
+    let match
+    while ((match = re.exec(html)) !== null) {
+      const name = match[2].toLowerCase()
+      if (VOID.has(name) || match[3] === '/') continue
+      if (match[1] === '/') {
+        if (stack.pop() !== name) return `意外闭合 </${name}>`
+      } else stack.push(name)
+    }
+    return stack.length === 0 ? null : `未闭合：${stack.join(',')}`
+  }
+
+  const state = normalizeState(fullSnapshot())
+  const fragments = {
+    meta: renderHeaderMetaHtml(state),
+    stats: renderStatsHtml(state),
+    board: renderBoardHtml(state, {}),
+    boardFiltered: renderBoardHtml(state, { category: 'Web' }),
+    boardEmpty: renderBoardHtml(state, { query: '不存在' }),
+    rank: renderLeaderboardHtml(state),
+    subs: renderSubmissionsHtml(state),
+    theory: renderTheoryHtml(state),
+    statusEmpty: renderStatusHtml(normalizeState({ connection: null }), { loading: false, loaded: true }),
+    statusError: renderStatusHtml(state, { error: 'boom' }),
+    statusLoading: renderStatusHtml(state, { loading: true, loaded: false }),
+  }
+  for (const [key, html] of Object.entries(fragments)) {
+    assert.equal(imbalance(html), null, `${key} 标签不平衡`)
+  }
+})
+
 test('renderStatusHtml：错误态 / 加载态 / 未配置空态', () => {
   const unconfigured = normalizeState({ connection: null })
   assert.match(renderStatusHtml(unconfigured, { loading: true, loaded: false }), /正在加载/)

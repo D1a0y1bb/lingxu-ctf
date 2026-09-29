@@ -18,6 +18,7 @@ import {
   allocateName,
   buildSolverPrompt,
   createOrchestrator,
+  pathSlug,
   sanitizeSlug,
   selectChallenges,
   taskSubjectFor,
@@ -25,6 +26,8 @@ import {
   writeScopeFor,
 } from '../lib/orchestrate.js'
 import { CtfStore } from '../lib/store.js'
+import { slugify as indexSlugify } from '../lib/index.js'
+import { buildToolSpecs } from '../lib/tools.js'
 
 const CONNECTION = {
   key: 'lingxu:host:8000:4',
@@ -37,9 +40,13 @@ const AGENT = { id: 'agent-lead', name: 'lead' }
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 const tmpDirs = []
-async function makeStore() {
+async function makeTmpDir() {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-orch-'))
   tmpDirs.push(dir)
+  return dir
+}
+async function makeStore() {
+  const dir = await makeTmpDir()
   return new CtfStore({ dir })
 }
 after(async () => {
@@ -195,9 +202,161 @@ test('taskSubjectFor / writeScopeFor：格式与 DSH write scope 约束', () => 
   assert.equal(taskSubjectFor({ id: 12, name: 'babyheap', category: 'pwn', score: 300 }), '[pwn] babyheap (300分)')
   assert.equal(taskSubjectFor({ id: 12, name: 'x' }), '[未分类] x (0分)')
   const scope = writeScopeFor({ id: 12, name: 'Baby Heap!' })
-  assert.equal(scope, 'lingxu-ctf-work/challenges/baby-heap-12')
+  assert.equal(scope, 'lingxu-ctf-work/challenges/baby-heap!-12')
   assert.ok(!scope.startsWith('/'))
   assert.ok(!scope.split('/').some((segment) => segment === '' || segment === '.' || segment === '..'))
+})
+
+test('pathSlug：保留中文可读性，只替换路径危险字符，截断不切代理对', () => {
+  // 中文题名不再被清空（docs-dev 报的问题）
+  assert.equal(pathSlug('AIoT固件加密服务', 42), 'aiot固件加密服务')
+  assert.equal(pathSlug('固件加密服务', 7), '固件加密服务')
+  assert.equal(pathSlug('  Web 签到  ', 1), 'web-签到')
+  // 路径危险字符 + 控制字符 → '-'
+  assert.equal(pathSlug('a/b\\c:d*e?f"g<h>i|j', 1), 'a-b-c-d-e-f-g-h-i-j')
+  assert.equal(pathSlug('a\u0000b\u001fc', 1), 'a-b-c')
+  assert.equal(pathSlug('..\\..\\etc\\passwd', 1), 'etc-passwd')
+  assert.equal(pathSlug('...', 9), 'challenge')
+  assert.equal(pathSlug('   ', 9), 'challenge')
+  assert.equal(pathSlug('', 9), 'challenge')
+  assert.equal(pathSlug(undefined, undefined), 'challenge')
+  // fallback 是裸 challenge：writeScopeFor 会再拼 -<id>，不能变成 ch-9-9
+  assert.equal(writeScopeFor({ id: 9, name: '???' }), 'lingxu-ctf-work/challenges/challenge-9')
+  // 折叠空白与连续 -
+  assert.equal(pathSlug('a   ---   b', 1), 'a-b')
+  // 60 码点截断且不切断代理对（emoji 各占 2 个 UTF-16 单元）
+  const long = pathSlug(`题${'🔥'.repeat(80)}`, 1)
+  assert.equal(Array.from(long).length, 60)
+  assert.ok(!/[\uD800-\uDBFF]$/.test(long), '不能以孤立的高代理结尾')
+  assert.equal(pathSlug('x'.repeat(100), 1).length, 60)
+})
+
+test('中文题名：writeScope 保留中文，teammate 名仍是纯 ASCII', () => {
+  const chinese = { id: 42, name: 'AIoT固件加密服务', category: 'IoT', score: 300 }
+  assert.equal(writeScopeFor(chinese), 'lingxu-ctf-work/challenges/aiot固件加密服务-42')
+  assert.equal(teammateNameFor(chinese), 'solver-aiot-42')
+  assert.match(teammateNameFor(chinese), NAME_RE)
+
+  const pureChinese = { id: 7, name: '固件加密服务', category: 'IoT', score: 100 }
+  assert.equal(writeScopeFor(pureChinese), 'lingxu-ctf-work/challenges/固件加密服务-7')
+  assert.equal(teammateNameFor(pureChinese), 'solver-iot-7', 'teammate 名回退到 ASCII 分类')
+  assert.match(teammateNameFor(pureChinese), NAME_RE)
+
+  const nameless = { id: 8, name: '!!!', category: '', score: 10 }
+  assert.equal(writeScopeFor(nameless), 'lingxu-ctf-work/challenges/!!!-8')
+  assert.equal(teammateNameFor(nameless), 'solver-ch-8')
+
+  // teammate prompt 里的工作目录也用中文路径（与 writeScope 一致）
+  const prompt = buildSolverPrompt({
+    name: 'solver-aiot-42',
+    challenge: chinese,
+    taskId: 'task-42',
+    connection: CONNECTION,
+    connKey: CONNECTION.key,
+    workDir: 'lingxu-ctf-work',
+  })
+  const text = prompt.map((block) => block.text).join('\n')
+  assert.match(text, /lingxu-ctf-work\/challenges\/aiot固件加密服务-42/)
+  assert.match(text, /solver-aiot-42/)
+})
+
+// ---------------------------------------------------------------- 跨模块 slug 契约
+
+/**
+ * 编排层用 slug 决定 solver 的工作目录（prompt / writeScope），而 `ctf_challenge`（tools.js）
+ * 用它把附件下载到 `challenges/<slug>-<id>/distfiles/`。两者必须逐字一致，否则 solver 会
+ * 被指到一个没有附件的目录。index.js / tools.js / writeup.js / orchestrate.js 四份实现同规则。
+ */
+test('跨模块契约：pathSlug 与 index.slugify 对 5 个题名逐字一致（全角括号是核心）', () => {
+  const names = [
+    '签到题（Web 入门）', // 全角括号：NFKC 会折叠成半角，导致与 tools.js 的目录不一致
+    'Baby Heap!',
+    'a/b:c',
+    'café ☕ CTF',
+    '中'.repeat(80), // 超长中文：按码点/UTF-16 截断在 BMP 上等价
+  ]
+  for (const name of names) {
+    assert.equal(pathSlug(name, 12), indexSlugify(name), `slug 必须与 index.slugify 一致：${name}`)
+  }
+  // 退化题名（全为危险字符/空白）：fallback 也必须是裸 `challenge`，否则 writeScope 会变成
+  // `ch-12-12`，而 ctf_challenge 建的是 `challenge-12`（多一个 id，solver 找不到附件）
+  for (const name of ['???', '***', '///', '   ', '...']) {
+    assert.equal(pathSlug(name, 12), indexSlugify(name), `退化题名 fallback 必须一致：${name}`)
+    assert.equal(writeScopeFor({ id: 12, name }), `lingxu-ctf-work/challenges/${indexSlugify(name)}-12`)
+  }
+  // 回归护栏：不得再做 NFKC 归一化
+  assert.equal(pathSlug('签到题（Web 入门）', 12), '签到题（web-入门）')
+  assert.notEqual(pathSlug('签到题（Web 入门）', 12), '签到题(web-入门)')
+})
+
+test('跨模块契约：writeScope / solver prompt 的目录 == ctf_challenge 实际创建的目录', async () => {
+  const workDir = await makeTmpDir()
+  const challenges = [
+    { id: 12, name: '签到题（Web 入门）', category: 'Web', score: 100, solved: false },
+    { id: 13, name: '???', category: 'misc', score: 50, solved: false }, // 退化名 → challenge-13
+  ]
+  const byId = new Map(challenges.map((challenge) => [String(challenge.id), challenge]))
+  const adapter = {
+    async challengeDetail(id) {
+      const challenge = byId.get(String(id))
+      return {
+        id,
+        name: challenge.name,
+        description: '# 题面',
+        descriptionHtml: '<h1>题面</h1>',
+        attachment: 'https://host:8000/media/quiz.zip',
+        attachments: [],
+        score: challenge.score,
+        solves: 3,
+        requiresEnv: false,
+        checkMode: false,
+        connectionInfo: '',
+      }
+    },
+    async downloadAttachment(_url, destPath) {
+      await fsp.mkdir(path.dirname(destPath), { recursive: true })
+      await fsp.writeFile(destPath, 'zipdata', 'utf8')
+      return { path: destPath, bytes: 7 }
+    },
+  }
+  const specs = buildToolSpecs({
+    config: { concurrency: 4, workDir },
+    resolveAdapter: async () => ({ adapter, connection: CONNECTION }),
+    logger: { info() {}, warn() {}, error() {} },
+    now: () => Date.parse('2026-09-29T01:00:00Z'),
+  })
+  const tool = specs.find((spec) => spec.name === 'ctf_challenge')
+  for (const challenge of challenges) {
+    const out = await tool.execute({ id: challenge.id })
+    assert.ok(!out.startsWith('❌'), `ctf_challenge 执行失败：${out}`)
+  }
+
+  // ctf_challenge 实际创建的目录
+  const dirs = (await fsp.readdir(path.join(workDir, 'challenges'))).sort()
+  assert.deepEqual(dirs, ['challenge-13', '签到题（web-入门）-12'])
+  await fsp.access(path.join(workDir, 'challenges', '签到题（web-入门）-12', 'distfiles', 'quiz.zip'))
+  await fsp.access(path.join(workDir, 'challenges', 'challenge-13', 'distfiles', 'quiz.zip'))
+
+  // 编排层的 writeScope 与 solver prompt 必须指向同一批目录名
+  for (const challenge of challenges) {
+    const dirName = `${pathSlug(challenge.name, challenge.id)}-${challenge.id}`
+    assert.ok(dirs.includes(dirName), `目录名必须与 ctf_challenge 一致：${dirName}`)
+    assert.equal(writeScopeFor(challenge), `lingxu-ctf-work/challenges/${dirName}`)
+    const prompt = buildSolverPrompt({
+      name: `solver-web-${challenge.id}`,
+      challenge,
+      taskId: 'task-1',
+      connection: CONNECTION,
+      connKey: CONNECTION.key,
+      workDir,
+    })
+    const text = prompt.map((block) => block.text).join('\n')
+    assert.ok(
+      text.includes(path.join(workDir, 'challenges', dirName)),
+      'prompt 的工作目录必须指向附件所在目录',
+    )
+    assert.ok(text.includes(`lingxu-ctf-work/challenges/${dirName}`), 'prompt 的 writeScope 必须与之一致')
+  }
 })
 
 // ---------------------------------------------------------------- start
@@ -281,28 +440,57 @@ test('start：建任务 + 按 concurrency 拉起 agent + 摘要', async () => {
   assert.deepEqual(solving.sort(), ['2', '3'])
 })
 
-test('start：默认 limit = concurrency*3，concurrency 硬上限 8', async () => {
+test('start：默认 limit = 全部选中题目（≤200），concurrency 硬上限 8', async () => {
   const many = Array.from({ length: 30 }, (_, i) =>
     makeChallenge({ id: i + 1, name: `ch-${i + 1}`, score: 1000 - i, solved: false }),
   )
 
   const a = makeTeams()
   const oa = await makeOrchestrator({ challenges: many, teams: a.teams, config: { concurrency: 4 } })
-  await oa.orchestrator.start({ __agent: AGENT })
-  assert.equal(a.calls.createTask.length, 12, '默认 limit = 4*3')
-  assert.equal(a.calls.spawn.length, 4)
+  const summary = await oa.orchestrator.start({ __agent: AGENT })
+  assert.equal(a.calls.createTask.length, 30, '默认 limit = 全部选中题目')
+  assert.equal(a.calls.spawn.length, 4, '并发只由 concurrency 控制')
+  assert.match(summary, /本轮处理 30 道（limit=全部，≤200）/)
 
   const b = makeTeams()
   const ob = await makeOrchestrator({ challenges: many, teams: b.teams, config: { concurrency: 20 } })
   await ob.orchestrator.start({ __agent: AGENT })
   assert.equal(b.calls.spawn.length, LIMITS.maxConcurrency, '并发硬上限 8')
-  assert.equal(b.calls.createTask.length, 24)
+  assert.equal(b.calls.createTask.length, 30)
 
+  // 显式 limit 仍按传入值截断（截断发生在排序之后）
   const c = makeTeams()
   const oc = await makeOrchestrator({ challenges: many, teams: c.teams, config: { concurrency: 4 } })
-  await oc.orchestrator.start({ __agent: AGENT, concurrency: 3, limit: 2 })
+  const limited = await oc.orchestrator.start({ __agent: AGENT, concurrency: 3, limit: 2 })
   assert.equal(c.calls.createTask.length, 2)
   assert.equal(c.calls.spawn.length, 2)
+  assert.match(limited, /本轮处理 2 道（limit=2）/)
+  assert.deepEqual(
+    c.calls.createTask.map((t) => t.request.subject),
+    ['[web] ch-1 (1000分)', '[web] ch-2 (999分)'],
+    'limit 截断保留最高分的题',
+  )
+})
+
+test('start：77 道待解题全量建任务（验收 #3），limit 上限 200', async () => {
+  const seventySeven = Array.from({ length: 77 }, (_, i) =>
+    makeChallenge({ id: i + 1, name: `ch-${i + 1}`, score: 500 - i, solved: false }),
+  )
+  const a = makeTeams()
+  const oa = await makeOrchestrator({ challenges: seventySeven, teams: a.teams, config: { concurrency: 4 } })
+  await oa.orchestrator.start({ __agent: AGENT })
+  assert.equal(a.calls.createTask.length, 77)
+  assert.equal(a.calls.spawn.length, 4)
+
+  const twoHundredFifty = Array.from({ length: 250 }, (_, i) =>
+    makeChallenge({ id: i + 1, name: `ch-${i + 1}`, score: 500 - i, solved: false }),
+  )
+  const b = makeTeams()
+  const ob = await makeOrchestrator({ challenges: twoHundredFifty, teams: b.teams, config: { concurrency: 4 } })
+  const summary = await ob.orchestrator.start({ __agent: AGENT })
+  assert.equal(b.calls.createTask.length, LIMITS.maxLimit, 'limit 硬上限 200（任务板 maxTasks 256 留余量）')
+  assert.equal(b.calls.spawn.length, 4)
+  assert.match(summary, /排队中（196 题/)
 })
 
 test('start：已有 teammate 占名 → 自动加后缀；名字冲突 → 换名重试', async () => {
@@ -548,6 +736,28 @@ test('status：平台不可用时降级为任务板视图（不抛异常）', as
   const report = await orchestrator.status({ __agent: AGENT })
   assert.match(report, /平台题目列表获取失败/)
   assert.match(report, /任务板：共 1/)
+})
+
+test('status：外部创建的任务用 writeScope 反解 challengeId（连字符 slug 不串位）', async () => {
+  const { teams, taskList } = makeTeams()
+  taskList.push({
+    id: 'task-99',
+    revision: 1,
+    status: 'in_progress',
+    subject: '[pwn] babyheap (300分)',
+    description: '外部（人工/旧版本）创建的任务，没有 challengeId 行',
+    writeScopes: ['lingxu-ctf-work/challenges/baby-heap-12'],
+    blockedBy: [],
+  })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: [makeChallenge({ id: 12, name: 'babyheap', category: 'pwn', score: 300, solved: false })],
+    teams,
+  })
+  const report = await orchestrator.status({ __agent: AGENT })
+  assert.match(report, /babyheap \(#12\)/, 'writeScope 应反解出 12（旧正则会把 baby-heap-12 解成 heap-12）')
+  assert.match(report, /未解/)
+  assert.match(report, /进行中 1，待认领 0，已完成 0/)
+  assert.match(report, /未建任务 0 题/, '不应再出现一条重复的排队行')
 })
 
 test('status：spawn 失败的题目会出现在统计里', async () => {
