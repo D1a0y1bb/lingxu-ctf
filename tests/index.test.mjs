@@ -117,7 +117,7 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.deepEqual(inject, ['tools'])
 
   const names = ctx._collected.tools.map((t) => t.name).sort()
-  assert.equal(names.length, 16, `应注册 16 个工具，实际 ${names.length}: ${names.join(',')}`)
+  assert.equal(names.length, 17, `应注册 17 个工具，实际 ${names.length}: ${names.join(',')}`)
   for (const expected of [
     'ctf_connect', 'ctf_session', 'ctf_status', 'ctf_challenges', 'ctf_challenge', 'ctf_start_env',
     'ctf_delay_env', 'ctf_release_env', 'ctf_submit_flag', 'ctf_leaderboard', 'ctf_theory', 'ctf_notice',
@@ -146,11 +146,12 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.equal(routes.includes('/lingxu-ctf/team'), true, '顶部「CTF」视图的团队数据路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/reports'), true, '顶部「CTF」视图的报告路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/theory'), true, '理论题题目概要路由必须注册（按需拉取，视图不自动全量请求）')
+  assert.equal(routes.includes('/lingxu-ctf/usage'), true, 'token 用量路由必须注册（只读会话日志）')
   // client.js 路由仅在 lib/client.js 存在时注册（优雅降级）
   const hasBundle = routes.includes('/lingxu-ctf/client.js')
   // 客户端半改走官方 dsh.client 机制，**不再**注册 tapIndex
   assert.equal(ctx._collected.taps.length, 0, '不得再注册 tapIndex 注入（会被宿主权威 graph 覆盖）')
-  assert.equal(routes.length, hasBundle ? 8 : 7)
+  assert.equal(routes.length, hasBundle ? 9 : 8)
   assert.equal(ctx._collected.commands.length, 1)
   assert.equal(ctx._collected.commands[0].name, 'ctf-status')
 })
@@ -160,13 +161,13 @@ test('apply: enableWebPanel=false 时不注册路由', () => {
   apply(ctx, { workDir: '/tmp/lingxu-test', enableWebPanel: false })
   assert.equal(ctx._collected.routes.length, 0)
   assert.equal(ctx._collected.taps.length, 0)
-  assert.equal(ctx._collected.tools.length, 16, '工具不受面板开关影响')
+  assert.equal(ctx._collected.tools.length, 17, '工具不受面板开关影响')
 })
 
 test('apply: 无 agentTeams 服务时仍能加载（编排工具给出清晰报错）', () => {
   const ctx = mockCtx() // services 里没有 agentTeams
   apply(ctx, { workDir: '/tmp/lingxu-test' })
-  assert.equal(ctx._collected.tools.length, 16)
+  assert.equal(ctx._collected.tools.length, 17)
 })
 
 /**
@@ -200,7 +201,7 @@ test('apply: 在 Cordis 严格 Proxy 上下文下不触碰未 inject 的 service
   // 真实场景：插件行挂在 profile 层，没有 ambient agent / systemPrompt / webServer 等
   const ctx = strictCordisCtx({}) // 所有 service 都缺失
   assert.doesNotThrow(() => apply(ctx, {}), '不得因读取未声明的 service 而炸掉加载')
-  assert.equal(ctx._collected.tools.length, 16, '工具仍应全部注册')
+  assert.equal(ctx._collected.tools.length, 17, '工具仍应全部注册')
 })
 
 test('apply: 严格 Proxy + 完整 service 时正常装配', () => {
@@ -231,8 +232,9 @@ test('apply: workDir 未配置时给出可写默认值，不落到不可写的 /
  * 这是生产路径（真实 DSH 里 ctx.get 取不到未 inject 的 service），必须专门覆盖。
  */
 function injectAwareCtx(available = {}) {
-  const collected = { tools: [], sections: [], routes: [], taps: [], commands: [], pending: [], injected: [] }
+  const collected = { tools: [], sections: [], routes: [], taps: [], commands: [], pending: [], injected: [], listeners: [] }
   const ctx = {
+    on(event, handler) { collected.listeners.push({ event, handler }); return () => {} },
     logger: { info() {}, warn() {}, error() {} },
     tools: { register(def) { collected.tools.push(def); return () => {} } },
     effect(fn) { fn(); return () => {} },
@@ -260,6 +262,7 @@ function injectAwareCtx(available = {}) {
       logger: ctx.logger,
       effect(fn) { fn(); return () => {} },
       get: () => undefined,
+      on(event, handler) { collected.listeners.push({ event, handler }); return () => {} },
     }
     for (const d of deps) child[d] = available[d]
     return child
@@ -267,17 +270,120 @@ function injectAwareCtx(available = {}) {
   return ctx
 }
 
+test('★ task-34：宿主侧读 DSH tokenUsage 投影（与日志折叠对账用）', async () => {
+  const { readProjectedTokenUsage } = await import('../lib/index.js')
+
+  // 投影 = 客户端统计药丸读的同一份（sessions.list 的 projectionValues.tokenUsage）
+  const sessions = {
+    list: () => ({
+      byId: {
+        'session-a': { projectionValues: { tokenUsage: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 300, cacheWriteTokens: 0 } } },
+      },
+    }),
+  }
+  assert.deepEqual(readProjectedTokenUsage(sessions, 'session-a'), {
+    uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 300, cacheWriteTokens: 0, total: 420,
+  })
+
+  // 拿不到投影/会话不存在/没有服务 → null（不抛错、不猜数字）
+  assert.equal(readProjectedTokenUsage(sessions, 'session-b'), null)
+  assert.equal(readProjectedTokenUsage(sessions, ''), null)
+  assert.equal(readProjectedTokenUsage(null, 'session-a'), null)
+  assert.equal(readProjectedTokenUsage({ list: () => ({ byId: { 'session-c': { projectionValues: {} } } }) }, 'session-c'), null)
+  assert.equal(readProjectedTokenUsage({ list: () => { throw new Error('boom') } }, 'session-a'), null)
+  // 全 0 视为无数据（不能显示 0 误导）
+  assert.equal(readProjectedTokenUsage({ list: () => ({ byId: { 'session-d': { projectionValues: { tokenUsage: { uncachedInputTokens: 0, outputTokens: 0 } } } } }) }, 'session-d'), null)
+})
+
+test('★ task-35：端到端 —— 投递事件经只读钩子落进 store，/team 能读回 agent 间交流', async () => {
+  const { CtfStore } = await import('../lib/store.js')
+  const { buildTeamState } = await import('../lib/index.js')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  // 钩子写的是 getStore()（进程内单例，按 DSH_HOME 定位）→ 把 DSH_HOME 指到临时目录，
+  // 避免测试污染用户真实状态文件（不开生产代码的测试后门）。
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'lx-hook-home-'))
+  // ⚠️ 必须用 getStore() 单例：apply 内部也是它，自己 new 一个会读到过期内存态
+  const { getStore: getHookStore } = await import('../lib/store.js')
+  const store = getHookStore()
+
+  const ctx = injectAwareCtx({ tools: { register: (def) => { ctx._collected.tools.push(def); return () => {} } }, webServer: {}, settings: {}, commands: {}, systemPrompt: {} })
+  ctx.tools = { register: (def) => { ctx._collected.tools.push(def); return () => {} } }
+  apply(ctx, { workDir: '/tmp/lingxu-hook' })
+  ctx._collected_deliver('agentTeams', {
+    listMembers: () => [{ name: 'solver-web-01', role: 'teammate', status: 'running', description: '解题 teammate：Web/图书馆' }],
+    listTasks: () => [],
+    memberName: () => 'solver-pwn-01',
+  })
+
+  // 钩子应当已订阅 session/event（在 serviceCtx 或 ctx 上）
+  const listener = ctx._collected.listeners.find((item) => item.event === 'session/event')
+  assert.ok(listener, 'agentTeams 就绪后必须订阅 session/event（只读观察）')
+
+  // 模拟 DSH 投递一条 teammate 消息到目标会话
+  listener.handler({ id: 'session-target', name: 'solver-pwn-01' }, {
+    type: 'user/message',
+    time: Date.parse('2026-09-29T06:00:00Z'),
+    data: {
+      source: { kind: 'team-message', teamId: 'team-1', messageId: 'team-message-e2e', senderId: 'a1', senderName: 'solver-web-01' },
+      message: { content: [{ type: 'text', text: 'Team message team-message-e2e from solver-web-01:' }, { type: 'text', text: '图书馆的凭据给你：admin:pass' }] },
+    },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+
+  const rows = await store.listTeamMessages(undefined, 50)
+  assert.equal(rows.length, 1, '钩子必须把消息落盘')
+  assert.equal(rows[0].kind, 'interactive')
+  assert.equal(rows[0].from, 'solver-web-01')
+  assert.equal(rows[0].to, 'solver-pwn-01', '收件人用会话解析出的成员名')
+  assert.match(rows[0].text, /图书馆的凭据给你/)
+  assert.equal(rows[0].messageId, 'team-message-e2e')
+
+  // /team 读回（视图数据源）：能看出「谁在和谁说什么」
+  // teams 缺失时 buildTeamState 会走空 payload → 这里给最小 teams 替身，走真实的数据组装路径
+  const state = await buildTeamState({
+    store,
+    teams: { listMembers: () => [{ name: 'solver-web-01', role: 'teammate', status: 'running', description: '' }], listTasks: () => [] },
+    caller: { id: 'lead' },
+    resolveAdapter: null,
+  })
+  assert.equal(state.messages.length, 1)
+  assert.equal(state.messages[0].kind, 'interactive')
+  assert.match(state.messages[0].text, /凭据/)
+
+  // 同一条消息重复投递（重放/冷启动）不重复入库
+  listener.handler({ id: 'session-target', name: 'solver-pwn-01' }, {
+    type: 'user/message',
+    time: Date.parse('2026-09-29T06:00:05Z'),
+    data: {
+      source: { kind: 'team-message', messageId: 'team-message-e2e', senderName: 'solver-web-01' },
+      message: { content: [{ type: 'text', text: '重复投递' }] },
+    },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal((await store.listTeamMessages(undefined, 50)).length, 1, 'messageId 去重')
+
+  // 普通用户消息绝不能进协同通信
+  listener.handler({ id: 'session-target', name: 'solver-pwn-01' }, { type: 'user/message', time: Date.now(), data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: '用户说的话' }] } } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal((await store.listTeamMessages(undefined, 50)).length, 1)
+  if (previousHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousHome
+})
+
 test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   const ctx = injectAwareCtx({}) // 一开始什么服务都没有
   apply(ctx, { workDir: '/tmp/lingxu-test' })
 
-  assert.equal(ctx._collected.tools.length, 16, '工具只依赖 tools，立即可用')
+  assert.equal(ctx._collected.tools.length, 17, '工具只依赖 tools，立即可用')
   assert.deepEqual(
     ctx._collected.injected.map((d) => d[0]).sort(),
-    ['agentTeams', 'commands', 'settings', 'systemPrompt', 'webServer'],
-    '五个可选服务都应通过 ctx.inject 声明（settings 用于 ctf_connect 回写设置页，task-27）',
+    ['agentTeams', 'commands', 'sessions', 'settings', 'systemPrompt', 'webServer'],
+    '六个可选服务都应通过 ctx.inject 声明（settings=设置页回写；sessions=token 用量投影对账，task-34）',
   )
-  assert.equal(ctx._collected.pending.length, 5, '依赖未就绪时应挂起而不是失败（含 settings）')
+  assert.equal(ctx._collected.pending.length, 6, '依赖未就绪时应挂起而不是失败（含 settings / sessions）')
 
   // 逐个交付服务
   const sections = []
@@ -292,14 +398,14 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(routes.some((r) => r.path === '/lingxu-ctf/state'), true, 'webServer 就绪后应注册面板路由')
 
   ctx._collected_deliver('commands', { register: () => () => {} })
-  assert.equal(ctx._collected.pending.length, 2, '只剩 agentTeams 与 settings 未就绪')
+  assert.equal(ctx._collected.pending.length, 3, '只剩 agentTeams / sessions / settings 未就绪')
 
   // settings 就绪 → deps.settings 被填上（ctf_connect 要用它回写设置页）
   ctx._collected_deliver('settings', {
     describe: () => [{ ns: 'lingxu-ctf', revision: 3 }],
     update: async () => {},
   })
-  assert.equal(ctx._collected.pending.length, 1, '只剩 agentTeams 未就绪')
+  assert.equal(ctx._collected.pending.length, 2, '只剩 agentTeams / sessions 未就绪')
 })
 
 test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延迟赋值）', async () => {
@@ -342,7 +448,7 @@ test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延�
 test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替身兼容）', () => {
   const ctx = mockCtx({ agentTeams: { spawnTeammate() {}, createTask() {}, listTasks() {}, listMembers() {} } })
   assert.doesNotThrow(() => apply(ctx, { workDir: '/tmp/lingxu-test' }))
-  assert.equal(ctx._collected.tools.length, 16)
+  assert.equal(ctx._collected.tools.length, 17)
   assert.equal(ctx._collected.sections.length, 1)
   assert.equal(ctx._collected.routes.some((r) => r.path === '/lingxu-ctf/state'), true)
 })
@@ -350,7 +456,7 @@ test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替�
 test('apply: 工具可通过 dispose 注销', () => {
   const ctx = mockCtx()
   apply(ctx, { workDir: '/tmp/lingxu-test' })
-  assert.equal(ctx._collected.tools.length, 16)
+  assert.equal(ctx._collected.tools.length, 17)
   ctx._disposeAll()
   assert.equal(ctx._collected.tools.length, 0)
 })
@@ -834,11 +940,11 @@ test('buildTeamState：响应形状严格按契约（成员 / 任务 / 消息 / 
 
   // ── messages：最新在前，字段裁剪到契约
   assert.equal(state.messages.length, 2)
-  assert.deepEqual(Object.keys(state.messages[0]).sort(), ['at', 'from', 'kind', 'text', 'to'])
+  assert.deepEqual(Object.keys(state.messages[0]).sort(), ['at', 'challengeId', 'from', 'kind', 'messageId', 'text', 'to'])
   assert.equal(state.messages[0].kind, 'status', '最新一条在前')
   assert.deepEqual(state.messages[1], {
     at: '2026-09-29T05:02:10.000Z', from: 'solver-neurosign-1', to: 'lead', kind: 'report',
-    text: 'NeuroSign 已解出，flag 已提交',
+    text: 'NeuroSign 已解出，flag 已提交', messageId: '', challengeId: null,
   })
 
   // ── counts

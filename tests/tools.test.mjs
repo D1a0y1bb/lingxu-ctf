@@ -180,10 +180,10 @@ const callsOf = (adapter, method) => adapter.calls.filter((call) => call.method 
 
 // ------------------------------------------------------------------ 规格形状
 
-test('导出 16 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
+test('导出 17 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
   const { specs, tools } = createHarness()
-  assert.equal(specs.length, 16)
-  assert.equal(TOOL_NAMES.length, 16)
+  assert.equal(specs.length, 17)
+  assert.equal(TOOL_NAMES.length, 17)
   assert.deepEqual(specs.map((spec) => spec.name), TOOL_NAMES)
   assert.deepEqual(Object.keys(tools).sort(), [...TOOL_NAMES].sort())
   for (const spec of specs) {
@@ -198,8 +198,8 @@ test('导出 16 个工具规格，名字与 TOOL_NAMES 一致且形状符合 def
 })
 
 test('buildToolSpecs() 无 deps 也能构造全部规格（执行时才需要依赖）', () => {
-  assert.equal(buildToolSpecs().length, 16)
-  assert.equal(buildToolSpecs({}).length, 16)
+  assert.equal(buildToolSpecs().length, 17)
+  assert.equal(buildToolSpecs({}).length, 17)
 })
 
 // ------------------------------------------------------------------ 连接解析失败
@@ -375,6 +375,54 @@ test('ctf_status：统计题目/分类/排名/理论题', async () => {
   assert.match(out, /我的排名: 第 2 名 \/ 共 3/)
   assert.match(out, /理论题: 共 1 套/)
   assert.match(out, /ctf_theory action=questions testId=1/)
+})
+
+test('★ task-34：ctf_status 显示 token 用量；拿不到就不显示、不编数字', async () => {
+  const callStatus = async (deps) => createHarness({ deps }).tools.ctf_status.execute({})
+
+  // ① 宿主注入读取器并返回数据 → 结果里出现千分位用量与来源
+  const out = await callStatus({
+    readTokenUsage: async () => ({
+      ok: true,
+      sessionId: 'session-abc',
+      inferred: false,
+      totalTokens: 16376086,
+      totals: { uncachedInputTokens: 308286, outputTokens: 144984, cacheReadTokens: 15922816, cacheWriteTokens: 0 },
+    }),
+  })
+  assert.match(out, /- token 用量: 工作 16,376,086/)
+  assert.match(out, /未缓存输入 308,286/)
+  assert.match(out, /输出 144,984/)
+  assert.match(out, /缓存读 15,922,816/)
+  assert.match(out, /合计 16,376,086/)
+  assert.match(out, /来源 会话日志（工作用量与 DSH tokenUsage 投影同口径）（会话 session-abc）/)
+  assert.equal(out.includes('缓存写'), false, '缓存写为 0 时不显示该桶')
+
+  // ② 自动识别（请求的 agent id 不是会话目录名）→ 如实标注，别让人以为读的是它
+  const inferredOut = await callStatus({
+    readTokenUsage: async () => ({
+      ok: true,
+      sessionId: 'session-real',
+      inferred: true,
+      requestedSessionId: 'session-ae82',
+      totalTokens: 42,
+      totals: { uncachedInputTokens: 30, outputTokens: 12, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    }),
+  })
+  assert.match(inferredOut, /工作 42/)
+  assert.match(inferredOut, /自动识别/)
+  assert.match(inferredOut, /请求的 session-ae82 不是会话目录/)
+
+  // ③ 读取失败 → 明说失败原因；不显示任何数字
+  const failedOut = await callStatus({ readTokenUsage: async () => { throw new Error('EACCES') } })
+  assert.match(failedOut, /token 用量: 读取失败（EACCES）/)
+
+  // ④ 没有读取器（老宿主）→ 这一行完全不出现
+  assert.equal((await callStatus({})).includes('token 用量'), false)
+
+  // ⑤ 读取器返回 ok:false / 0 → 同样不显示（展示 0 会误导）
+  const zeroOut = await callStatus({ readTokenUsage: async () => ({ ok: false, error: '无日志' }) })
+  assert.equal(zeroOut.includes('token 用量'), false)
 })
 
 test('ctf_status：myRank 失败不影响主输出', async () => {
@@ -1238,7 +1286,7 @@ test('ctf_connect：cookie 缺 csrftoken 只提醒不拒绝', async () => {
   assert.match(out, /^✅ 已连接凌虚赛事平台/)
   assert.match(out, /建议把 csrftoken 一起带上/)
   assert.match(out, /不强制/)
-  assert.ok(specs.length === 16)
+  assert.ok(specs.length === 17)
 
   const withCsrf = await tools.ctf_connect.execute({
     baseUrl: 'https://example.com:8000',
@@ -1299,8 +1347,8 @@ function sessionExpiredError() {
   })
 }
 
-test('基础工具数 16：TOOL_NAMES 含 ctf_session / ctf_delay_env / ctf_notice（AWD/CFS 工具动态注册，不在此列）', () => {
-  assert.equal(TOOL_NAMES.length, 16)
+test('基础工具数 17：TOOL_NAMES 含 ctf_session / ctf_delay_env / ctf_notice / ctf_team_log（AWD/CFS 工具动态注册，不在此列）', () => {
+  assert.equal(TOOL_NAMES.length, 17)
   assert.ok(TOOL_NAMES.includes('ctf_delay_env'))
   assert.ok(TOOL_NAMES.includes('ctf_notice'))
   assert.equal(TOOL_NAMES.includes('ctf_awd_submit'), false, 'AWD 工具由 buildAwdToolSpecs 动态注册')

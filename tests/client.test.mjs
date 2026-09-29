@@ -309,6 +309,14 @@ const {
   VIEW_LABEL_FALLBACK,
   TEAM_URL,
   THEORY_URL,
+  renderTokenUsageHtml,
+  messageCategory,
+  MESSAGE_CATEGORY_LABELS,
+  normalizeUsageBuckets,
+  formatCount,
+  loadTokenUsage,
+  resetUsageCache,
+  USAGE_URL,
   formatRelativeSeconds,
   formatElapsed,
   STALE_AFTER_SECONDS,
@@ -3153,6 +3161,188 @@ test('★ tab 文案：用户要的长名字（凌虚竞赛平台 CTF Agent 模�
   assert.match(css, /\.lx-vtabs\{[^}]*overflow-x:auto/)
 })
 
+// ══════════════════════════════════════ 17. task-35：协同通信变丰富（钩子 + ctf_team_log）
+
+test('★ task-35：只读钩子解析 teammate 消息（sent → 送达投递事件）', async () => {
+  const { teamDeliveryOf } = await import('../lib/index.js')
+
+  // DSH 投递给目标会话的 user/message：data.source.kind === 'team-message'
+  const delivery = teamDeliveryOf({
+    type: 'user/message',
+    time: 1790000000000,
+    data: {
+      source: { kind: 'team-message', teamId: 'team-1', messageId: 'team-message-abc', senderId: 'agent-1', senderName: 'solver-web-01' },
+      message: {
+        content: [
+          { type: 'text', text: 'Team message team-message-abc from solver-web-01:' },
+          { type: 'text', text: '图书馆那道题我拿到 shell 了，凭据在 /tmp/creds' },
+        ],
+      },
+    },
+  })
+  assert.equal(delivery.messageId, 'team-message-abc')
+  assert.equal(delivery.from, 'solver-web-01')
+  assert.equal(delivery.kind, 'interactive', '钩子记的是「agent 间交流」，与 ctf_team_log 的 kind 区分开')
+  assert.equal(delivery.text, '图书馆那道题我拿到 shell 了，凭据在 /tmp/creds', '去掉信箱自动加的信封行')
+  assert.equal(delivery.at, 1790000000000)
+
+  // 非 team 消息 / 其它事件类型 → null（绝不能把普通用户消息当成协同消息）
+  assert.equal(teamDeliveryOf({ type: 'user/message', data: { source: { kind: 'user' }, message: { content: [] } } }), null)
+  assert.equal(teamDeliveryOf({ type: 'assistant/message', data: {} }), null)
+  assert.equal(teamDeliveryOf(null), null)
+  assert.equal(teamDeliveryOf({ type: 'user/message', data: {} }), null)
+
+  // 内容异常也不能抛
+  const empty = teamDeliveryOf({ type: 'user/message', data: { source: { kind: 'team-message', messageId: 'm1', senderName: 'x' } } })
+  assert.equal(empty.text, '')
+  assert.equal(empty.kind, 'interactive')
+})
+
+test('★ task-35：钩子失败绝不能影响消息送达（注入抛错的 store 也不崩）', async () => {
+  const { teamDeliveryOf } = await import('../lib/index.js')
+  // 模拟钩子处理器：与 index.js 里同构（try/catch + 不 await + catch 兜底）
+  const boom = { appendTeamMessage: async () => { throw new Error('disk full') } }
+  const event = {
+    type: 'user/message',
+    time: 1,
+    data: { source: { kind: 'team-message', messageId: 'm9', senderName: 's' }, message: { content: [{ type: 'text', text: 'hi' }] } },
+  }
+  let delivered = false
+  const runHook = () => {
+    try {
+      const parsed = teamDeliveryOf(event)
+      if (parsed === null) return
+      void boom.appendTeamMessage('k', parsed).catch(() => { delivered = true })
+    } catch { delivered = true }
+  }
+  assert.doesNotThrow(runHook, '钩子本身不得抛出')
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(delivered, true, '写盘失败被吞掉（消息投递早已完成，不受影响）')
+})
+
+test('★ task-35：store 按 messageId 去重；ctf_team_log 的 challengeId 落盘', async () => {
+  const { CtfStore } = await import('../lib/store.js')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const store = new CtfStore({ dir: mkdtempSync(join(tmpdir(), 'lx-store-t35-')) })
+
+  const first = await store.appendTeamMessage('k', { from: 'a', to: 'b', kind: 'interactive', text: 'hi', messageId: 'team-message-1' })
+  const again = await store.appendTeamMessage('k', { from: 'a', to: 'b', kind: 'interactive', text: 'hi', messageId: 'team-message-1' })
+  const rows = await store.listTeamMessages('k', 50)
+  assert.equal(rows.length, 1, '同一条消息重复投递只记一次')
+  assert.equal(first.at, again.at)
+
+  const logged = await store.appendTeamMessage('k', { from: 'solver-x', to: 'team', kind: 'clue', text: '凭据可复用', challengeId: 12 })
+  assert.equal(logged.challengeId, 12)
+  assert.equal((await store.listTeamMessages('k', 50)).length, 2)
+  // 没有 messageId 的消息不去重（编排事件每次都要记）
+  await store.appendTeamMessage('k', { from: 'lead', to: 'team', kind: 'status', text: '同一句话' })
+  await store.appendTeamMessage('k', { from: 'lead', to: 'team', kind: 'status', text: '同一句话' })
+  assert.equal((await store.listTeamMessages('k', 50)).length, 4)
+})
+
+test('★ task-35：prompt 要求 agent 用 ctf_team_log（跨题线索是硬要求）', async () => {
+  const { buildSolverPrompt, buildPrepPrompt } = await import('../lib/orchestrate.js')
+  const challenge = { id: 14, name: '图书馆管理系统', category: 'Web', score: 250 }
+  const deps = { name: 'solver-web-01', challenge, taskId: 'task-1', connection: { platform: 'lingxu', baseUrl: 'x', eventId: 4 }, connKey: 'k', workDir: '/tmp/w', envLimit: 2, envHeld: 0, taskType: 2 }
+  const solverText = JSON.stringify(buildSolverPrompt(deps))
+  assert.match(solverText, /ctf_team_log/, 'solver prompt 必须提到 ctf_team_log')
+  assert.match(solverText, /kind=\\"clue\\"/, '并要求跨题线索用 clue')
+  assert.match(solverText, /硬要求/, '线索落档要是硬要求，不是建议')
+  assert.match(solverText, /send_message/, '同时说清与 send_message 的分工')
+
+  const prepText = JSON.stringify(buildPrepPrompt({ ...deps, taskType: 1 }))
+  assert.match(prepText, /ctf_team_log/, '准备 agent 收尾时也要落一条')
+  assert.match(prepText, /kind=\\"progress\\"/)
+})
+
+test('★ task-35：协同通信按来源分类（编排 / 交流 / 线索 / 求助 / 进展）并可筛选', async () => {
+  const { api } = await loadClientModule()
+  assert.equal(api.messageCategory('interactive'), 'interactive')
+  assert.equal(api.messageCategory('clue'), 'clue')
+  assert.equal(api.messageCategory('spawn'), 'orchestration')
+  assert.equal(api.messageCategory('report'), 'orchestration')
+  assert.equal(api.messageCategory('note'), 'note')
+  assert.equal(api.messageCategory(''), 'orchestration')
+  assert.equal(api.MESSAGE_CATEGORY_LABELS.interactive, 'Agent 交流')
+
+  const state = api.normalizeState({ connection: { key: 'k' }, challenges: [], leaderboard: [], submissions: [] })
+  const team = api.normalizeTeam({
+    ok: true,
+    members: [],
+    tasks: [],
+    messages: [
+      { at: '2026-09-29T04:00:00Z', from: 'lead', to: 'team', kind: 'spawn', text: '拉起 3 个 agent' },
+      { at: '2026-09-29T04:01:00Z', from: 'solver-web-01', to: 'solver-pwn-01', kind: 'interactive', text: '图书馆的凭据给你' },
+      { at: '2026-09-29T04:02:00Z', from: 'solver-web-01', to: 'team', kind: 'clue', text: 'A 题凭据可登 B 题', challengeId: 12, messageId: 'team-message-9' },
+      { at: '2026-09-29T04:03:00Z', from: 'solver-pwn-01', to: 'lead', kind: 'help', text: '缺 libc 版本' },
+      { at: '2026-09-29T04:04:00Z', from: 'solver-rev-02', to: 'team', kind: 'progress', text: '拿到 shell' },
+    ],
+  })
+  const model = { state, team, board: [], reports: api.normalizeReports(null) }
+
+  const html = api.renderViewMessagesHtml(model, {})
+  // 分类筛选条：只显示存在的分类 + 全部
+  assert.match(html, /lx-vmsg-filters/)
+  assert.match(html, /全部 5/)
+  assert.match(html, /编排事件 1/)
+  assert.match(html, /Agent 交流 1/)
+  assert.match(html, /跨题线索 1/)
+  assert.match(html, /求助 1/)
+  assert.match(html, /进展 1/)
+  // 每条消息带分类徽章；跨题线索显示关联题目
+  assert.match(html, /lx-vmsg-kind/)
+  assert.match(html, /lx-vmsg-challenge[^>]*>#12</)
+  assert.match(html, /A 题凭据可登 B 题/)
+
+  // 筛选：只看线索 → 其它消息不出现
+  const clueOnly = api.renderViewMessagesHtml(model, { msgKind: 'clue' })
+  assert.match(clueOnly, /A 题凭据可登 B 题/)
+  assert.equal(clueOnly.includes('缺 libc 版本'), false)
+  assert.equal(clueOnly.includes('拉起 3 个 agent'), false)
+  assert.match(clueOnly, /lx-vmsg-filter-on/, '当前分类要高亮')
+
+  // 筛选后为空 → 明确空态 + 指路
+  const none = api.renderViewMessagesHtml(model, { msgKind: 'note' })
+  assert.match(none, /该分类下暂无记录/)
+  assert.match(none, /点「全部」/)
+})
+
+test('★ task-35：ctf_team_log 落盘并返回可读结果；参数容错', async () => {
+  const { buildToolSpecs } = await import('../lib/tools.js')
+  const rows = []
+  const store = {
+    async appendTeamMessage(connKey, message) { rows.push({ connKey, ...message }); return { at: '2026-09-29T05:00:00.000Z' } },
+    async listTeamMessages() { return rows },
+  }
+  const specs = buildToolSpecs({ store, resolveAdapter: async () => ({ connKey: 'k1' }), config: {}, now: () => Date.now(), logger: {} })
+  const tool = specs.find((spec) => spec.name === 'ctf_team_log')
+  assert.ok(tool, '第 17 个工具 ctf_team_log 必须存在')
+  assert.deepEqual(Object.keys(tool.parameters).sort(), ['challengeId', 'connection', 'kind', 'text', 'to'])
+
+  const out = await tool.execute({ text: 'A 题凭据可登 B 题 ssh', kind: 'clue', challengeId: 12, to: 'lead' })
+  assert.equal(typeof out, 'string')
+  assert.match(out, /已记入团队日志（跨题线索（题目 #12） → lead）/)
+  assert.equal(rows[0].kind, 'clue')
+  assert.equal(rows[0].challengeId, 12)
+  assert.equal(rows[0].to, 'lead')
+
+  // 空文本 → 明确报错，不写盘
+  const empty = await tool.execute({})
+  assert.match(empty, /需要 text/)
+  assert.equal(rows.length, 1)
+
+  // 非法 kind → 退化为 note（不报错、不丢消息）
+  const bogus = await tool.execute({ text: '随便记一下', kind: '不存在的类型' })
+  assert.match(bogus, /已记入团队日志/)
+  assert.equal(rows[1].kind, 'note')
+
+  // store 缺失 → 明确说明
+  const noStore = buildToolSpecs({}).find((spec) => spec.name === 'ctf_team_log')
+  assert.match(await noStore.execute({ text: 'x' }), /没有可用的团队日志存储/)
+})
+
 test('★ 预览假数据防漂移：配置项必须与宿主 describeConfigFields() 完全一致', async (t) => {
   // 教训（task-25）：**预览页的假数据本身就是漂移源** —— 配置项从 11 涨到 14、
   // 面板假数据缺 leaderboard，都是「手抄」过期造成的。
@@ -3382,6 +3572,268 @@ test('★ 布局：间距只用 4/6/8/10/12/14/16/20/24（防随手写 13px 之�
 
 // ══════════════════════════════════════ 15. task-30：实时信息 / 报告 / 环境 / 耗时 / 协同
 
+// ══════════════════════════════════════ 16. task-34：token 用量（会话日志 + DSH 投影对账）
+
+test('★ task-34：用量折叠按 DSH tokenUsage 投影语义（同 step 替换、重试重算）', async () => {
+  const { foldTokenUsage, usageBuckets, usageSampleOf } = await import('../lib/index.js')
+
+  // ① 单条 assistant/message：inputTokens 即「未缓存输入」
+  assert.deepEqual(usageBuckets({ inputTokens: 10, outputTokens: 2, cacheReadTokens: 3 }), {
+    uncachedInputTokens: 10, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 0,
+  })
+
+  // ② 同一 (turn, step) 的后续样本**替换**而不是累加 —— 直接相加会翻倍（真实日志里
+  //    assistant/attempt 与 assistant/message 常常描述同一步）
+  const replaced = foldTokenUsage([
+    { type: 'assistant/attempt', data: { turn: 1, step: 1, stream: { chunks: [{ type: 'usage', usage: { inputTokens: 100, outputTokens: 10 } }] } } },
+    { type: 'assistant/message', time: 1, data: { turn: 1, step: 1, usage: { inputTokens: 120, outputTokens: 12 } } },
+  ])
+  assert.deepEqual(replaced, { uncachedInputTokens: 120, outputTokens: 12, cacheReadTokens: 0, cacheWriteTokens: 0 })
+
+  // ③ 不同 step 累加
+  const added = foldTokenUsage([
+    { type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 100, outputTokens: 10 } } },
+    { type: 'assistant/message', data: { turn: 1, step: 2, usage: { inputTokens: 50, outputTokens: 5 } } },
+  ])
+  assert.deepEqual(added, { uncachedInputTokens: 150, outputTokens: 15, cacheReadTokens: 0, cacheWriteTokens: 0 })
+
+  // ④ llm/retry-started 关槽 → 重试后的新样本重新累加（不是替换）
+  const retried = foldTokenUsage([
+    { type: 'assistant/attempt', data: { turn: 2, step: 3, stream: { chunks: [{ type: 'usage', usage: { inputTokens: 100, outputTokens: 10 } }] } } },
+    { type: 'llm/retry-started', data: { turn: 2, step: 3 } },
+    { type: 'assistant/message', data: { turn: 2, step: 3, usage: { inputTokens: 100, outputTokens: 10 } } },
+  ])
+  assert.deepEqual(retried, { uncachedInputTokens: 200, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 })
+
+  // ⑤ 其它事件不参与；空输入为全 0
+  assert.deepEqual(foldTokenUsage([{ type: 'step/start', data: {} }, { type: 'user/message' }]), {
+    uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+  })
+  assert.deepEqual(foldTokenUsage(null), { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
+
+  // ⑥ 样本来源：message.usage 优先；attempt 取 stream 里**最后一个** usage chunk
+  assert.deepEqual(usageSampleOf({ type: 'assistant/message', data: { usage: { inputTokens: 1 } } }), { inputTokens: 1 })
+  assert.deepEqual(
+    usageSampleOf({ type: 'assistant/attempt', data: { stream: { chunks: [{ type: 'usage', usage: { inputTokens: 2 } }, { type: 'text' }, { type: 'usage', usage: { inputTokens: 3 } }] } } }),
+    { inputTokens: 3 },
+  )
+  assert.equal(usageSampleOf({ type: 'tool/call' }), undefined)
+})
+
+test('★ task-34：会话日志是多帧 zstd，必须逐帧解压（整文件解只出第一帧）', async () => {
+  const { scanZstdFrames, ZSTD_FRAME_MAGIC } = await import('../lib/index.js')
+  const { zstdCompressSync } = await import('node:zlib')
+
+  const frameA = zstdCompressSync(Buffer.from('{"type":"session","version":4}\n'))
+  const frameB = zstdCompressSync(Buffer.from('{"type":"assistant/message","data":{"turn":1,"step":1,"usage":{"inputTokens":5,"outputTokens":1}}}\n'))
+  const buffer = Buffer.concat([frameA, frameB])
+
+  const { frames, tornStart } = scanZstdFrames(buffer)
+  assert.equal(frames.length, 2, '两个帧都要被识别')
+  assert.equal(tornStart, undefined)
+  assert.equal(buffer.readUInt32LE(0), ZSTD_FRAME_MAGIC)
+  // 第二帧起点必须是第一帧终点
+  assert.equal(frames[1].start, frames[0].end)
+
+  // 撕裂帧：末尾截断 → 只返回完整帧 + tornStart
+  const torn = scanZstdFrames(buffer.subarray(0, buffer.length - 5))
+  assert.equal(torn.frames.length, 1)
+  assert.equal(torn.tornStart, frames[1].start)
+})
+
+test('★ task-34：readSessionTokenUsage 读真实形状的日志（含增量与错误路径）', async () => {
+  const { readSessionTokenUsage } = await import('../lib/index.js')
+  const { zstdCompressSync } = await import('node:zlib')
+  const { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const root = mkdtempSync(join(tmpdir(), 'lx-usage-'))
+  const sessionId = 'session-test-usage'
+  mkdirSync(join(root, '--Users-x--', sessionId), { recursive: true })
+  const file = join(root, '--Users-x--', sessionId, 'session.v4.jsonl.zstd')
+
+  const header = zstdCompressSync(Buffer.from('{"type":"session","version":4,"id":"session-test-usage"}\n'))
+  writeFileSync(file, header)
+  const stepOne = zstdCompressSync(Buffer.from([
+    '{"type":"step/start","time":1000,"data":{"turn":1,"step":1}}',
+    '{"type":"assistant/message","time":1500,"data":{"turn":1,"step":1,"usage":{"inputTokens":1000,"outputTokens":200,"cacheReadTokens":3000}}}',
+    '',
+  ].join('\n')))
+  appendFileSync(file, stepOne)
+
+  const first = await readSessionTokenUsage({ sessionId, sessionsRoot: root })
+  assert.equal(first.ok, true)
+  assert.equal(first.totals.uncachedInputTokens, 1000)
+  assert.equal(first.totals.outputTokens, 200)
+  assert.equal(first.totals.cacheReadTokens, 3000)
+  assert.equal(first.totalTokens, 4200)
+  assert.equal(first.steps, 1)
+
+  // 追加一帧（模拟日志增长）→ 增量只解新帧，且累加正确
+  const stepTwo = zstdCompressSync(Buffer.from([
+    '{"type":"step/start","time":2000,"data":{"turn":1,"step":2}}',
+    '{"type":"assistant/message","time":2500,"data":{"turn":1,"step":2,"usage":{"inputTokens":50,"outputTokens":5}}}',
+    '',
+  ].join('\n')))
+  appendFileSync(file, stepTwo)
+  const second = await readSessionTokenUsage({ sessionId, sessionsRoot: root })
+  assert.equal(second.totals.uncachedInputTokens, 1050, '增量累加不能丢历史')
+  assert.equal(second.totalTokens, 4255)
+  assert.equal(second.steps, 2)
+
+  // 二次读取（无新增）不得重复累加
+  const third = await readSessionTokenUsage({ sessionId, sessionsRoot: root })
+  assert.equal(third.totalTokens, 4255, '同一份日志重复读取必须幂等')
+
+  // 找不到会话 → ok:false + 可读原因（前端如实展示）
+  // 给的 id 不存在 → 退化为同一 root 下**最近写入**的会话日志，并如实标注 requestedSessionId
+  const missing = await readSessionTokenUsage({ sessionId: 'session-nope', sessionsRoot: root })
+  assert.equal(missing.ok, true)
+  assert.equal(missing.inferred, true)
+  assert.equal(missing.requestedSessionId, 'session-nope')
+  assert.equal(missing.sessionId, sessionId)
+  // 空 sessionId：退化为**最近写入**的会话日志（老宿主拿不到 sessions 服务时也能出数字）
+  const latest = await readSessionTokenUsage({ sessionId: '', sessionsRoot: root })
+  assert.equal(latest.ok, true)
+  assert.equal(latest.inferred, true)
+  assert.equal(latest.sessionId, sessionId)
+  assert.equal(latest.totalTokens, 4255)
+  // 目录里一个日志都没有 → 明确失败（不是静默 0）
+  const emptyRoot = mkdtempSync(join(tmpdir(), 'lx-usage-empty-'))
+  const nothing = await readSessionTokenUsage({ sessionId: '', sessionsRoot: emptyRoot })
+  assert.equal(nothing.ok, false)
+  assert.match(nothing.error, /找不到任何会话日志/)
+})
+
+test('★ task-34：用量展示 —— 工作 / 压缩开销 / 合计 三个数 + 与 DSH 投影对账', async () => {
+  const { api } = await loadClientModule()
+
+  // ① 两边一致（工作用量），且有压缩开销 → 三个数都出现，压缩明确标注、不报「不一致」
+  const agreed = api.renderTokenUsageHtml({
+    projection: { uncachedInputTokens: 308286, outputTokens: 144984, cacheReadTokens: 15922816 },
+    log: { uncachedInputTokens: 308286, outputTokens: 144984, cacheReadTokens: 15922816 },
+    compactionTokens: 519313,
+    billedTokens: 16376086 + 519313,
+  })
+  assert.match(agreed, /token 用量：工作 16,376,086/)
+  assert.match(agreed, /未缓存输入 308,286/)
+  assert.match(agreed, /压缩开销 519,313（上下文压缩，DSH 投影不含）/)
+  assert.match(agreed, /合计 16,895,399/)
+  assert.match(agreed, /合计 = 工作 \+ 压缩/)
+  assert.match(agreed, /来源 DSH 会话投影/)
+  assert.match(agreed, /与 DSH 投影逐桶一致/)
+  assert.equal(agreed.includes('lx-vwarn'), false, '工作用量一致就不该告警（压缩差额有明确解释）')
+
+  // ② 与投影**真的**不一致（工作用量不同）→ 显式告警，且说明压缩不参与比较
+  const mismatch = api.renderTokenUsageHtml({
+    projection: { uncachedInputTokens: 100, outputTokens: 0, cacheReadTokens: 0 },
+    log: { uncachedInputTokens: 90, outputTokens: 0, cacheReadTokens: 0 },
+    compactionTokens: 5,
+    billedTokens: 95,
+  })
+  // 有投影时「工作」显示的就是投影值（= DSH 界面口径）；日志不一致要在括号里两个数都摆出来
+  assert.match(mismatch, /token 用量：工作 100/)
+  assert.match(mismatch, /⚠ 与 DSH 投影不一致（投影 100 · 日志 90；压缩开销不参与本比较）/)
+  assert.match(mismatch, /lx-vwarn/)
+
+  // ③ 只有日志（没有投影）→ 来源标会话日志，压缩照常单列
+  const onlyLog = api.renderTokenUsageHtml({ projection: null, log: { uncachedInputTokens: 7, outputTokens: 3 }, compactionTokens: 0, billedTokens: 10 })
+  assert.match(onlyLog, /token 用量：工作 10/)
+  assert.match(onlyLog, /合计 10/)
+  assert.match(onlyLog, /压缩开销 0/)
+  assert.match(onlyLog, /来源 会话日志/)
+  assert.equal(onlyLog.includes('逐桶一致'), false)
+
+  // ④ 都没有 → 如实说明（不编数字）
+  const none = api.renderTokenUsageHtml({ projection: null, log: null, reason: '会话日志不可读' })
+  assert.match(none, /token 用量：暂不可用（会话日志不可读）/)
+  assert.equal(/\d/.test(none.replace(/token 用量：暂不可用/, '')), false, '拿不到就不得出现数字')
+
+  // ⑤ 计数格式与归一
+  assert.equal(api.formatCount(16376086), '16,376,086')
+  assert.equal(api.formatCount(0), '0')
+  assert.deepEqual(api.normalizeUsageBuckets({ inputTokens: 5, outputTokens: 1 }), {
+    uncachedInputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, total: 6,
+  })
+  assert.equal(api.normalizeUsageBuckets({}), null, '全 0 视为无数据')
+})
+
+test('★ task-34：用量只在拿到 sessionId 时请求，且 5 秒内不重复打（视图与面板共用缓存）', async () => {
+  const { api } = await loadClientModule()
+  api.resetUsageCache()
+  const calls = []
+  const fetchImpl = async (url) => {
+    calls.push(String(url))
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, totals: { uncachedInputTokens: 10, outputTokens: 5 } }),
+    }
+  }
+  const first = await api.loadTokenUsage(fetchImpl, 'session-abc')
+  const second = await api.loadTokenUsage(fetchImpl, 'session-abc')
+  assert.equal(calls.length, 1, 'TTL 内复用缓存（面板与视图不会各打一次）')
+  assert.equal(first.log.total, 15)
+  assert.deepEqual(second, first)
+
+  // 换会话 → 立刻重新请求
+  await api.loadTokenUsage(fetchImpl, 'session-other')
+  assert.equal(calls.length, 2)
+  assert.ok(calls[0].startsWith(`${api.USAGE_URL}?session=session-abc`))
+
+  // 宿主返回 ok:false → 保留原因（UI 显示暂不可用），不抛错
+  api.resetUsageCache()
+  const failed = await api.loadTokenUsage(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ ok: false, error: '找不到会话日志' }),
+  }), 'session-xyz')
+  assert.equal(failed.log, null)
+  assert.match(failed.reason, /找不到会话日志/)
+
+  // 空 sessionId：仍然请求（宿主退化为最近会话日志），并回填解析出的 sessionId + inferred
+  api.resetUsageCache()
+  const inferredCall = []
+  const inferred = await api.loadTokenUsage(async (url) => {
+    inferredCall.push(String(url))
+    return { ok: true, status: 200, json: async () => ({ ok: true, sessionId: 'session-recent', inferred: true, totals: { uncachedInputTokens: 3, outputTokens: 2 } }) }
+  }, '')
+  assert.equal(inferredCall[0], api.USAGE_URL, '不带 session 参数')
+  assert.equal(inferred.sessionId, 'session-recent')
+  assert.equal(inferred.inferred, true)
+  assert.equal(inferred.log.total, 5)
+  assert.match(api.renderTokenUsageHtml({ log: inferred.log, projection: null, inferred: true }), /自动识别/)
+
+  // 没有 fetch → null（调用方据此显示兜底）
+  assert.equal(await api.loadTokenUsage(null, 'session-abc'), null)
+  api.resetUsageCache()
+})
+
+test('★ task-34：没有可用的用量来源时，视图与面板都显示同一句兜底（两族共用片段）', async () => {
+  const { api, impl } = await (async () => {
+    const mod = await loadClientModule()
+    const source = viewFetch({ state: fullSnapshot() })
+    return { api: mod.api, impl: source.impl }
+  })()
+  // 视图：Agent 活动 tab 里出现兜底行（没有 sessions ctx → 投影为空；宿主路由返回失败）
+  const { dom, view } = mountView({
+    fetchImpl: async (url, init) => {
+      if (String(url).startsWith(api.USAGE_URL)) {
+        return { ok: true, status: 200, json: async () => ({ ok: false, error: '会话日志不可读' }) }
+      }
+      return impl(url, init)
+    },
+  })
+  await view.refresh()
+  view.setTab('agents')
+  const text = collectText(dom.document.body)
+  assert.match(text, /token 用量：暂不可用/)
+  assert.match(text, /会话日志不可读/)
+  view.destroy()
+  api.resetUsageCache()
+})
+
 test('★ task-30：相对时间与耗时格式化', async () => {
   const { api } = await loadClientModule()
   assert.equal(api.formatRelativeSeconds(0), '刚刚')
@@ -3428,9 +3880,10 @@ test('★ task-30：agent 活动显示「在做啥」+ 相对时间 + 停滞标�
   // 本轮耗时 + token 如实说明
   assert.match(html, /本轮已运行 12 分 34 秒/)
   assert.match(html, /团队最后活动 12 秒前/)
-  assert.match(html, /token 用量：宿主未提供/)
-  assert.match(html, /DSH 未向插件暴露 token 统计/)
-  assert.equal(/token 用量：\d/.test(html), false, '拿不到就不得编造数字')
+  // task-34：这条断言改了语义 —— 以前永远为真（「宿主未提供」），现在必须验证**真实路径**。
+  // 团队 payload 的 tokenUsage.available=false 只作兜底：显示「暂不可用」+原因，不编数字。
+  assert.match(html, /token 用量：暂不可用/)
+  assert.equal(/token 用量：合计/.test(html), false, '兜底路径不得出现合计数字')
 
   // 任务耗时：已完成 = updatedAt-createdAt；进行中 = now-createdAt
   assert.equal(api.taskElapsedSeconds({ status: 'completed', createdAt: '2026-09-29T04:00:00Z', updatedAt: '2026-09-29T04:05:00Z' }), 300)
@@ -3544,7 +3997,8 @@ test('★ task-30：协同通信按对话对分组；数据少时说明原因', 
   const emptyHtml = api.renderViewMessagesHtml({ state, team: emptyTeam, board: [], reports: api.normalizeReports(null) })
   assert.match(emptyHtml, /暂无协同记录/)
   assert.match(emptyHtml, /send_message/)
-  assert.match(emptyHtml, /数据源限制/)
+  assert.match(emptyHtml, /ctf_team_log/)
+  assert.match(emptyHtml, /投递时/)
 })
 
 test('★ task-30：页脚显示数据新鲜度（优先宿主 cachedAt / fromCache）', async () => {
