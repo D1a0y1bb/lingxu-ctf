@@ -1,6 +1,6 @@
 {
   "name": "dsh-lingxu-ctf",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "DSH 凌虚竞赛平台 CTF 解题插件：自动枚举赛题/理论题/排行榜，并发 agent 团队协同解题，自动提交 flag 与生成 writeup。",
   "type": "module",
   "main": "./lib/index.js",
@@ -57,13 +57,13 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "author": "D1a0y1bb",
-  "homepage": "https://github.com/D1a0y1bb/dsh-lingxu-ctf#readme",
+  "homepage": "https://github.com/D1a0y1bb/lingxu-ctf#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/D1a0y1bb/dsh-lingxu-ctf.git"
+    "url": "git+https://github.com/D1a0y1bb/lingxu-ctf.git"
   },
   "bugs": {
-    "url": "https://github.com/D1a0y1bb/dsh-lingxu-ctf/issues"
+    "url": "https://github.com/D1a0y1bb/lingxu-ctf/issues"
   },
   "publishConfig": {
     "access": "public"
