@@ -2300,3 +2300,33 @@ test('视图 CSS：作用域限定在 .lx-view / .lx-view-host，且不含任何
   // 深色主题变量要覆盖视图
   assert.match(css, /@media \(prefers-color-scheme:dark\)\{\.lx-view\{/)
 })
+
+test('理论题状态：交卷后必须显示「已交卷」，不能显示「未开始」', () => {
+  // 真实 bug：平台交卷后 is_begin 变回 false、is_parse 变 true。
+  // 只看 isBegin 会显示「未开始」（用户在真实 session 里反馈过）。
+  const dom = createDom()
+  const mk = (theory) => normalizeState({
+    ok: true,
+    connection: { key: 'k', platform: 'lingxu', baseUrl: 'https://x', eventId: 4 },
+    event: {}, stats: {}, challenges: [], leaderboard: [], submissions: [], theory,
+  })
+
+  // 已交卷：is_begin=false + is_parse=true
+  const submitted = mk([{ id: 3, name: '理论题', count: 100, isBegin: false, isParse: true, parseCount: 1, statusLabel: '已交卷' }])
+  const html1 = renderTheoryHtml(submitted)
+  assert.match(html1, /已交卷/, '必须显示已交卷')
+  assert.doesNotMatch(html1, /未开始/, '不得显示未开始')
+  assert.match(html1, /交卷 1 次/)
+
+  // 进行中：is_begin=true
+  const running = mk([{ id: 3, name: '理论题', count: 100, isBegin: true, isParse: false }])
+  assert.match(renderTheoryHtml(running), /进行中/)
+
+  // 未开始
+  const fresh = mk([{ id: 3, name: '理论题', count: 100, isBegin: false, isParse: false }])
+  assert.match(renderTheoryHtml(fresh), /未开始/)
+
+  // status==='submitted' 也能兜住（statusLabel 缺失时）
+  const noLabel = mk([{ id: 3, name: '理论题', count: 100, isBegin: false, status: 'submitted' }])
+  assert.match(renderTheoryHtml(noLabel), /已交卷/)
+})
