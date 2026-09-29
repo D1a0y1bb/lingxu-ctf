@@ -25,6 +25,9 @@ import {
   parseMemberDescription,
   parseTaskSubject,
   pathSlug,
+  prepFileFor,
+  scoreChallenge,
+  solverDirFor,
   sanitizeSlug,
   probeSession,
   selectChallenges,
@@ -153,6 +156,7 @@ async function makeOrchestrator({
   adapterOverride = null,
   resolveError = null,
   details = null,
+  existsSync = null,
 } = {}) {
   const { adapter, calls } = makeAdapter(challenges, { releaseImpl, details })
   const resolved = { fail: Boolean(resolveError) }
@@ -161,6 +165,7 @@ async function makeOrchestrator({
     teams,
     store,
     now: () => 1700000000000,
+    ...(existsSync ? { existsSync } : {}),
     resolveAdapter: async () => {
       if (resolved.fail) throw new Error(resolveError)
       return { adapter: adapterOverride ?? adapter, connection: CONNECTION }
@@ -1511,7 +1516,7 @@ test('环境调度：envLimit 只约束环境题，非环境题不受限（10 �
   assert.equal(calls.spawn.length, 6, '总并发 = 6')
   assert.match(summary, /环境调度：同时最多 2 个环境/)
   assert.match(summary, /本轮环境题配额 2 个/)
-  assert.match(summary, /环境排队（2 题：环境配额 2\/2 已满/)
+  assert.match(summary, /环境排队（6 题：配额 2\/2 已满/)
   assert.match(summary, /题型探测：本轮按需探测 \d+ 题/)
   // 每道环境题的 prompt 都要写清「环境稀缺、解完立刻释放」
   const envPrompt = calls.spawn.find((c) => c.request.name.includes('env-')).request.prompt.map((b) => b.text).join('\n')
@@ -1555,8 +1560,12 @@ test('环境调度：envLimit=0（自学习）→ 用平台实测值；配置值
   const { teams, calls } = makeTeams({ members })
   const learned = await makeOrchestrator({ challenges: envs, teams, store, details, config: { concurrency: 5, envLimit: 0 } })
   const learnedSummary = await learned.orchestrator.start({ __agent: AGENT })
-  assert.equal(calls.spawn.length, 3, `自学习到 3 就应该放 3 个环境题，实际 ${calls.spawn.length}`)
+  // 自学习到 3 → 3 个「全程 agent」拿环境；剩下 2 个并发槽派「离线准备 agent」（task-21：不干等）
+  const learnedNames = calls.spawn.map((c) => c.request.name)
+  assert.equal(learnedNames.filter((name) => name.startsWith('solver-')).length, 3, `自学习到 3 就该放 3 个全程环境题，实际 ${learnedNames}`)
+  assert.equal(learnedNames.filter((name) => name.startsWith('prep-')).length, 2, '剩余并发槽派离线准备 agent')
   assert.match(learnedSummary, /同时最多 3 个环境（平台实测/)
+  assert.match(learnedSummary, /离线准备 agent 2 个/)
 
   // 2) 显式配置优先于实测值与默认值
   const configuredStore = await makeStore()
@@ -1567,7 +1576,12 @@ test('环境调度：envLimit=0（自学习）→ 用平台实测值；配置值
     config: { concurrency: 5, envLimit: 1 },
   })
   const configuredSummary = await configured.orchestrator.start({ __agent: AGENT })
-  assert.equal(second.calls.spawn.length, 1, '配置 envLimit=1 时只能放 1 个')
+  assert.equal(
+    second.calls.spawn.filter((c) => c.request.name.startsWith('solver-')).length,
+    1,
+    '配置 envLimit=1 时只能放 1 个全程 agent',
+  )
+  assert.equal(second.calls.spawn.filter((c) => c.request.name.startsWith('prep-')).length, 4, '其余槽位派准备 agent')
   assert.match(configuredSummary, /同时最多 1 个环境（config.envLimit/)
 
   // 3) 都没有 → 平台默认 2
@@ -1576,7 +1590,11 @@ test('环境调度：envLimit=0（自学习）→ 用平台实测值；配置值
     challenges: envs, teams: third.teams, store: await makeStore(), details, config: { concurrency: 5 },
   })
   await fallback.orchestrator.start({ __agent: AGENT })
-  assert.equal(third.calls.spawn.length, 2, '默认值 = 平台源码 default 2')
+  assert.equal(
+    third.calls.spawn.filter((c) => c.request.name.startsWith('solver-')).length,
+    2,
+    '默认值 = 平台源码 default 2',
+  )
 })
 
 test('环境调度：已占用的环境要扣配额，过期的不占', async () => {
@@ -1591,9 +1609,10 @@ test('环境调度：已占用的环境要扣配额，过期的不占', async ()
   const { teams, calls } = makeTeams({ members })
   const busy = await makeOrchestrator({ challenges: envs, teams, store, details, config: { concurrency: 3 } })
   const busySummary = await busy.orchestrator.start({ __agent: AGENT })
-  assert.equal(calls.spawn.length, 0, '配额已满，不该再起环境题')
-  assert.match(busySummary, /环境配额已满（占用 2\/2）/)
-  assert.match(busySummary, /环境排队（3 题/)
+  const busyNames = calls.spawn.map((c) => c.request.name)
+  assert.equal(busyNames.filter((name) => name.startsWith('solver-')).length, 0, '配额已满，不能再起「全程」环境 agent')
+  assert.equal(busyNames.filter((name) => name.startsWith('prep-')).length, 3, '应该派 3 个离线准备 agent（不干等）')
+  assert.match(busySummary, /离线准备 agent 3 个/)
 
   // 环境到期（releaseTime 已过）→ 平台已自动释放，配额还回来
   const releasedStore = await makeStore()
@@ -1603,7 +1622,11 @@ test('环境调度：已占用的环境要扣配额，过期的不占', async ()
   const second = makeTeams({ members })
   const back = await makeOrchestrator({ challenges: envs, teams: second.teams, store: releasedStore, details, config: { concurrency: 3 } })
   const backSummary = await back.orchestrator.start({ __agent: AGENT })
-  assert.equal(second.calls.spawn.length, 2, '过期环境不再占配额')
+  assert.equal(
+    second.calls.spawn.filter((c) => c.request.name.startsWith('solver-')).length,
+    2,
+    '过期环境不再占配额',
+  )
   assert.match(backSummary, /当前已占用 0/)
 })
 
@@ -1710,12 +1733,275 @@ test('环境调度：纯环境题池（10 道 / envLimit=2 / 并发 6）→ 只�
   })
 
   const summary = await orchestrator.start({ __agent: AGENT })
-  assert.equal(calls.spawn.length, 2, '纯环境题池时只派 envLimit=2 个（不因并发 6 就派 6 个）')
+  const names = calls.spawn.map((c) => c.request.name)
+  // 2 个全程（吃配额）+ 4 个离线准备（不吃配额，但吃并发槽）—— 不让 agent 干等
+  assert.equal(names.filter((name) => name.startsWith('solver-')).length, 2, '全程环境 agent 必须被 envLimit=2 限制住')
+  assert.equal(names.filter((name) => name.startsWith('prep-')).length, 4, '剩余并发槽派离线准备 agent（P0）')
+  assert.equal(calls.spawn.length, 6, '总并发 = 6（准备 agent 也吃并发槽）')
   assert.equal(calls.createTask.length, 10, '任务板仍是完整队列')
   assert.match(summary, /环境调度：同时最多 2 个环境（config.envLimit），当前已占用 0 → 本轮环境题配额 2 个/)
-  // 纯环境题池：探测会一直做到「找不到非环境题」为止 → 8 道全部明确归类为环境排队
-  assert.match(summary, /环境排队（8 题：环境配额 2\/2 已满/)
+  assert.match(summary, /离线准备 agent（4 个：不吃环境配额，先把 P0 做完）/)
+  // 剩下的 4 题：配额满 + 并发槽用完 → 明确排队
+  assert.match(summary, /环境排队（4 题：配额 2\/2 已满/)
   assert.match(summary, /challengeId=1009，题型=环境型/)
-  assert.doesNotMatch(summary, /### 排队中/, '都探明了就不用再列「未探测题型」的排队段')
   assert.match(summary, /题型探测：本轮按需探测 10 题/)
+})
+
+// ---------------------------------------------------------------- 智能调度（task-21：两阶段派发）
+
+test('两阶段派发：配额满时派「离线准备 agent」而不是干等，prompt 明确不许反复起环境', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const envs = [0, 1, 2, 3].map((i) => makeChallenge({ id: 1100 + i, name: `env-${i}`, category: 'Pwn', score: 100 - i }))
+  const details = detailsFor(envs.map((challenge, i) => [1100 + i, 1]))
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: envs, teams, details, config: { concurrency: 4, envLimit: 2 },
+  })
+
+  const summary = await orchestrator.start({ __agent: AGENT })
+  const prep = calls.spawn.filter((call) => call.request.name.startsWith('prep-'))
+  const full = calls.spawn.filter((call) => call.request.name.startsWith('solver-'))
+  assert.equal(full.length, 2, 'envLimit=2 → 只有 2 个全程 agent 拿环境')
+  assert.equal(prep.length, 2, '剩余并发槽派离线准备 agent（不干等）')
+  assert.equal(calls.spawn.length, 4, '准备 agent 也吃并发槽（不是"不吃配额就无限派"）')
+  assert.match(summary, /离线准备 agent（2 个：不吃环境配额，先把 P0 做完）/)
+  assert.match(summary, /两阶段派发：全程 agent 2 个（其中环境型 2）\/ \*\*离线准备 agent 2 个\*\*/)
+
+  // 准备 agent 的 prompt：必须具体可执行（agent 只能看到 prompt）
+  const prompt = prep[0].request.prompt.map((block) => block.text).join('\n')
+  assert.match(prompt, /拿不到环境配额/, '要说清现在没有配额')
+  assert.match(prompt, /不要反复调 `ctf_start_env`/, '要明确禁止反复起环境')
+  assert.match(prompt, /PREP\.md/, '要给 P0 产物落点')
+  assert.match(prompt, /challenges\/env-[0-9]+-11[0-9][0-9]\/PREP\.md/, 'PREP.md 路径要具体')
+  assert.match(prompt, /不需要环境/, '要说清只做不需要环境的部分')
+  assert.match(prompt, /不要 claim/, '不要接管任务板（那是 P1 全程 agent 的）')
+  assert.match(prompt, /send_message/, '要要求向 lead 汇报')
+  assert.match(prompt, /已就绪，等环境/)
+  assert.match(prompt, /"prep-env-2-1102"/, 'system-reminder 里要带自己的名字')
+  // 全程 agent 的 prompt 不能出现「拿不到配额」
+  const fullPrompt = full[0].request.prompt.map((block) => block.text).join('\n')
+  assert.doesNotMatch(fullPrompt, /拿不到环境配额/)
+  // 成员名字要能区分角色，且都满足 DSH 命名规则
+  for (const call of calls.spawn) assert.match(call.request.name, /^(solver|prep)-[a-z0-9-]+$/)
+  assert.match(prep[0].request.description, /准备 teammate（等环境配额）：/)
+})
+
+test('两阶段派发：准备 agent 数 = min(并发空槽, 排队环境题)，且不重复派', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const envs = Array.from({ length: 10 }, (_, i) => makeChallenge({ id: 1150 + i, name: `e-${i}`, score: 100 - i }))
+  const details = detailsFor(envs.map((_, i) => [1150 + i, 1]))
+  const { teams, calls } = makeTeams({ members })
+  const store = await makeStore() // 准备状态要落 work 记录，第二轮才知道「已有准备 agent」
+  const { orchestrator } = await makeOrchestrator({
+    challenges: envs, teams, store, details, config: { concurrency: 3, envLimit: 2 },
+  })
+  await orchestrator.start({ __agent: AGENT })
+  assert.equal(calls.spawn.filter((c) => c.request.name.startsWith('solver-')).length, 2)
+  assert.equal(calls.spawn.filter((c) => c.request.name.startsWith('prep-')).length, 1, '并发 3 → 只剩 1 个槽给准备 agent')
+
+  // 第二轮：已派过准备 agent 的题不再重复派准备 agent（即使它还没写 PREP.md）
+  await orchestrator.start({ __agent: AGENT })
+  const prepNames = calls.spawn.filter((c) => c.request.name.startsWith('prep-')).map((c) => c.request.name)
+  assert.equal(prepNames.filter((name) => name.startsWith('prep-e-2-')).length, 1, `同一道题只该派一次准备 agent：${prepNames}`)
+  // 已 spawn 且任务未完成的题（work 里有 teammate）不会被重复派全程 agent
+  assert.equal(calls.spawn.filter((c) => c.request.name === 'solver-e-0-1150').length, 1)
+})
+
+test('scoreChallenge：环境型降权 / 解出人数升权 / PREP.md 大幅升权', () => {
+  const base = { id: 1, name: 'x', score: 300, parseCount: 0 }
+  const plain = scoreChallenge(base, { taskType: 3 })
+  const env = scoreChallenge(base, { taskType: 1 })
+  assert.equal(plain, 300)
+  assert.equal(Number(env.toFixed(4)), Number((300 * LIMITS.envScorePenalty).toFixed(4)), '环境型按机会成本打折')
+  assert.ok(env < plain)
+
+  const popular = scoreChallenge({ ...base, parseCount: 500 }, { taskType: 3 })
+  assert.ok(popular > plain, '解出人数多（全平台 type=2 计数）要升权')
+  const huge = scoreChallenge({ ...base, parseCount: 10 ** 9 }, { taskType: 3 })
+  assert.ok(huge <= 300 * LIMITS.parseScoreMax + 1e-6, '解出人数权重有上限（防签到题碾压）')
+
+  const prepped = scoreChallenge(base, { taskType: 1, hasPrep: true })
+  assert.ok(prepped > env * 1.5, 'PREP.md 存在要大幅升权')
+  assert.ok(prepped > plain, '已就绪的环境题应盖过同分非环境题')
+
+  // 环境型 + 高解出人数 + 已就绪：三项叠加
+  const all = scoreChallenge({ ...base, parseCount: 100 }, { taskType: 1, hasPrep: true })
+  assert.ok(all > prepped, '解出人数的加成仍然生效')
+})
+
+test('槽位交接：配额释放后，有 PREP.md 的环境题优先拿全程 agent', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const envs = [
+    makeChallenge({ id: 1200, name: 'hard', category: 'Pwn', score: 280 }),
+    makeChallenge({ id: 1201, name: 'prepped', category: 'Pwn', score: 240 }),
+  ]
+  const details = detailsFor([[1200, 1], [1201, 1]])
+  // 只有 1201 有 PREP.md（软信号：文件存在）
+  const existsSync = (target) => String(target).includes('prepped-1201')
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: envs, teams, details, existsSync, config: { concurrency: 1, envLimit: 1 },
+  })
+  const summary = await orchestrator.start({ __agent: AGENT })
+  assert.deepEqual(calls.spawn.map((c) => c.request.name), ['solver-prepped-1201'], '已就绪的题优先（即使分数略低）')
+  assert.match(summary, /就绪待环境 0 题/, '被选中的就绪题不算「等待」')
+  assert.match(summary, /环境排队（1 题：配额 1\/1 已满/)
+})
+
+test('就绪待环境：PREP.md 存在但配额被占 → 不派准备 agent，列进「就绪待环境」', async () => {
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const envs = [
+    makeChallenge({ id: 1250, name: 'ready-one', category: 'Pwn', score: 300 }),
+    makeChallenge({ id: 1251, name: 'fresh-one', category: 'Pwn', score: 200 }),
+  ]
+  const details = detailsFor([[1250, 1], [1251, 1]])
+  const store = await makeStore()
+  // 配额已被别的题占满（envLimit=2，两条 envStarted 未释放）
+  await store.upsertChallengeWork(CONNECTION.key, '9998', {
+    envStarted: true, envReleased: false, connectionInfo: 'nc 1.1.1.1 1',
+  })
+  await store.upsertChallengeWork(CONNECTION.key, '9999', {
+    envStarted: true, envReleased: false, connectionInfo: 'nc 1.1.1.1 2',
+  })
+  const existsSync = (target) => String(target).includes('ready-one-1250')
+  const { teams, calls } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges: envs, teams, store, details, existsSync, config: { concurrency: 4, envLimit: 2 },
+  })
+  const summary = await orchestrator.start({ __agent: AGENT })
+  // 已就绪的题不派准备 agent；没准备的题派准备 agent
+  assert.deepEqual(calls.spawn.map((c) => c.request.name), ['prep-fresh-one-1251'])
+  assert.match(summary, /就绪待环境（1 题：PREP\.md 已就绪/)
+  assert.match(summary, /PREP\.md 已存在/)
+  assert.match(summary, /离线准备 agent（1 个/)
+})
+
+test('准备工作流：真实 PREP.md 落盘路径与 solverDirFor 一致（软信号可被识别）', async () => {
+  const workDir = await makeTmpDir()
+  const challenge = makeChallenge({ id: 1300, name: 'AIoT固件加密服务', category: 'IoT', score: 300 })
+  const prepPath = prepFileFor(challenge, workDir)
+  assert.equal(prepPath, `${workDir}/challenges/aiot固件加密服务-1300/PREP.md`)
+  assert.equal(prepPath, `${solverDirFor(challenge, workDir)}/PREP.md`)
+
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const details = detailsFor([[1300, 1]])
+  // 1) 文件不存在 + 配额已满（envLimit=1 且被占）→ 派准备 agent
+  const heldStore = new CtfStore({ dir: await makeTmpDir() })
+  await heldStore.upsertChallengeWork(CONNECTION.key, '8888', {
+    envStarted: true, envReleased: false, connectionInfo: 'nc 1.1.1.1 1',
+  })
+  const first = makeTeams({ members })
+  const before = await makeOrchestrator({
+    challenges: [challenge], teams: first.teams, store: heldStore, details, config: { concurrency: 2, envLimit: 1, workDir },
+  })
+  await before.orchestrator.start({ __agent: AGENT })
+  assert.deepEqual(first.calls.spawn.map((c) => c.request.name), ['prep-aiot-1300'], '没有 PREP.md → 派准备 agent')
+
+  // 2) 真写一个 PREP.md → 变成「就绪待环境」，不再派准备 agent
+  await fsp.mkdir(path.dirname(prepPath), { recursive: true })
+  await fsp.writeFile(prepPath, '# P0 分析\n\n- 结论：\n', 'utf8')
+  const second = makeTeams({ members })
+  const after = await makeOrchestrator({
+    challenges: [challenge], teams: second.teams, store: heldStore, details, config: { concurrency: 2, envLimit: 1, workDir },
+  })
+  const summary = await after.orchestrator.start({ __agent: AGENT })
+  assert.equal(second.calls.spawn.length, 0, '已就绪的题不该再派准备 agent')
+  assert.match(summary, /就绪待环境（1 题/)
+})
+
+test('环境停滞检测：空转 ≥ 阈值 → 标注；剩余 < 10 分钟 → 建议释放让位（只提示不抢占）', async () => {
+  const nowMs = 1700000000000
+  const members = [
+    { name: 'lead', role: 'lead', status: 'running' },
+    { name: 'solver-stale-1', role: 'teammate', status: 'inactive' },
+  ]
+  const challenges = [
+    makeChallenge({ id: 1400, name: 'stale-env', category: 'Pwn', score: 300, solved: false }),
+    makeChallenge({ id: 1401, name: 'fresh-env', category: 'Pwn', score: 200, solved: false }),
+  ]
+  const details = detailsFor([[1400, 1], [1401, 1]])
+  // 陈旧记录：用「25 分钟前的时钟」写入，编排器用 nowMs 计算停滞
+  const store = new CtfStore({ dir: await makeTmpDir(), now: () => nowMs - 25 * 60000 })
+  await store.upsertChallengeWork(CONNECTION.key, '1400', {
+    challengeId: '1400', taskType: 1, envStarted: true, envReleased: false,
+    envStartedAt: new Date(nowMs - 25 * 60000).toISOString(),
+    envReleaseTime: new Date(nowMs + 6 * 60000).toISOString(), // 剩余 6 分钟
+    connectionInfo: 'nc 1.1.1.1 1337',
+  })
+  // 新鲜记录（刚起的、剩余 25 分钟）
+  const freshStore = new CtfStore({ dir: await makeTmpDir(), now: () => nowMs })
+  await freshStore.upsertChallengeWork(CONNECTION.key, '1400', {
+    challengeId: '1400', taskType: 1, envStarted: true, envReleased: false,
+    envStartedAt: new Date(nowMs - 25 * 60000).toISOString(),
+    envReleaseTime: new Date(nowMs + 6 * 60000).toISOString(),
+    connectionInfo: 'nc 1.1.1.1 1337',
+  })
+  await freshStore.upsertChallengeWork(CONNECTION.key, '1401', {
+    challengeId: '1401', taskType: 1, envStarted: true, envReleased: false,
+    envStartedAt: new Date(nowMs).toISOString(),
+    envReleaseTime: new Date(nowMs + 25 * 60000).toISOString(),
+    connectionInfo: 'nc 1.1.1.2 1337',
+  })
+
+  const { teams } = makeTeams({ members })
+  const stale = await makeOrchestrator({ challenges, teams, store, details, config: { concurrency: 1 } })
+  const staleReport = await stale.orchestrator.status({ __agent: AGENT })
+  assert.match(staleReport, /### ⚠️ 环境占用异常（1 题/)
+  assert.match(staleReport, /环境空转 25 分钟/)
+  assert.match(staleReport, /♻️ 建议释放让位/)
+  assert.match(staleReport, /ctf_release_env id=1400/)
+  assert.match(staleReport, /只提示，不自动抢占/)
+  assert.match(staleReport, /⚠ 剩余 6m ♻️ 建议让位/, '表格环境列也要带标记')
+
+  const fresh = await makeOrchestrator({ challenges, teams, store: freshStore, details, config: { concurrency: 1 } })
+  const freshReport = await fresh.orchestrator.status({ __agent: AGENT })
+  assert.doesNotMatch(freshReport, /环境空转/, '刚起的环境不该被判为停滞')
+  assert.doesNotMatch(freshReport, /环境占用异常/)
+  assert.match(freshReport, /剩余 2[0-9]m/, '新鲜环境正常显示剩余时间')
+
+  // 最近有提交 → 视为有进展，不算停滞
+  const submitStore = new CtfStore({ dir: await makeTmpDir(), now: () => nowMs - 25 * 60000 })
+  await submitStore.upsertChallengeWork(CONNECTION.key, '1400', {
+    challengeId: '1400', taskType: 1, envStarted: true, envReleased: false,
+    envReleaseTime: new Date(nowMs + 6 * 60000).toISOString(), connectionInfo: 'nc 1.1.1.1 1',
+  })
+  await submitStore.recordSubmission({
+    connKey: CONNECTION.key, challengeId: '1400', flag: 'flag{x}', status: 'incorrect',
+    at: new Date(nowMs - 60000).toISOString(),
+  })
+  const withSubmit = await makeOrchestrator({ challenges, teams, store: submitStore, details, config: { concurrency: 1 } })
+  const submitReport = await withSubmit.orchestrator.status({ __agent: AGENT })
+  assert.doesNotMatch(submitReport, /环境空转/, '1 分钟前刚提交过 → 有进展，不算停滞')
+})
+
+test('ctf_solve_status：显示「就绪待环境」与「准备中」段', async () => {
+  const nowMs = 1700000000000
+  const members = [{ name: 'lead', role: 'lead', status: 'running' }]
+  const challenges = [
+    makeChallenge({ id: 1500, name: 'ready-one', category: 'Pwn', score: 300, solved: false }),
+    makeChallenge({ id: 1501, name: 'prepping-one', category: 'Pwn', score: 200, solved: false }),
+  ]
+  const details = detailsFor([[1500, 1], [1501, 1]])
+  const store = new CtfStore({ dir: await makeTmpDir(), now: () => nowMs })
+  await store.upsertChallengeWork(CONNECTION.key, '1500', { challengeId: '1500', taskType: 1 })
+  await store.upsertChallengeWork(CONNECTION.key, '1501', {
+    challengeId: '1501', taskType: 1, status: 'prep', prepTeammate: 'prep-prepping-one-1501',
+  })
+  const existsSync = (target) => String(target).includes('ready-one-1500')
+  const { teams, taskList } = makeTeams({ members })
+  const { orchestrator } = await makeOrchestrator({
+    challenges, teams, store, details, existsSync, config: { concurrency: 2, envLimit: 2 },
+  })
+  // 造两个任务（避免 start 建任务时的探测影响）：直接调 status
+  taskList.push(
+    { id: 'task-1', revision: 1, status: 'pending', subject: '[Pwn] ready-one (300分)', description: 'challengeId: 1500', writeScopes: ['lingxu-ctf-work/challenges/ready-one-1500'], blockedBy: [] },
+    { id: 'task-2', revision: 1, status: 'pending', subject: '[Pwn] prepping-one (200分)', description: 'challengeId: 1501', writeScopes: ['lingxu-ctf-work/challenges/prepping-one-1501'], blockedBy: [] },
+  )
+  const report = await orchestrator.status({ __agent: AGENT })
+  assert.match(report, /### ⏳ 就绪待环境（1 题：PREP\.md 已就绪/)
+  assert.match(report, /ready-one \(#1500\)/)
+  assert.match(report, /PREP\.md 已就绪/)
+  assert.match(report, /### 🔧 准备中（1 题/)
+  assert.match(report, /prep-prepping-one-1501/)
+  assert.match(report, /- P0 就绪待环境：1 题｜准备中：1 题/)
 })

@@ -2119,3 +2119,67 @@ test('isEnvLimitError：兜底识别「请释放后启动」半句文案', async
   assert.equal(isEnvLimitError({ platformMessage: '该题目没有选择对应的环境，请联系管理员。' }), false)
   assert.equal(isEnvLimitError(null), false)
 })
+
+// ────────────────────────────────────────────── task-21：释放即让位（就绪题点名）
+
+test('ctf_release_env：释放后点名「就绪待环境」的题（准备 agent / PREP.md）', async () => {
+  const workDir = await makeTmpDir()
+  const store = await makeStore()
+  // 两道就绪题：一道有准备 agent 标记、一道有真实 PREP.md；一道没准备的题不应出现
+  await store.upsertChallengeWork(CONNECTION.key, '201', {
+    challengeId: '201', subject: '[Pwn] ready-a (300分)', writeScope: 'lingxu-ctf-work/challenges/ready-a-201',
+    status: 'prep', prepTeammate: 'prep-ready-a-201', taskType: 1,
+  })
+  const prepDir = path.join(workDir, 'challenges', 'ready-b-202')
+  await fsp.mkdir(prepDir, { recursive: true })
+  await fsp.writeFile(path.join(prepDir, 'PREP.md'), '# P0\n', 'utf8')
+  await store.upsertChallengeWork(CONNECTION.key, '202', {
+    challengeId: '202', subject: '[Pwn] ready-b (200分)', writeScope: 'lingxu-ctf-work/challenges/ready-b-202', taskType: 1,
+  })
+  await store.upsertChallengeWork(CONNECTION.key, '203', {
+    challengeId: '203', subject: '[Web] not-ready (100分)', writeScope: 'lingxu-ctf-work/challenges/not-ready-203', taskType: 1,
+  })
+  // 已占着环境的题不算「等待」
+  await store.upsertChallengeWork(CONNECTION.key, '204', {
+    challengeId: '204', subject: '[Pwn] busy (100分)', writeScope: 'lingxu-ctf-work/challenges/busy-204',
+    envStarted: true, envReleased: false, prepTeammate: 'prep-busy-204',
+  })
+
+  const adapter = createAdapter()
+  const { tools } = createHarness({ adapter, store, config: { workDir } })
+  const out = await tools.ctf_release_env.execute({ id: 102 }, { cwd: workDir })
+
+  assert.match(out, /🧹 已释放题目 #102 的环境/)
+  assert.match(out, /♻️ 已让出 1 个环境配额；当前有 2 道题已就绪/)
+  assert.match(out, /#201 \[Pwn\] ready-a \(300分\)（准备 agent: prep-ready-a-201）/)
+  assert.match(out, /#202 \[Pwn\] ready-b \(200分\)（PREP\.md 已就绪）/)
+  assert.doesNotMatch(out, /not-ready/, '没准备的题不该被点名')
+  assert.doesNotMatch(out, /#204/, '占着环境的题不算等待')
+  assert.match(out, /ctf_solve_start` 会把配额优先给这些题/)
+})
+
+test('ctf_release_env：没有就绪题时给出「配额空着」的下一步', async () => {
+  const workDir = await makeTmpDir()
+  const store = await makeStore()
+  await store.upsertChallengeWork(CONNECTION.key, '301', {
+    challengeId: '301', subject: '[Pwn] plain (100分)', writeScope: 'lingxu-ctf-work/challenges/plain-301',
+  })
+  const out = await createHarness({ adapter: createAdapter(), store, config: { workDir } })
+    .tools.ctf_release_env.execute({ id: 102 }, { cwd: workDir })
+  assert.match(out, /🧹 已释放题目 #102 的环境/)
+  assert.match(out, /暂无「就绪待环境」的题/)
+})
+
+test('ctf_solve_start / ctf_solve_status 的描述写清两阶段调度', () => {
+  const { tools } = createHarness()
+  const start = tools.ctf_solve_start.description
+  assert.match(start, /两阶段派发/)
+  assert.match(start, /离线准备 agent/)
+  assert.match(start, /PREP\.md/)
+  assert.match(start, /不让 agent 干等/)
+  const status = tools.ctf_solve_status.description
+  assert.match(status, /就绪待环境/)
+  assert.match(status, /准备中/)
+  assert.match(status, /环境占用异常/)
+  assert.match(status, /只提示不自动抢占/)
+})
