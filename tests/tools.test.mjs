@@ -15,6 +15,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { buildToolSpecs, TOOL_NAMES, SESSION_EXPIRED_TEXT } from '../lib/tools.js'
+import { AWD_TOOL_NAMES, CFS_TOOL_NAMES, buildAwdToolSpecs, buildCfsToolSpecs, recommendStageTools } from '../lib/stage-tools.js'
 import { CtfStore } from '../lib/store.js'
 import { createOrchestrator, pathSlug } from '../lib/orchestrate.js'
 import { slugify as indexPathSlug } from '../lib/index.js'
@@ -176,10 +177,10 @@ const callsOf = (adapter, method) => adapter.calls.filter((call) => call.method 
 
 // ------------------------------------------------------------------ 规格形状
 
-test('导出 15 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
+test('导出 16 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
   const { specs, tools } = createHarness()
-  assert.equal(specs.length, 15)
-  assert.equal(TOOL_NAMES.length, 15)
+  assert.equal(specs.length, 16)
+  assert.equal(TOOL_NAMES.length, 16)
   assert.deepEqual(specs.map((spec) => spec.name), TOOL_NAMES)
   assert.deepEqual(Object.keys(tools).sort(), [...TOOL_NAMES].sort())
   for (const spec of specs) {
@@ -194,8 +195,8 @@ test('导出 15 个工具规格，名字与 TOOL_NAMES 一致且形状符合 def
 })
 
 test('buildToolSpecs() 无 deps 也能构造全部规格（执行时才需要依赖）', () => {
-  assert.equal(buildToolSpecs().length, 15)
-  assert.equal(buildToolSpecs({}).length, 15)
+  assert.equal(buildToolSpecs().length, 16)
+  assert.equal(buildToolSpecs({}).length, 16)
 })
 
 // ------------------------------------------------------------------ 连接解析失败
@@ -1234,7 +1235,7 @@ test('ctf_connect：cookie 缺 csrftoken 只提醒不拒绝', async () => {
   assert.match(out, /^✅ 已连接凌虚赛事平台/)
   assert.match(out, /建议把 csrftoken 一起带上/)
   assert.match(out, /不强制/)
-  assert.ok(specs.length === 15)
+  assert.ok(specs.length === 16)
 
   const withCsrf = await tools.ctf_connect.execute({
     baseUrl: 'https://example.com:8000',
@@ -1295,9 +1296,11 @@ function sessionExpiredError() {
   })
 }
 
-test('工具数 14 → 15：TOOL_NAMES 含 ctf_session 与 ctf_delay_env', () => {
-  assert.equal(TOOL_NAMES.length, 15)
+test('基础工具数 16：TOOL_NAMES 含 ctf_session / ctf_delay_env / ctf_notice（AWD/CFS 工具动态注册，不在此列）', () => {
+  assert.equal(TOOL_NAMES.length, 16)
   assert.ok(TOOL_NAMES.includes('ctf_delay_env'))
+  assert.ok(TOOL_NAMES.includes('ctf_notice'))
+  assert.equal(TOOL_NAMES.includes('ctf_awd_submit'), false, 'AWD 工具由 buildAwdToolSpecs 动态注册')
   assert.ok(TOOL_NAMES.includes('ctf_session'))
   const { tools } = createHarness()
   assert.deepEqual(Object.keys(tools.ctf_session.parameters), ['connection'])
@@ -1680,4 +1683,389 @@ test('ctf_challenge：外链型显示 link_path；动态 flag 标注；附件型
   })
   const out2 = await createHarness({ adapter: noFile, config: { workDir } }).tools.ctf_challenge.execute({ id: 107 })
   assert.match(out2, /平台未返回附件链接/)
+})
+
+
+// ────────────────────────────────────────────── task-19：AWD/CFS 赛段工具（动态注册）+ ctf_notice
+
+/** 带赛段信息的 adapter：testTypes 用**数组**（新形状）+ hasXxx 布尔，AWD/CFS 方法齐全。 */
+function createStageAdapter(overrides = {}) {
+  return createAdapter({
+    eventSummary: async () => ({
+      name: '凌虚测试赛',
+      startTime: '2026-09-29T00:00:00Z',
+      endTime: '2026-09-30T00:00:00Z',
+      status: 2,
+      user: { username: 'alice' },
+      punish: false,
+      remainingSeconds: 122400,
+      testTypes: [
+        { id: 2, name: '实操题', size: 30 },
+        { id: 3, name: 'AWD', size: 5 },
+        { id: 4, name: 'CFS', size: 3 },
+      ],
+      hasTheory: false,
+      hasCtf: true,
+      hasAwd: true,
+      hasCfs: true,
+    }),
+    awdRoundInfo: async () => ({
+      status: 0, statusLabel: '进行中', round: 2, roundEndSeconds: 1800, reinforceEndSeconds: 0,
+      isReinforce: false, token: 'awd-token-abcdef123456', rank: 7, name: 'alice', number: '42',
+    }),
+    awdChallenges: async () => [
+      { catId: 11, caId: 22, awdId: 1, name: 'Web 靶机', classify: 'Web', testScore: 1000, roundScore: 50, checkStatus: true, isAttacked: true },
+      { catId: 12, caId: 23, awdId: 2, name: 'Pwn 靶机', classify: 'Pwn', testScore: 800, roundScore: 0, checkStatus: false, isAttacked: false },
+    ],
+    awdChallengeDetail: async (catId, caId) => ({
+      id: Number(caId), name: 'Web 靶机', classify: 'Web', envRunId: 4242, ipAddr: '1.2.3.4:22',
+      imgUser: 'root', imgPassword: 'p@ssw0rd', attackIp: ['9.9.9.9'], leftFreeResetNum: 1, leftResetNum: 2,
+      resetScore: 50, checkStatus: true, isAttacked: true, description: '# Web 靶机题面',
+    }),
+    awdRank: async () => [
+      { rank: 1, name: 'bob', awdScore: 900, roundAwdScore: 100, totalRoundScore: 300, isSelf: false },
+      { rank: 7, name: 'alice', awdScore: 100, roundAwdScore: 0, totalRoundScore: 10, isSelf: true },
+    ],
+    awdDynamic: async () => [
+      { statusLabel: '成功', attackName: 'alice', attackedName: 'bob', score: 10, testName: 'Web 靶机', roundNums: 2 },
+    ],
+    awdGetOwnFlag: async () => ({ flag: '', hasFlag: false, hint: '未取到 flag：需在靶机本机调用（平台按请求 IP 匹配靶机），且题目 flag_type 必须是 2（flag 服务器）' }),
+    awdSubmitFlag: async (token, flag) => ({ ok: true, status: 1, message: 'Flag提交成功！', token, flag }),
+    awdResetKvm: async () => ({ ok: true, status: 1, message: '重置成功' }),
+    awdReferee: async () => ({ ok: true, detail: '已收到' }),
+    cfsRoundInfo: async () => ({ status: 0, statusLabel: '进行中', startSeconds: 0, endSeconds: 7200 }),
+    cfsChallenges: async () => [
+      { cctId: 5, name: '场景一', score: 300, solveSchedule: 1, allSchedule: 3, doneCount: 1 },
+    ],
+    cfsChallengeDetail: async (cctId) => ({
+      cctId: Number(cctId), name: '场景一', score: 300, nowScore: 100, solveSchedule: 1, allSchedule: 3,
+      addrList: ['http://1.2.3.4:8080'], annexList: ['a.zip'], attachment: '', description: '# 场景一',
+    }),
+    cfsSubmitFlag: async (cctId, flag) => ({ ok: true, status: 1, message: '恭喜攻克【场景一】题目下的关卡【第一关】！', cctId, flag }),
+    cfsRank: async () => [{ rank: 1, name: 'alice', cfsScore: 300, cfsStrengths: 10, cfsFlagCount: 3, isSelf: true }],
+    cfsChart: async () => ({ startTime: 1000, endTime: 2000, series: [{ id: 1, name: 'alice', points: [[1000, 100], [2000, 300]] }] }),
+    cfsDynamic: async () => [{ id: 1, name: 'alice', testName: '场景一', flagTestName: '第一关', subTime: '2026-09-29 10:00' }],
+    noticeCount: async () => ({ count: 3 }),
+    notices: async () => [
+      { id: 3, type: 1, content: '第三题环境已修复，请重试', create_time: '2026-09-29 11:00' },
+      { id: 2, type: 3, content: '禁止对平台发起扫描', create_time: '2026-09-29 10:00' },
+      { id: 1, type: 5, content: '第一题提示：注意大小端', create_time: '2026-09-29 09:00' },
+    ],
+    ...overrides,
+  })
+}
+
+/** 赛段工具的 harness：adapter 用 createStageAdapter，specs 来自 builders。 */
+function stageHarness({ adapter = createStageAdapter(), deps = {} } = {}) {
+  const specs = [...buildAwdToolSpecs({ ...deps, resolveAdapter: async () => ({ adapter, connection: CONNECTION }) }),
+    ...buildCfsToolSpecs({ ...deps, resolveAdapter: async () => ({ adapter, connection: CONNECTION }) })]
+  return { specs, tools: Object.fromEntries(specs.map((spec) => [spec.name, spec])), adapter }
+}
+
+test('buildAwdToolSpecs / buildCfsToolSpecs：数量、名字与 defineTool 契约', () => {
+  const awd = buildAwdToolSpecs()
+  const cfs = buildCfsToolSpecs()
+  assert.equal(awd.length, 9)
+  assert.equal(cfs.length, 7)
+  assert.deepEqual(awd.map((spec) => spec.name), AWD_TOOL_NAMES)
+  assert.deepEqual(cfs.map((spec) => spec.name), CFS_TOOL_NAMES)
+  for (const spec of [...awd, ...cfs]) {
+    assert.equal(typeof spec.description, 'string', `${spec.name} 缺 description`)
+    assert.ok(spec.parameters && typeof spec.parameters === 'object', `${spec.name} 缺 parameters`)
+    assert.equal('connection' in spec.parameters, true, `${spec.name} 缺 connection 参数`)
+    assert.equal(typeof spec.output?.schema, 'object', `${spec.name} 缺 output.schema`)
+    assert.equal(typeof spec.output?.render, 'function', `${spec.name} 缺 output.render`)
+    assert.equal(typeof spec.execute, 'function', `${spec.name} 缺 execute`)
+    // 每个工具都要能自解释「何时用」，模型才敢选
+    assert.match(spec.description, /何时用/, `${spec.name} 描述缺「何时用」`)
+  }
+  // 无 deps 也能构造（执行时才需要依赖）
+  assert.equal(buildAwdToolSpecs().length, 9)
+  assert.equal(buildCfsToolSpecs({}).length, 7)
+})
+
+test('recommendStageTools：true/false/null 三态（未知时建议保持现状）', () => {
+  assert.deepEqual(
+    recommendStageTools({ testTypes: [{ id: 2, name: '实操题', size: 30 }], hasAwd: false, hasCfs: false }),
+    { awd: false, cfs: false, testTypes: [{ id: 2, name: '实操题', size: 30 }], reason: '无 AWD、无 CFS' },
+  )
+  const all = recommendStageTools({ testTypes: [{ id: 2 }, { id: 3 }, { id: 4 }] })
+  assert.equal(all.awd, true)
+  assert.equal(all.cfs, true)
+  // 只有 testTypes 没有 hasXxx 布尔时按 id 推断
+  const infer = recommendStageTools({ testTypes: [{ id: 2 }, { id: 4 }] })
+  assert.equal(infer.awd, false)
+  assert.equal(infer.cfs, true)
+  // 拿不到赛段信息 → null（别注册也别注销，避免工具列表抖动）
+  const unknown = recommendStageTools({})
+  assert.equal(unknown.awd, null)
+  assert.equal(unknown.cfs, null)
+  assert.match(unknown.reason, /未知项建议保持现状/)
+  // hasXxx 布尔优先于 testTypes
+  const override = recommendStageTools({ hasAwd: true, hasCfs: false, testTypes: [{ id: 2 }] })
+  assert.equal(override.awd, true)
+  assert.equal(override.cfs, false)
+})
+
+test('ctf_awd_*：每个工具路由到对应适配器方法，参数形态正确', async () => {
+  const { tools, adapter } = stageHarness()
+  const cases = [
+    ['ctf_awd_status', {}, 'awdRoundInfo', /AWD 赛段状态/],
+    ['ctf_awd_list', { classify: 'Web' }, 'awdChallenges', /AWD 靶机列表/],
+    ['ctf_awd_detail', { catId: 11, caId: 22 }, 'awdChallengeDetail', /AWD 靶机详情/],
+    ['ctf_awd_submit', { flag: 'flag{attacked}', token: 'tok-abcdef123456' }, 'awdSubmitFlag', /AWD flag 提交成功/],
+    ['ctf_awd_own_flag', {}, 'awdGetOwnFlag', /自己的 flag/],
+    ['ctf_awd_rank', { limit: 1 }, 'awdRank', /AWD 排行榜/],
+    ['ctf_awd_dynamic', {}, 'awdDynamic', /AWD 回合动态/],
+    ['ctf_awd_reset', { envRunId: 4242, type: 2 }, 'awdResetKvm', /靶机重置已触发/],
+    ['ctf_awd_referee', { content: '环境异常' }, 'awdReferee', /已呼叫裁判/],
+  ]
+  for (const [name, args, method, pattern] of cases) {
+    const before = adapter.calls.length
+    const out = await tools[name].execute(args)
+    assert.match(out, pattern, `${name} 输出不对：${out}`)
+    const called = adapter.calls.slice(before).filter((call) => call.method === method)
+    assert.equal(called.length, 1, `${name} 应调用 ${method} 一次`)
+  }
+
+  const calledWith = (method) => adapter.calls.filter((call) => call.method === method).map((call) => call.args)
+  assert.deepEqual(calledWith('awdChallenges')[0], [{ classify: 'Web' }], 'awd_list 要带 classify')
+  assert.deepEqual(calledWith('awdChallengeDetail')[0], ['11', '22'], 'awd_detail 参数顺序必须是 (catId, caId)')
+  assert.deepEqual(calledWith('awdSubmitFlag')[0].slice(0, 2), ['tok-abcdef123456', 'flag{attacked}'])
+  assert.deepEqual(calledWith('awdResetKvm')[0], ['4242', { type: 2 }], 'type=2 = 扣分重置')
+})
+
+test('ctf_awd_status：回合/加固期/token 脱敏/我的排名', async () => {
+  const reinforce = createStageAdapter({
+    awdRoundInfo: async () => ({
+      status: 0, statusLabel: '进行中', round: 0, roundEndSeconds: 0, reinforceEndSeconds: 600,
+      isReinforce: true, token: 'awd-token-abcdef123456', rank: 3, name: 'alice', number: '42',
+    }),
+  })
+  const out = await stageHarness({ adapter: reinforce }).tools.ctf_awd_status.execute({})
+  assert.match(out, /状态: 进行中/)
+  assert.match(out, /⚠️ 加固期（剩余 10m0s）/)
+  assert.match(out, /我的队伍\/账号: alice（42）/)
+  assert.match(out, /我的排名: 第 3 名/)
+  assert.match(out, /token: awd-to…（已脱敏，共 22 字符）/)
+  assert.equal(out.includes('awd-token-abcdef123456'), false, '完整 token 不能出现在输出里')
+})
+
+test('ctf_awd_rank：平台 500 → 友好降级（错误分类保留，不抛错）', async () => {
+  const adapter = createStageAdapter({
+    awdRank: async () => {
+      throw new Error('凌虚 GET /event/4/awd/rank/ 失败（HTTP 500）：Internal Server Error')
+    },
+  })
+  const out = await stageHarness({ adapter }).tools.ctf_awd_rank.execute({})
+  assert.match(out, /AWD 排行榜获取失败/)
+  assert.match(out, /HTTP 500/)
+  assert.match(out, /平台在没有 AWD 赛段时该接口会 HTTP 500/)
+  assert.match(out, /ctf_leaderboard/)
+  assert.doesNotMatch(out, /^❌/)
+})
+
+test('ctf_awd_own_flag：说明「靶机本机 + flag_type=2」限制；有值时如实显示', async () => {
+  const empty = await stageHarness().tools.ctf_awd_own_flag.execute({})
+  assert.match(empty, /请求来源 IP/)
+  assert.match(empty, /靶机本机/)
+  assert.match(empty, /flag_type=2/)
+  assert.match(empty, /flag_type=1/)
+  assert.match(empty, /flag: （空）/)
+  assert.match(empty, /未取到 flag/)
+
+  const withFlag = createStageAdapter({ awdGetOwnFlag: async () => ({ flag: 'flag{own_defense_flag}', hasFlag: true, hint: '' }) })
+  const out = await stageHarness({ adapter: withFlag }).tools.ctf_awd_own_flag.execute({})
+  assert.match(out, /flag: flag\{own_defense_flag\}/)
+})
+
+test('ctf_awd_submit：token 输出脱敏（显式与自动两条路径）', async () => {
+  const { tools, adapter } = stageHarness()
+  const explicit = await tools.ctf_awd_submit.execute({ token: 'tok-abcdef123456', flag: 'flag{attacked}' })
+  assert.match(explicit, /token: tok-ab…（已脱敏，共 16 字符）/)
+  assert.match(explicit, /来源：参数 token/)
+  assert.equal(explicit.includes('abcdef123456'), false, '输出不能包含完整 token')
+  assert.match(explicit, /flag: flag\{a…d\} \(len=14\)/, 'flag 也要脱敏')
+
+  const auto = await tools.ctf_awd_submit.execute({ flag: 'flag{attacked2}' })
+  assert.match(auto, /来源：AWD 赛段信息/)
+  assert.match(auto, /token: awd-to…（已脱敏，共 22 字符）/)
+  assert.equal(auto.includes('awd-token-abcdef123456'), false)
+  assert.equal(callsOf(adapter, 'awdSubmitFlag').length, 2)
+})
+
+test('ctf_awd_*：参数校验与会话失效/不支持的错误分类', async () => {
+  const { tools } = stageHarness()
+  assert.match(await tools.ctf_awd_detail.execute({ catId: 11 }), /需要 catId 与 caId/)
+  assert.match(await tools.ctf_awd_detail.execute({}), /注意顺序/)
+  assert.match(await tools.ctf_awd_reset.execute({}), /需要 envRunId/)
+  assert.match(await tools.ctf_awd_submit.execute({}), /需要 flag/)
+  assert.match(await tools.ctf_awd_referee.execute({}), /需要 content/)
+
+  // 适配器缺方法 → ℹ️ 而不是崩
+  const bare = createAdapter({ awdChallenges: undefined, cfsChallenges: undefined })
+  const bareHarness = stageHarness({ adapter: bare })
+  assert.match(await bareHarness.tools.ctf_awd_list.execute({}), /适配器不支持 AWD 题目列表/)
+  assert.match(await bareHarness.tools.ctf_cfs_list.execute({}), /适配器不支持 CFS 关卡列表/)
+
+  // session 失效：错误分类仍然生效（就算工具本不该被注册，边界调用也得给对的文案）
+  const expired = createStageAdapter({
+    awdRank: async () => { throw sessionExpiredError() },
+  })
+  const expiredOut = await stageHarness({ adapter: expired }).tools.ctf_awd_rank.execute({})
+  assert.match(expiredOut, /sessionid 已失效/)
+  assert.match(expiredOut, /ctf_connect/)
+
+  // 写操作（submit）是硬失败：连接解析不到时抛错，不静默
+  const noConn = buildAwdToolSpecs({ resolveAdapter: async () => { throw new Error('没有连接') }, logger: {} })
+  const submitSpec = noConn.find((spec) => spec.name === 'ctf_awd_submit')
+  await assert.rejects(() => submitSpec.execute({ flag: 'flag{x}' }), /无法解析平台连接/)
+})
+
+test('ctf_cfs_*：每个工具路由到对应适配器方法，参数形态正确', async () => {
+  const { tools, adapter } = stageHarness()
+  const cases = [
+    ['ctf_cfs_status', {}, 'cfsRoundInfo', /CFS 赛段状态/],
+    ['ctf_cfs_list', {}, 'cfsChallenges', /CFS 关卡列表/],
+    ['ctf_cfs_detail', { cctId: 5 }, 'cfsChallengeDetail', /CFS 题目详情/],
+    ['ctf_cfs_submit', { cctId: 5, flag: 'flag{level1}' }, 'cfsSubmitFlag', /CFS 关卡 flag 正确/],
+    ['ctf_cfs_rank', { limit: 1 }, 'cfsRank', /CFS 排行榜/],
+    ['ctf_cfs_chart', {}, 'cfsChart', /CFS 得分总势/],
+    ['ctf_cfs_dynamic', {}, 'cfsDynamic', /CFS 提交流水/],
+  ]
+  for (const [name, args, method, pattern] of cases) {
+    const before = adapter.calls.length
+    const out = await tools[name].execute(args)
+    assert.match(out, pattern, `${name} 输出不对：${out}`)
+    const called = adapter.calls.slice(before).filter((call) => call.method === method)
+    assert.equal(called.length, 1, `${name} 应调用 ${method} 一次`)
+  }
+  const calledWith = (method) => adapter.calls.filter((call) => call.method === method).map((call) => call.args)
+  assert.deepEqual(calledWith('cfsChallengeDetail')[0], ['5'])
+  assert.deepEqual(calledWith('cfsSubmitFlag')[0], ['5', 'flag{level1}'])
+
+  assert.match(await tools.ctf_cfs_detail.execute({}), /需要 cctId/)
+  assert.match(await tools.ctf_cfs_submit.execute({ cctId: 5 }), /需要 flag/)
+})
+
+test('赛段工具：危险写操作在描述里标注副作用', () => {
+  const { tools } = stageHarness()
+  assert.match(tools.ctf_awd_referee.description, /真的给管理员写消息/)
+  assert.match(tools.ctf_awd_referee.description, /非必要不要调用/)
+  assert.match(tools.ctf_awd_reset.description, /消耗重置次数/)
+  assert.match(tools.ctf_awd_reset.description, /直接扣分/)
+  assert.match(tools.ctf_awd_submit.description, /真实计分/)
+  assert.match(tools.ctf_awd_submit.description, /query 参数/)
+  assert.match(tools.ctf_awd_submit.description, /只显示前 6 位/)
+  assert.match(tools.ctf_cfs_submit.description, /真实计分/)
+  assert.match(tools.ctf_awd_own_flag.description, /请求来源 IP/)
+})
+
+test('ctf_notice：未读数 + 公告列表（最新在前 / 类型标签 / limit）', async () => {
+  const adapter = createStageAdapter()
+  const { tools } = createHarness({ adapter })
+  const out = await tools.ctf_notice.execute({})
+  assert.match(out, /📢 赛事公告｜共 3 条，其中约 3 条未读/)
+  assert.match(out, /通知/)
+  assert.match(out, /警告/)
+  assert.match(out, /题目提示信息/)
+  assert.match(out, /第三题环境已修复/)
+  assert.match(out, /2026-09-29 11:00/)
+  // 最新在前
+  assert.equal(out.indexOf('第三题环境已修复') < out.indexOf('第一题提示'), true)
+
+  const limited = await tools.ctf_notice.execute({ limit: 1 })
+  assert.match(limited, /第三题环境已修复/)
+  assert.doesNotMatch(limited, /第一题提示/)
+  assert.match(limited, /还有 2 条未显示/)
+
+  const unreadOnly = await tools.ctf_notice.execute({ unreadOnly: true, limit: 2 })
+  assert.match(unreadOnly, /unreadOnly=true/)
+  assert.match(unreadOnly, /平台不提供逐条已读标记/)
+  assert.equal(unreadOnly.includes('第一题提示'), false)
+
+  assert.equal(tools.ctf_notice.parameters.unreadOnly.type, 'boolean')
+  assert.equal(tools.ctf_notice.parameters.limit.type, 'integer')
+})
+
+test('ctf_notice：无公告 / 无未读 / 适配器不支持 / 计数失败', async () => {
+  const empty = createStageAdapter({ notices: async () => [], noticeCount: async () => ({ count: 0 }) })
+  assert.match(await createHarness({ adapter: empty }).tools.ctf_notice.execute({}), /当前没有公告/)
+
+  const noCount = createStageAdapter({ noticeCount: undefined })
+  const noCountOut = await createHarness({ adapter: noCount }).tools.ctf_notice.execute({})
+  assert.match(noCountOut, /📢 赛事公告｜共 3 条/)
+  assert.doesNotMatch(noCountOut, /未读/)
+
+  const broken = createStageAdapter({ noticeCount: async () => { throw new Error('boom') } })
+  const brokenOut = await createHarness({ adapter: broken }).tools.ctf_notice.execute({})
+  assert.match(brokenOut, /共 3 条/, '计数失败也要能列出公告')
+  assert.doesNotMatch(brokenOut, /boom/)
+
+  const bare = createAdapter({ notices: undefined, noticeCount: undefined })
+  assert.match(await createHarness({ adapter: bare }).tools.ctf_notice.execute({}), /不支持公告/)
+})
+
+test('ctf_status：显示赛段构成与未读公告（指向 ctf_notice）', async () => {
+  const out = await createHarness({ adapter: createStageAdapter() }).tools.ctf_status.execute({})
+  assert.match(out, /- 本赛事含: 实操题 30 题、AWD 5 题、CFS 3 题/)
+  assert.match(out, /- 📢 公告: 有 3 条未读 → ctf_notice 查看/)
+  assert.match(out, /- 其他赛段: 含 AWD \/ CFS/)
+
+  const quiet = createStageAdapter({
+    noticeCount: async () => ({ count: 0 }),
+    eventSummary: async () => ({
+      name: '纯 CTF', remainingSeconds: 100, punish: false,
+      testTypes: [{ id: 2, name: '实操题', size: 10 }],
+      hasTheory: false, hasCtf: true, hasAwd: false, hasCfs: false,
+    }),
+  })
+  const quietOut = await createHarness({ adapter: quiet }).tools.ctf_status.execute({})
+  assert.match(quietOut, /- 本赛事含: 实操题 10 题/)
+  assert.match(quietOut, /- 📢 公告: 无未读/)
+  assert.doesNotMatch(quietOut, /其他赛段/)
+})
+
+test('赛段工具：边界情况下被调用时，「没有该赛段」也要分类出可操作文案', async () => {
+  // 正常路径下这些工具根本不会注册（recommendStageTools 返回 false）；这里覆盖「万一被调用」
+  const awd = createStageAdapter({
+    awdRoundInfo: async () => {
+      throw new LingxuError('该赛事没有 AWD 赛段：该赛事没有AWD赛段', {
+        httpStatus: 400, code: LINGXU_CODES.NO_AWD_STAGE, platformMessage: '该赛事没有AWD赛段',
+      })
+    },
+  })
+  const awdOut = await stageHarness({ adapter: awd }).tools.ctf_awd_status.execute({})
+  assert.match(awdOut, /本赛事没有 AWD 赛段/)
+  assert.match(awdOut, /testTypes 里没有 id=3/)
+  assert.match(awdOut, /ctf_challenges/)
+  assert.doesNotMatch(awdOut, /^❌/)
+
+  const cfs = createStageAdapter({
+    cfsChallenges: async () => {
+      throw new LingxuError('该赛事没有 CFS 赛段', {
+        httpStatus: 400, code: LINGXU_CODES.NO_CFS_STAGE, platformMessage: '该赛事没有cfs赛段',
+      })
+    },
+  })
+  const cfsOut = await stageHarness({ adapter: cfs }).tools.ctf_cfs_list.execute({})
+  assert.match(cfsOut, /本赛事没有 CFS 赛段/)
+  assert.match(cfsOut, /testTypes 里没有 id=4/)
+})
+
+test('赛段工具：能直接过 defineTool 注册（宿主路径），required 参数由 schema 兜底', async () => {
+  const { defineTool } = await import('../lib/toolkit.js')
+  const specs = [...buildAwdToolSpecs(), ...buildCfsToolSpecs()]
+  const registered = specs.map((spec) => defineTool(spec))
+  assert.equal(registered.length, 16)
+  for (const tool of registered) {
+    assert.equal(tool.parameters.type, 'object', `${tool.name} 的 parameters 不是 JSON Schema`)
+    assert.equal(typeof tool.execute, 'function')
+  }
+  // required 参数写进了 JSON Schema（宿主会先校验）
+  const detail = registered.find((tool) => tool.name === 'ctf_awd_detail')
+  assert.deepEqual([...detail.parameters.required].sort(), ['caId', 'catId'])
+  await assert.rejects(() => detail.execute({ catId: 11 }), /invalid arguments/)
+  const submit = registered.find((tool) => tool.name === 'ctf_cfs_submit')
+  assert.deepEqual([...submit.parameters.required].sort(), ['cctId', 'flag'])
 })

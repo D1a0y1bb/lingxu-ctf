@@ -82,7 +82,7 @@ const ctx = {
 console.log(`平台 ${BASE}  event ${EVENT}  状态目录 ${home}\n`)
 apply(ctx, { workDir: path.join(home, 'work'), concurrency: 4 })
 
-check('插件加载并注册 15 个工具', collected.tools.length === 15, `实际 ${collected.tools.length}`)
+check('插件加载并注册 16 个基础工具', collected.tools.length === 16, `实际 ${collected.tools.length}`)
 check('注册系统提示词', collected.sections.length === 1)
 check('注册 Web 路由', collected.routes.some((r) => r.path === '/lingxu-ctf/state'))
 check('注册斜杠命令', collected.commands.length === 1)

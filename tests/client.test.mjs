@@ -316,6 +316,18 @@ const {
   normalizeReports,
   normalizeTaskStatus,
   normalizeMemberStatus,
+  normalizeEnv,
+  formatShortDuration,
+  envStateOf,
+  taskTypeLabel,
+  renderTaskTypeBadgeHtml,
+  renderEnvChipHtml,
+  memberEnvOf,
+  envChallengesOf,
+  runningEnvCount,
+  renderViewEnvHtml,
+  renderViewChallengeCard,
+  renderViewTabCount,
   challengeKey,
   mergeChallengeBoard,
   viewStats,
@@ -1750,7 +1762,7 @@ test('视图：slot 常量与 DSH 契约一致（list slot 必须有 id + order�
   assert.equal(FLOATING_CONFIG_KEY, 'enableFloatingPanel')
   assert.deepEqual(
     VIEW_TABS.map((tab) => tab.id),
-    ['board', 'agents', 'messages', 'submissions', 'reports'],
+    ['board', 'agents', 'messages', 'submissions', 'reports', 'env'],
   )
 })
 
@@ -2405,6 +2417,239 @@ test('悬浮面板：配置读取失败 / 非 JSON / 404 一律按「不挂」',
   }
   assert.equal(await floatingPanelEnabled({ enableFloating: false }), false)
   assert.equal(await floatingPanelEnabled({ enableFloatingPanel: true }), true)
+})
+
+// ══════════════════════════════════════ 11. 环境 / 题型（task-20）
+
+/** 带环境字段的快照：覆盖正常 / 告警 / 过期 / 未探测四种形态。 */
+function envSnapshot(overrides = {}) {
+  const base = {
+    connection: { key: 'lingxu:host:4', platform: 'lingxu', baseUrl: 'https://example.test:8000', eventId: 4 },
+    event: { name: '2026 测试赛', remainingSeconds: 3661, user: { username: 'alice' } },
+    env: { limit: 2, held: 1, free: 1 },
+    challenges: [
+      { id: 1, name: '签到', category: 'Misc', score: 100, solved: true, taskType: 3 },
+      { id: 2, name: '外链题', category: 'Web', score: 200, status: 'pending', taskType: 2 },
+      // 正常倒计时（25 分钟）
+      { id: 3, name: 'Pwn-A', category: 'Pwn', score: 300, status: 'working', owner: 'solver-pwn-01', taskType: 1, envRemainingSeconds: 1500, envExpired: false },
+      // <10 分钟 → 橙色
+      { id: 4, name: 'Pwn-B', category: 'Pwn', score: 400, status: 'working', owner: 'solver-pwn-02', taskType: 1, envRemainingSeconds: 180, envExpired: false },
+      // 已过期 → 红色
+      { id: 5, name: 'Pwn-C', category: 'Pwn', score: 500, status: 'pending', taskType: 1, envRemainingSeconds: 0, envExpired: true },
+      // 未探测：taskType 缺失 + 无环境
+      { id: 6, name: '未探测题', category: 'Misc', score: 50, status: 'pending' },
+    ],
+  }
+  return { ...base, ...overrides }
+}
+
+/** 由快照构造渲染模型（不依赖 DOM）。 */
+function envModel(rawState, teamRaw = null) {
+  const state = normalizeState(rawState)
+  const team = normalizeTeam(teamRaw)
+  const board = mergeChallengeBoard(state.challenges, team)
+  return { state, team, board, reports: normalizeReports(null), stats: viewStats(state, board, team) }
+}
+
+test('环境模型：env 字段缺失 / 垃圾输入不崩，且 known=false（不显示占用）', () => {
+  for (const raw of [undefined, null, 42, 'nope', [], {}, { limit: 0, held: 0, free: 0 }]) {
+    const env = normalizeEnv(raw)
+    assert.equal(env.known, false)
+    assert.equal(env.full, false)
+    assert.equal(typeof env.limit, 'number')
+  }
+  // 老宿主的 state（没有 env 字段）→ 摘要里不出现「环境 x/y」
+  const model = envModel({ connection: { key: 'k' }, challenges: [{ id: 1, name: 'A' }] })
+  const meta = renderViewMetaHtml(model)
+  assert.equal(meta.includes('环境 '), false, '老宿主不该显示环境占用')
+  assert.equal(meta.includes('lx-chip-env'), false)
+})
+
+test('环境模型：limit/held/free 推导与「已满」判定', () => {
+  assert.deepEqual(normalizeEnv({ limit: 2, held: 1, free: 1 }), { known: true, limit: 2, held: 1, free: 1, full: false })
+  assert.equal(normalizeEnv({ limit: 2, held: 2, free: 0 }).full, true)
+  // free 缺失时用 limit - held 推导
+  assert.equal(normalizeEnv({ limit: 3, held: 1 }).free, 2)
+  // held 超出 limit 也不能出现负数
+  assert.equal(normalizeEnv({ limit: 1, held: 5 }).free, 0)
+})
+
+test('题型徽章：taskType 1/2/3 各渲染正确文案，null/缺失不显示', () => {
+  assert.equal(taskTypeLabel(1), '环境型')
+  assert.equal(taskTypeLabel(2), '外链型')
+  assert.equal(taskTypeLabel(3), '附件型')
+  assert.equal(taskTypeLabel(null), null)
+  assert.equal(taskTypeLabel(undefined), null)
+  assert.equal(taskTypeLabel(9), null, '未知题型不瞎猜')
+
+  assert.match(renderTaskTypeBadgeHtml({ taskType: 1 }), /环境型/)
+  assert.match(renderTaskTypeBadgeHtml({ taskType: 1 }), /lx-vtype-1/)
+  assert.match(renderTaskTypeBadgeHtml({ taskType: 2 }), /外链型/)
+  assert.match(renderTaskTypeBadgeHtml({ taskType: 3 }), /附件型/)
+  assert.equal(renderTaskTypeBadgeHtml({ taskType: null }), '')
+  assert.equal(renderTaskTypeBadgeHtml({}), '')
+  assert.equal(renderTaskTypeBadgeHtml(null), '')
+})
+
+test('环境剩余：正常 / <10 分钟橙色 / 0 与 envExpired 红色 / null 不显示', () => {
+  // 正常
+  const ok = envStateOf({ envRemainingSeconds: 1500 })
+  assert.equal(ok.tone, 'ok')
+  assert.equal(ok.label, '环境 25m')
+  // <10 分钟 → 橙色告警
+  const warn = envStateOf({ envRemainingSeconds: 180 })
+  assert.equal(warn.tone, 'warn')
+  assert.equal(warn.label, '⚠ 环境 3m')
+  // 恰好 10 分钟不算告警（边界）
+  assert.equal(envStateOf({ envRemainingSeconds: 600 }).tone, 'ok')
+  assert.equal(envStateOf({ envRemainingSeconds: 599 }).tone, 'warn')
+  // 0 → 已过期
+  assert.equal(envStateOf({ envRemainingSeconds: 0 }).label, '环境已过期')
+  assert.equal(envStateOf({ envRemainingSeconds: 0 }).tone, 'error')
+  // envExpired:true 但剩余不为 0（老宿主的写法）也按过期处理
+  assert.equal(envStateOf({ envRemainingSeconds: 100, envExpired: true }).tone, 'error')
+  // 没有环境 → 什么都不显示
+  assert.equal(envStateOf({ envRemainingSeconds: null }), null)
+  assert.equal(envStateOf({}), null)
+  assert.equal(envStateOf(null), null)
+  assert.equal(renderEnvChipHtml({ envRemainingSeconds: null }), '')
+
+  // HTML 片段：三类 class 都要对
+  assert.match(renderEnvChipHtml({ envRemainingSeconds: 1500 }), /lx-venv-ok/)
+  assert.match(renderEnvChipHtml({ envRemainingSeconds: 180 }), /lx-venv-warn/)
+  assert.match(renderEnvChipHtml({ envRemainingSeconds: 180 }), /⚠ 环境 3m/)
+  assert.match(renderEnvChipHtml({ envRemainingSeconds: 0 }), /lx-venv-error/)
+  assert.match(renderEnvChipHtml({ envRemainingSeconds: 0 }), /环境已过期/)
+})
+
+test('紧凑时长格式：25m / 3m20s / 45s / 1h5m', () => {
+  assert.equal(formatShortDuration(1500), '25m')
+  assert.equal(formatShortDuration(200), '3m20s')
+  assert.equal(formatShortDuration(45), '45s')
+  assert.equal(formatShortDuration(3900), '1h5m')
+  assert.equal(formatShortDuration(-5), '0s')
+  assert.equal(formatShortDuration(null), '0s')
+})
+
+test('★ 看板卡片：题型徽章 + 环境剩余（橙 / 红 / 正常）都渲染出来', () => {
+  const model = envModel(envSnapshot())
+  const html = renderViewBoardHtml(model, {})
+  assert.match(html, /环境型/)
+  assert.match(html, /外链型/)
+  assert.match(html, /附件型/)
+  assert.match(html, /环境 25m/)
+  assert.match(html, /⚠ 环境 3m/)
+  assert.match(html, /环境已过期/)
+  assert.match(html, /lx-venv-warn/)
+  assert.match(html, /lx-venv-error/)
+  // 未探测的题（taskType 缺失）不该凭空出现题型徽章
+  const card = renderViewChallengeCard(model.board.find((item) => item.name === '未探测题'))
+  assert.equal(card.includes('lx-vtype'), false)
+  assert.equal(card.includes('lx-venv'), false)
+})
+
+test('★ 摘要 chips：环境 held/limit；free === 0 时高亮', () => {
+  const normal = renderViewMetaHtml(envModel(envSnapshot()))
+  assert.match(normal, /环境 1\/2/)
+  assert.equal(normal.includes('lx-chip-warn'), false, '没满时不告警')
+
+  const full = renderViewMetaHtml(envModel(envSnapshot({ env: { limit: 2, held: 2, free: 0 } })))
+  assert.match(full, /环境 2\/2/)
+  assert.match(full, /已满/)
+  assert.match(full, /lx-chip-warn/)
+})
+
+test('★ Agent 活动：持有环境的 agent 有标记（含告警色）', () => {
+  const team = {
+    ok: true,
+    members: [
+      { name: 'solver-pwn-01', status: 'running', challengeId: 3, challengeName: 'Pwn-A' },
+      { name: 'solver-pwn-02', status: 'running', challengeId: 4, challengeName: 'Pwn-B' },
+      { name: 'solver-web-01', status: 'inactive', challengeId: 2, challengeName: '外链题' },
+    ],
+    tasks: [
+      { id: 't1', status: 'in_progress', owner: 'solver-pwn-01', challengeId: 3, challengeName: 'Pwn-A' },
+      { id: 't2', status: 'in_progress', owner: 'solver-pwn-02', challengeId: 4, challengeName: 'Pwn-B' },
+      { id: 't3', status: 'in_progress', owner: 'solver-web-01', challengeId: 2, challengeName: '外链题' },
+    ],
+    messages: [],
+  }
+  const model = envModel(envSnapshot(), team)
+  const html = renderViewAgentsHtml(model)
+  assert.match(html, /🌐 环境 25m/, 'solver-pwn-01 持有 25 分钟的环境')
+  assert.match(html, /🌐 ⚠ 环境 3m/, 'solver-pwn-02 的环境快过期了')
+  assert.match(html, /lx-venv-held/)
+  // 没持有环境的 agent 不该有标记：按行切开分别断言
+  const rows = html.split('<div class="lx-vagent-row">')
+  const webRow = rows.find((row) => row.includes('solver-web-01'))
+  assert.ok(webRow)
+  assert.equal(webRow.includes('lx-venv-held'), false, '外链题不占环境配额')
+  assert.equal(memberEnvOf('solver-none', model.board), null)
+})
+
+test('★ 「环境」子视图：只列环境型题目，按告警/剩余排序，含配额与占用者', () => {
+  const team = {
+    ok: true,
+    members: [{ name: 'solver-pwn-02', status: 'running' }],
+    tasks: [{ id: 't1', status: 'in_progress', owner: 'solver-pwn-02', challengeId: 4, challengeName: 'Pwn-B' }],
+    messages: [],
+  }
+  const model = envModel(envSnapshot(), team)
+  const html = renderViewEnvHtml(model)
+
+  assert.match(html, /环境配额 1\/2（空闲 1）/)
+  assert.match(html, /Pwn-A/)
+  assert.match(html, /Pwn-B/)
+  assert.match(html, /Pwn-C/)
+  assert.match(html, /@solver-pwn-02/)
+  assert.match(html, /已过期 · 需要重新 ctf_start_env/)
+  // 非环境型（外链题 / 未探测题）不该出现
+  assert.equal(html.includes('外链题'), false)
+  assert.equal(html.includes('未探测题'), false)
+  // 排序：过期(error) 最前，其次告警(warn)，最后正常(ok)
+  assert.ok(html.indexOf('Pwn-C') < html.indexOf('Pwn-B'))
+  assert.ok(html.indexOf('Pwn-B') < html.indexOf('Pwn-A'))
+  // tab 角标 = 运行中的环境数（过期的不算）
+  assert.equal(renderViewTabCount('env', model), 2)
+})
+
+test('「环境」子视图：没有环境时给空态；配额满时给提示', () => {
+  const empty = envModel({ connection: { key: 'k' }, env: { limit: 2, held: 0, free: 2 }, challenges: [{ id: 1, name: 'A', taskType: 3 }] })
+  const html = renderViewEnvHtml(empty)
+  assert.match(html, /当前没有运行中的环境/)
+  assert.match(html, /lx-vempty/)
+  assert.equal(runningEnvCount(empty.board), 0)
+
+  const full = envModel(envSnapshot({ env: { limit: 2, held: 2, free: 0 } }))
+  assert.match(renderViewEnvHtml(full), /配额已满 · 新环境起不来，先释放一个/)
+})
+
+test('环境数据容错：challenges 里混入 null / 垃圾字段不崩', () => {
+  const model = envModel({
+    connection: { key: 'k' },
+    env: 'not-an-object',
+    challenges: [null, 42, {}, { id: 1, name: 'A', taskType: 'x', envRemainingSeconds: 'abc', envExpired: 'yes' }],
+  })
+  assert.doesNotThrow(() => renderViewBoardHtml(model, {}))
+  assert.doesNotThrow(() => renderViewEnvHtml(model))
+  assert.doesNotThrow(() => renderViewAgentsHtml(model))
+  assert.equal(model.state.env.known, false)
+  const item = model.board.find((row) => row.name === 'A')
+  assert.equal(item.taskType, null, '非数字题型 → 不显示')
+  assert.equal(typeof item.envRemainingSeconds, 'number')
+})
+
+test('环境视图控制器：切到 env tab 渲染环境面板', async () => {
+  const { impl } = viewFetch({ state: envSnapshot() })
+  const { dom, view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+  view.setTab('env')
+  const text = collectText(dom.document.body)
+  assert.match(text, /环境配额 1\/2/)
+  assert.match(text, /Pwn-B/)
+  assert.match(text, /环境已过期/)
+  assert.equal(view.state.tab, 'env')
+  view.destroy()
 })
 
 // ── 样式作用域 ──

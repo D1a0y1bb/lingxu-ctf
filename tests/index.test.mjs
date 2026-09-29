@@ -9,6 +9,7 @@ import {
   buildTeamState, buildReportsState, readLimitParam, toChallengeId, toEpochMs, withSessionCapture,
   name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
   describeConfigFields, readJsonBody,
+  createStageToolRegistry,
 } from '../lib/index.js'
 
 /** 最小 Cordis Context 替身：收集注册项，effect 立即执行并记录 disposer。 */
@@ -106,10 +107,10 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.deepEqual(inject, ['tools'])
 
   const names = ctx._collected.tools.map((t) => t.name).sort()
-  assert.equal(names.length, 15, `应注册 15 个工具，实际 ${names.length}: ${names.join(',')}`)
+  assert.equal(names.length, 16, `应注册 16 个工具，实际 ${names.length}: ${names.join(',')}`)
   for (const expected of [
     'ctf_connect', 'ctf_session', 'ctf_status', 'ctf_challenges', 'ctf_challenge', 'ctf_start_env',
-    'ctf_delay_env', 'ctf_release_env', 'ctf_submit_flag', 'ctf_leaderboard', 'ctf_theory',
+    'ctf_delay_env', 'ctf_release_env', 'ctf_submit_flag', 'ctf_leaderboard', 'ctf_theory', 'ctf_notice',
     'ctf_solve_start', 'ctf_solve_status', 'ctf_solve_stop', 'ctf_writeup',
   ]) {
     assert.equal(names.includes(expected), true, `缺少工具 ${expected}`)
@@ -148,13 +149,13 @@ test('apply: enableWebPanel=false 时不注册路由', () => {
   apply(ctx, { workDir: '/tmp/lingxu-test', enableWebPanel: false })
   assert.equal(ctx._collected.routes.length, 0)
   assert.equal(ctx._collected.taps.length, 0)
-  assert.equal(ctx._collected.tools.length, 15, '工具不受面板开关影响')
+  assert.equal(ctx._collected.tools.length, 16, '工具不受面板开关影响')
 })
 
 test('apply: 无 agentTeams 服务时仍能加载（编排工具给出清晰报错）', () => {
   const ctx = mockCtx() // services 里没有 agentTeams
   apply(ctx, { workDir: '/tmp/lingxu-test' })
-  assert.equal(ctx._collected.tools.length, 15)
+  assert.equal(ctx._collected.tools.length, 16)
 })
 
 /**
@@ -188,7 +189,7 @@ test('apply: 在 Cordis 严格 Proxy 上下文下不触碰未 inject 的 service
   // 真实场景：插件行挂在 profile 层，没有 ambient agent / systemPrompt / webServer 等
   const ctx = strictCordisCtx({}) // 所有 service 都缺失
   assert.doesNotThrow(() => apply(ctx, {}), '不得因读取未声明的 service 而炸掉加载')
-  assert.equal(ctx._collected.tools.length, 15, '工具仍应全部注册')
+  assert.equal(ctx._collected.tools.length, 16, '工具仍应全部注册')
 })
 
 test('apply: 严格 Proxy + 完整 service 时正常装配', () => {
@@ -259,7 +260,7 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   const ctx = injectAwareCtx({}) // 一开始什么服务都没有
   apply(ctx, { workDir: '/tmp/lingxu-test' })
 
-  assert.equal(ctx._collected.tools.length, 15, '工具只依赖 tools，立即可用')
+  assert.equal(ctx._collected.tools.length, 16, '工具只依赖 tools，立即可用')
   assert.deepEqual(
     ctx._collected.injected.map((d) => d[0]).sort(),
     ['agentTeams', 'commands', 'systemPrompt', 'webServer'],
@@ -323,7 +324,7 @@ test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延�
 test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替身兼容）', () => {
   const ctx = mockCtx({ agentTeams: { spawnTeammate() {}, createTask() {}, listTasks() {}, listMembers() {} } })
   assert.doesNotThrow(() => apply(ctx, { workDir: '/tmp/lingxu-test' }))
-  assert.equal(ctx._collected.tools.length, 15)
+  assert.equal(ctx._collected.tools.length, 16)
   assert.equal(ctx._collected.sections.length, 1)
   assert.equal(ctx._collected.routes.some((r) => r.path === '/lingxu-ctf/state'), true)
 })
@@ -331,7 +332,7 @@ test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替�
 test('apply: 工具可通过 dispose 注销', () => {
   const ctx = mockCtx()
   apply(ctx, { workDir: '/tmp/lingxu-test' })
-  assert.equal(ctx._collected.tools.length, 15)
+  assert.equal(ctx._collected.tools.length, 16)
   ctx._disposeAll()
   assert.equal(ctx._collected.tools.length, 0)
 })
@@ -1068,4 +1069,76 @@ test('GET /lingxu-ctf/team：任意 ctf_* 工具调用都能提供会话语境�
   assert.equal(body.ok, true, '跑过任意 ctf_* 工具后团队视图就该有数据')
   assert.equal(body.members.length, 3)
   assert.equal(calls.callers.every((caller) => caller === TEAM_AGENT), true)
+})
+
+// ────────────────────────────────────────────── 赛段工具动态注册
+
+test('createStageToolRegistry：按赛事赛段动态注册/注销 AWD、CFS 工具', async () => {
+  const live = []
+  const reg = createStageToolRegistry({
+    registerTool: (spec) => {
+      live.push(spec.name)
+      return () => {
+        const i = live.indexOf(spec.name)
+        if (i >= 0) live.splice(i, 1)
+      }
+    },
+    logger: { info() {}, warn() {} },
+    deps: { config: {}, store: {}, resolveAdapter: async () => ({}), logger: console },
+  })
+  const awd = () => live.filter((n) => n.startsWith('ctf_awd_')).length
+  const cfs = () => live.filter((n) => n.startsWith('ctf_cfs_')).length
+
+  assert.equal(awd(), 0, '初始不应有 AWD 工具')
+  assert.equal(cfs(), 0, '初始不应有 CFS 工具')
+
+  // ① 含 AWD → 9 个
+  reg.sync({ hasAwd: true, hasCfs: false })
+  assert.equal(awd(), 9)
+  assert.equal(cfs(), 0)
+
+  // ② 同入参重复同步 → 幂等，不叠加
+  reg.sync({ hasAwd: true, hasCfs: false })
+  assert.equal(awd(), 9, '重复同步不应叠加')
+
+  // ③ 换成 CFS → AWD 整组注销
+  reg.sync({ hasAwd: false, hasCfs: true })
+  assert.equal(awd(), 0, 'AWD 工具应被注销')
+  assert.equal(cfs(), 7)
+
+  // ④ 两者都有
+  reg.sync({ hasAwd: true, hasCfs: true })
+  assert.equal(awd(), 9)
+  assert.equal(cfs(), 7)
+
+  // ⑤ 回到纯 CTF → 全部注销
+  reg.sync({ hasAwd: false, hasCfs: false })
+  assert.equal(live.length, 0, `应清空，实际 ${live.join(',')}`)
+
+  // ⑥ 探活失败（键缺失 / null）时保持现状
+  reg.sync({ hasAwd: true, hasCfs: false })
+  assert.equal(awd(), 9)
+  reg.sync({})
+  assert.equal(awd(), 9, 'hasAwd/hasCfs 都 undefined 时应保持现状')
+  reg.sync(null)
+  assert.equal(awd(), 9, 'null 时应保持现状')
+
+  // ⑦ disposeAll 清空并重置签名（下次 sync 同值仍会注册）
+  reg.disposeAll()
+  assert.equal(live.length, 0)
+  assert.equal(reg.signature(), null)
+  reg.sync({ hasAwd: true, hasCfs: false })
+  assert.equal(awd(), 9, 'disposeAll 后同值 sync 应重新注册')
+})
+
+test('接线守卫：apply 暴露 deps.syncStageTools，ctf_connect 换赛事时调用它', async () => {
+  // deps 是 apply 内部闭包，测试够不到，所以做源码级守卫防止被误删。
+  const { readFileSync } = await import('node:fs')
+  const index = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+  assert.match(index, /deps\.syncStageTools\s*=/, 'apply 必须把 syncStageTools 放到 deps 上')
+  assert.match(index, /createStageToolRegistry\(/, 'apply 必须用工厂创建注册器')
+
+  const tools = readFileSync(new URL('../lib/tools.js', import.meta.url), 'utf8')
+  assert.match(tools, /ctx\.syncStageTools/, 'ctf_connect 必须在连接成功后调用 syncStageTools')
+  assert.match(tools, /hasAwd/, 'ctf_connect 必须把 hasAwd 传下去')
 })
