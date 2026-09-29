@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import {
   apply, normalizeConfig, slugify, maskFlag, injectClientScript, buildPanelState,
-  name as pluginName, inject, Config, configHasCredentials,
+  name as pluginName, inject, Config, configHasCredentials, plainConfigValue,
 } from '../lib/index.js'
 
 /** 最小 Cordis Context 替身：收集注册项，effect 立即执行并记录 disposer。 */
@@ -456,18 +456,48 @@ test('buildPanelState: 平台接口部分失败时不整体崩', async () => {
 
 test('Config schema：存在、有默认值、字段齐全', () => {
   assert.equal(typeof Config, 'function', 'Config 应是 schemastery schema（可调用）')
-  const parsed = Config({})
+  // volatile 字段解析出来是「稳定引用」对象，必须解包后才是真实值
+  const parsed = plainConfigValue(Config({}))
   for (const key of [
     'platform', 'baseUrl', 'eventId', 'cookie', 'token', 'label',
     'concurrency', 'maxWrongAttempts', 'dedupeFlags', 'workDir', 'timeoutMs', 'enableWebPanel',
   ]) {
     assert.equal(key in parsed, true, `Config 缺字段 ${key}`)
   }
-  // 每个字段都必须有默认值：缺默认值会让 Loader 报 missing required value 并让整行加载失败
   assert.equal(parsed.platform, 'lingxu')
   assert.equal(parsed.concurrency, 4)
   assert.equal(parsed.dedupeFlags, true)
   assert.equal(parsed.enableWebPanel, true)
+})
+
+test('Config schema：每个字段都标了 volatile —— 否则设置页根本不显示配置', () => {
+  // dsh-settings 的 describe()：const form = volatileForm(schema); if (form === void 0) return []
+  // volatileForm 只在 schema 本身或某个字段带 meta.volatile 时才返回表单。
+  // 只导出 Config 不加 volatile 的表现是「插件能跑，但设置里找不到任何配置项」。
+  const fields = Object.entries(Config.dict ?? {})
+  assert.equal(fields.length, 12, `应有 12 个字段，实际 ${fields.length}`)
+  const notVolatile = fields.filter(([, child]) => child.meta?.volatile !== true).map(([k]) => k)
+  assert.deepEqual(notVolatile, [], `这些字段缺 .volatile()，会导致设置页不显示：${notVolatile.join(', ')}`)
+  // 外层 object 不能也标 volatile（schemastery 会直接抛 ValidationError）
+  assert.equal(Config.meta?.volatile, undefined, '外层 object 不能标 volatile')
+})
+
+test('plainConfigValue：解包 volatile 引用（真实 Loader 路径）', () => {
+  const parsed = Config({ baseUrl: 'https://y.com', eventId: 7, cookie: 'sessionid=z', concurrency: 6 })
+  // 未解包时每个字段都是 {}（引用对象）
+  assert.equal(typeof parsed.baseUrl, 'object')
+  const plain = plainConfigValue(parsed)
+  assert.equal(plain.baseUrl, 'https://y.com')
+  assert.equal(plain.eventId, 7)
+  assert.equal(plain.cookie, 'sessionid=z')
+  assert.equal(plain.concurrency, 6)
+  assert.equal(plain.platform, 'lingxu', '未显式给的字段应拿到 schema 默认值')
+  // normalizeConfig 必须自己解包，否则读到的是 {}
+  const norm = normalizeConfig(parsed)
+  assert.equal(norm.baseUrl, 'https://y.com')
+  assert.equal(norm.eventId, 7)
+  assert.equal(norm.cookie, 'sessionid=z')
+  assert.equal(norm.concurrency, 6)
 })
 
 test('Config schema：cookie/token 标了 role(secret)（跨线脱敏、只写输入）', () => {
@@ -546,5 +576,5 @@ test('默认导出必须携带 Config/inject/apply —— Loader 只认 default 
   assert.equal(typeof def.apply, 'function', 'default.apply 必须存在')
   assert.equal(def.name, 'dsh-lingxu-ctf')
   // default 上的 Config 必须能解析出默认值（否则 Loader 校验会失败）
-  assert.equal(def.Config({}).concurrency, 4)
+  assert.equal(plainConfigValue(def.Config({})).concurrency, 4)
 })

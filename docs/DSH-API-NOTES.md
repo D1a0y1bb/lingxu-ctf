@@ -231,6 +231,108 @@ ctx.systemPrompt.context({ ... })                              // runtime contex
   本插件不用 `dsh.client` + client-modules 解析（第三方 profile 包装不进 DSH 自身解析路径），
   改为自托管 bundle（见上）。
 
+## 7.5 插件配置要出现在设置页，必须满足**三个**条件
+
+这是本项目踩坑最多的一处，三条缺一条都会表现为「插件能跑，但设置里找不到任何配置项」。
+
+### 条件 1：`Config` 必须在 **default 导出**上
+
+Cordis Loader 归一化模块形状时用的是（`cordis-plugin-loader` 的 `unwrapExports`）：
+
+```js
+exports = exports.default ?? exports;
+```
+
+**只要模块存在 default 导出，Loader 就只认它**，再从它身上读 `plugin.Config` / `plugin.inject` / `plugin.apply`。
+命名导出会被忽略。
+
+```js
+export const Config = z.object({ /* ... */ })   // ← 只写这个不够
+export default { name, inject, Config, apply }  // ← default 上也必须有 Config
+```
+
+诊断方法：`cordis_inspect_query(provider: "Config", method: "listConfigs", input: {name: "<包名>"})`。
+- `status: "absent"` → Loader 没拿到 Config（多半是 default 导出漏了）
+- `status: "schema"` → 拿到了
+
+### 条件 2：schema 必须有 `meta.volatile`
+
+`dsh-settings` 的 `describe()` 里有一句硬门槛：
+
+```js
+const form = volatileForm(schema);
+if (form === void 0) return [];      // ← 这个插件的配置直接不进设置页
+```
+
+而 `volatileForm` 只在 **schema 本身**或**某个字段**带 `meta.volatile` 时才返回表单：
+
+```js
+export function volatileForm(schema) {
+  if (schema.meta.volatile) return plainSchema(schema);
+  if (schema.type === 'object') { /* 递归找带 volatile 的子字段 */ }
+  return undefined;
+}
+```
+
+⇒ 正确写法是**逐字段** `.volatile()`（官方 `dsh-web-search-deepseek` 就是这样）：
+
+```js
+export const Config = z.object({
+  apiKey: z.string().role('secret').volatile(),
+  baseURL: z.string().default('').volatile(),
+  concurrency: z.number().default(4).volatile(),
+})
+```
+
+⚠️ **不要**给外层 object 也加 `.volatile()`，schemastery 会直接抛：
+`ValidationError: volatile fields require a fixed object path without an enclosing volatile field`
+
+### 条件 3：读值前必须解包 volatile 引用
+
+`.volatile()` 会把字段解析成**稳定引用对象**（带 `.get()`），`JSON.stringify` 出来是 `{}`：
+
+```js
+Config({ baseUrl: 'https://x.com' }).baseUrl   // → {}  （不是字符串！）
+```
+
+所以插件读配置前必须先解包（DSH 自己的插件也这么干，例如 `dsh-opencode-go-usage` 的 `plainConfigValue`）：
+
+```js
+function plainConfigValue(value) {
+  if (value !== null && typeof value === 'object' && typeof value.get === 'function') return plainConfigValue(value.get())
+  if (Array.isArray(value)) return value.map(plainConfigValue)
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, c]) => [k, plainConfigValue(c)]))
+  }
+  return value
+}
+```
+
+### 写入路径（如果要自带配置卡片）
+
+```js
+const entry = ctx.fiber?.entry
+const editor = ctx.get('configEditor')
+await editor.edit(entry, (current, inherited) => ({ ...current, ...patch }))
+```
+
+自带卡片的插件（如 `dsh-opencode-go-usage`）会显式关掉自动表单，避免两者打架：
+
+```js
+ctx.effect(() => ctx.settings.configure({ auto: false }, ctx.fiber))
+```
+
+自带卡片要注册到 Plugins 页的 slot（key 是 `"<包名>#<rowId>"`）：
+`plugins.bundle.config`（bundle 级）或 `plugins.row.config`（行级）。
+
+### 快速自检脚本
+
+```js
+const { volatileForm } = await import('<dsh-settings>/lib/types/schema.js')
+const form = volatileForm(myConfig)
+console.log(form === undefined ? '❌ 设置页不会有表单' : '✅ 有表单，字段: ' + Object.keys(form.dict).join(','))
+```
+
 ## 8. 存储
 
 ```js
