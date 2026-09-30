@@ -78,7 +78,7 @@ else
 fi
 
 step "5/6 打包清单完整性"
-for f in package.json cordis.patch.yml README.md CHANGELOG.md docs/AUDIT.md docs/DESIGN.md docs/DSH-API-NOTES.md docs/INSTALL.md docs/NEXT-REVIEW.md docs/FORENSICS.md \
+for f in package.json cordis.patch.yml README.md CHANGELOG.md docs/AUDIT.md docs/DESIGN.md docs/DSH-API-NOTES.md docs/INSTALL.md docs/NEXT-REVIEW.md docs/FORENSICS.md docs/LIVE-CONTRACT-SAMPLING.md docs/WINDOWS-ACCEPTANCE.md \
          lib/index.js lib/lingxu.js lib/platforms.js lib/store.js lib/toolkit.js \
          lib/tools.js lib/stage-tools.js lib/orchestrate.js lib/writeup.js lib/client.js lib/team-events.js; do
   if [ -f "$f" ]; then ok "$f"; else bad "缺少 $f"; fi

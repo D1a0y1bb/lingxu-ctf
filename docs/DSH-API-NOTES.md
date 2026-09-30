@@ -82,7 +82,7 @@ Web 服务使用 `register({ path, method, handler })`。插件路由如下：
 /lingxu-ctf/usage
 ```
 
-响应统一使用 JSON，错误时保留 HTTP 200 的业务状态对象或明确的 4xx；客户端不能把非 JSON 直接当成功数据。`/state`、`/team`、`/reports` 和 `/usage` 接受 `session` 查询参数。存在多个已知会话时，没有显式 session 的请求不会猜测最近会话。
+响应统一使用 JSON，错误时保留 HTTP 200 的业务状态对象或明确的 4xx；客户端不能把非 JSON 直接当成功数据。插件路由注册在 `/api` 之外，但会在宿主提供 `connection` 服务时主动调用 `connection.admit(req)`，复用 DSH 的 Host/Origin/浏览器会话认证；没有该服务的旧宿主只允许 loopback socket。`/state`、`/team`、`/reports` 和 `/usage` 接受 `session` 查询参数。存在多个已知会话时，没有显式 session 的请求不会猜测最近会话。
 
 `POST /config` 校验浏览器的 `Origin` 和 Fetch Metadata，拒绝跨站写入；无浏览器头的宿主内部调用保持兼容。普通 `/reports`、`/usage` 和 `/diag` 响应会移除或遮盖本机绝对路径。
 
@@ -119,3 +119,4 @@ bash scripts/verify.sh
 4. `settings.update` 的 revision 规则未改变；
 5. 带有效 Cookie 的 smoke/e2e 检查通过。
 6. 两个会话交错请求四条 session 路由时，返回的 caller、连接、报告和用量互不串线。
+7. 两个 DSH 进程共用同一 `DSH_HOME` 时，凌虚 host 请求经过共享租约限流；跨机器部署必须把配额放到网关或外部服务。

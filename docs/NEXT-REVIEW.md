@@ -1,6 +1,6 @@
 # 研发审查与后续设计
 
-基线为 `1.0.10`。本地回归为 640/640；真实凌虚赛事 7 和 macOS DSH 已有回执，但这仍没有替代跨赛事 DSH 或 Windows 验收。
+基线为待发布 `1.0.11`。本地回归在本轮增加独立进程与宿主认证覆盖；历史真实凌虚赛事 7 和 macOS DSH 已有回执，但这仍没有替代跨赛事 DSH 或 Windows 验收。
 
 ## 本轮复核
 
@@ -14,12 +14,13 @@
 | B6 配置写边界 | 字段白名单、类型校验、同源与 Fetch Metadata 检查 | `passed`（本地） |
 | B7 路由暴露绝对路径 | 报告移除 `absPath`，用量和诊断错误遮盖本机路径 | `passed`（本地） |
 | B8 旧赛段工具沿用 | 能力三态合同，状态未知时执行前复核当前连接 | `passed`（本地） |
-| B9 多进程覆盖 store | 文件锁、唯一临时文件、原子替换和合并写入 | `partial`：同进程与两个 store 已通过，独立进程压力未跑 |
-| B10 限流器仅进程级 | 保持单进程实现并写明部署边界 | `partial`：多实例仍需外部协调 |
+| B9 多进程覆盖 store | 文件锁、唯一临时文件、原子替换和合并写入 | `passed`：两个独立 Node 进程压力用例通过 |
+| B10 限流器仅进程级 | 同机共享 `DSH_HOME` 的 host 租约，跨机器明确交给网关 | `passed`（同机）；跨机器 `partial` |
 | B11 客户端慢响应覆盖 | AbortController、请求代次和同轮 session 参数 | `passed`（本地） |
 | B12 平台能力无版本 | 新增版本化合同、稳定错误投影和测试 fixture | `passed`（本地） |
 | B13 重启后的冷 session | 路由用 `sessionQuery` 确认宿主 session 后恢复最小上下文 | `passed`（本地 + macOS DSH） |
 | B14 classic bootstrap 重复挂载 | ModuleLoader 接管时跳过备用 bootstrap，配置轮询跟随 `ctx` 销毁 | `passed`（本地 + macOS DSH） |
+| B15 宿主认证与诊断边界 | 插件路由复用 `connection.admit()`，旧宿主拒绝非 loopback | `partial`：代码用例通过；当前 DSH 进程未重启，真实 `/diag` 回执仍待下一轮 |
 
 ## 下一步优先级
 
@@ -41,7 +42,7 @@
 
 ### P2：多实例限流
 
-当前 host limiter 只协调一个 DSH 进程。只有确认存在多实例共用账号的部署后，才把配额迁到宿主共享服务或外部网关。不要先在本地 state 上拼分布式锁；它无法覆盖不同机器，反而会制造错误的安全感。
+同一台机器上的多个 DSH 进程现在通过 `DSH_HOME/storages/lingxu-ctf/rate-limit.json` 共享 host 租约；不同机器没有共享文件系统，必须在平台网关或外部限流服务统一配额。不要把本机租约描述成跨机器分布式锁。
 
 ### P2：模块拆分
 
@@ -52,11 +53,11 @@
 - `usage-reader`：日志读取、折叠和宿主投影对账；
 - `client-data` 与 `client-view`：请求状态和渲染分开。
 
-拆分时保持 package export、classic script 入口、路由和工具名不变。每一步只移动一个责任域，并用当前 638 个回归测试确认行为未变。
+拆分时保持 package export、classic script 入口、路由和工具名不变。每一步只移动一个责任域，并用当前 645 个回归测试确认行为未变。
 
 ### P2：宿主认证边界
 
-当前配置写入靠同源浏览器信号，适合本机 DSH。若 Web 服务以后允许远程访问，应复用 DSH 的登录态和 CSRF 机制，不要在插件里另造一套 token。`/diag` 也应由宿主权限控制，而不是只依赖路径难猜。
+配置写入继续保留同源与 Fetch Metadata 检查；插件 Web 路由已复用 DSH `connection.admit()` 的登录态与 Host/Origin 机制。若 Web 服务以后允许远程访问，仍不得改成插件自造 token；没有宿主认证服务的旧版本只能留在 loopback。
 
 ## 发布门槛
 

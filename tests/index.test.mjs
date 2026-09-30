@@ -401,10 +401,10 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(ctx._collected.tools.length, 17, '工具只依赖 tools，立即可用')
   assert.deepEqual(
     ctx._collected.injected.map((d) => d[0]).sort(),
-    ['agentTeams', 'commands', 'sessionProjections', 'sessionQuery', 'sessions', 'settings', 'systemPrompt', 'webServer'],
+    ['agentTeams', 'commands', 'connection', 'sessionProjections', 'sessionQuery', 'sessions', 'settings', 'systemPrompt', 'webServer'],
     '可选服务都应通过 ctx.inject 声明（settings=设置页回写；sessionQuery=恢复冷会话；sessions/sessionProjections=token 用量投影对账）',
   )
-  assert.equal(ctx._collected.pending.length, 8, '依赖未就绪时应挂起而不是失败（含 settings / sessions / sessionQuery / sessionProjections）')
+  assert.equal(ctx._collected.pending.length, 9, '依赖未就绪时应挂起而不是失败（含 connection / settings / sessions / sessionQuery / sessionProjections）')
 
   // 逐个交付服务
   const sections = []
@@ -419,14 +419,14 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(routes.some((r) => r.path === '/lingxu-ctf/state'), true, 'webServer 就绪后应注册面板路由')
 
   ctx._collected_deliver('commands', { register: () => () => {} })
-  assert.equal(ctx._collected.pending.length, 5, '只剩 agentTeams / sessions / sessionQuery / settings / sessionProjections 未就绪')
+  assert.equal(ctx._collected.pending.length, 6, '只剩 agentTeams / connection / sessions / sessionQuery / settings / sessionProjections 未就绪')
 
   // settings 就绪 → deps.settings 被填上（ctf_connect 要用它回写设置页）
   ctx._collected_deliver('settings', {
     describe: () => [{ ns: 'lingxu-ctf', revision: 3 }],
     update: async () => {},
   })
-  assert.equal(ctx._collected.pending.length, 4, '只剩 agentTeams / sessions / sessionQuery / sessionProjections 未就绪')
+  assert.equal(ctx._collected.pending.length, 5, '只剩 agentTeams / connection / sessions / sessionQuery / sessionProjections 未就绪')
 })
 
 test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延迟赋值）', async () => {
@@ -1103,8 +1103,13 @@ test('readLimitParam：合法值夹在 1..max，非法回退默认', () => {
 })
 
 /** 最小 req/res 替身，用来真调路由 handler。 */
-function mockReq({ url = '/', method = 'GET' } = {}) {
-  return { url, method }
+function mockReq({ url = '/', method = 'GET', headers = {}, remoteAddress } = {}) {
+  return {
+    url,
+    method,
+    headers,
+    ...(remoteAddress === undefined ? {} : { socket: { remoteAddress } }),
+  }
 }
 function mockRes() {
   const res = { statusCode: 200, headers: {}, body: '' }
@@ -2140,6 +2145,44 @@ test('GET /lingxu-ctf/diag：暴露限流与面板缓存计数', async () => {
     platform.restore()
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => {})
   }
+})
+
+test('面板路由复用 DSH Host Connection 认证，未认证不能访问 /diag', async () => {
+  const connection = {
+    admit(req) {
+      return req.headers?.cookie === 'dsh-auth=ok' ? { peer: {} } : { rejection: 401 }
+    },
+  }
+  const ctx = mockCtx({ connection })
+  apply(ctx, { workDir: '/tmp/lingxu-diag-auth' })
+  const route = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/diag')
+  const unauthorized = await callRoute(route)
+  assert.equal(unauthorized.statusCode, 401)
+  assert.equal(unauthorized.body, 'unauthorized')
+  const authorized = await callRoute(route, { headers: { cookie: 'dsh-auth=ok' } })
+  assert.equal(authorized.statusCode, 200)
+  assert.equal(JSON.parse(authorized.body).ok, true)
+})
+
+test('没有 DSH Connection 服务时，旧宿主的面板路由拒绝非 loopback 请求', async () => {
+  const ctx = mockCtx()
+  apply(ctx, { workDir: '/tmp/lingxu-diag-loopback' })
+  const route = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/diag')
+  const remote = await callRoute(route, { remoteAddress: '192.0.2.10' })
+  assert.equal(remote.statusCode, 403)
+  assert.equal(remote.body, 'forbidden')
+  const local = await callRoute(route, { remoteAddress: '127.0.0.1' })
+  assert.equal(local.statusCode, 200)
+  assert.equal(JSON.parse(local.body).ok, true)
+})
+
+test('Connection 认证器返回异常形状时，面板路由按失败关闭', async () => {
+  const ctx = mockCtx({ connection: { admit: () => undefined } })
+  apply(ctx, { workDir: '/tmp/lingxu-diag-auth-shape' })
+  const route = ctx._collected.routes.find((r) => r.path === '/lingxu-ctf/diag')
+  const response = await callRoute(route)
+  assert.equal(response.statusCode, 401)
+  assert.equal(response.body, 'unauthorized')
 })
 
 test('PANEL_CACHE_TTL_MS：略小于前端 5 秒轮询', () => {

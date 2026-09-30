@@ -1,21 +1,24 @@
 # 交付审计
 
-审计基线为 `1.0.10` 工作树，Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
+审计基线为当前工作树（待发布 `1.0.11`），Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
 
 ## 结果
 
 | 范围 | 状态 | 证据 |
 | --- | --- | --- |
 | JavaScript 语法 | `passed` | `node --check lib/*.js tests/*.mjs` |
-| 单元与契约回归 | `passed` | `npm test`，640/640 |
+| 单元与契约回归 | `passed` | `npm test`，包含独立进程与共享限流用例 |
 | 多会话身份隔离 | `passed`（本地） | 并行 session registry、显式未知 session、客户端 session 路由用例 |
 | token 用量折叠 | `passed`（本地） | 多帧 zstd、JSONL、交错 step、retry 和宿主投影用例 |
 | 请求与附件边界 | `passed`（本地） | 同源跳转、响应大小、写请求重试、附件限额、正文超时和半文件清理用例 |
-| 状态存储 | `passed`（本地） | 权限、损坏恢复、两个 store 并发合并和 schema 归一化用例 |
+| 状态存储 | `passed`（本地） | 权限、损坏恢复、两个 store 并发合并；两个独立 Node 进程共写 40 连接/提交/进度/消息，临时文件与锁均清理 |
+| 同机多 DSH 限流 | `passed`（本地） | 两个独立 Node 进程共用 host 租约，10 个真实 HTTP 请求全局并发 1、配置 60ms 且实测间隔下界 ≥35ms |
+| DSH 宿主认证与 `/diag` | `partial`（代码通过，当前进程未重载） | 插件路由复用 `connection.admit()`；本地替身未认证返回 401、非 loopback 返回 403；当前已运行 DSH 是旧代码，未重启以免打断会话，实测 `/diag` 仍为 200 |
 | 平台能力合同 | `passed`（本地） | `present/absent/unknown` 与执行前复核用例 |
-| 真实凌虚平台 | `passed` | `tests/smoke-live.mjs` 与 `tests/e2e-live.mjs` 使用赛事 7 的有效会话完成；赛事摘要 78 题、54 已解、24 待解，排行榜 8 人第 1 |
+| 真实凌虚平台 | `partial` | 历史赛事 7 的 smoke/e2e 回执仍有效；本轮当前保存的赛事 4 Cookie 真实请求返回 HTTP 403 `session-expired`，不能据此宣称当前账号可用 |
 | DSH 桌面端会话恢复、生命周期与面板 | `partial` | macOS DSH 重启后两个已存在 session 的 `/state` 均恢复为 78/54/24；主 CTF 视图和浮动面板均显示真实赛事；关闭/重新启用插件时路由分别 404/恢复。不同赛事交错切换仍未在本轮完成；本轮 UI 以隔离浏览器页面完成桌面/窄屏和轮询展开状态复核 |
-| Windows 安装 | `unverified` | 当前没有 Windows 验证主机 |
+| Windows 安装 | `environment_failed` | 当前没有 Windows 验证主机，无法完成安装、重启和真实桌面验收 |
+| `npm audit` | `environment_failed`（仓库合同）/ `passed`（隔离清单） | 仓库按 host-managed 策略没有 lockfile，直接执行返回 ENOLOCK；把 `package.json` 复制到临时目录生成临时 lockfile 后，npm 官方 registry 高危级别为 0 |
 
 ## 关键链路
 
@@ -39,7 +42,7 @@ GET 等安全请求可按既有策略重试；POST、PUT、PATCH、DELETE 默认
 
 状态目录权限为 `0700`，文件为 `0600`。状态写入有进程间锁、唯一临时文件、原子替换和合并逻辑，文件上限为 16 MiB；异常 schema 会归一化，原型字段不会进入内存状态。
 
-配置写接口拒绝跨站浏览器来源，只接受声明过的字段和类型。`/reports`、`/usage` 和 `/diag` 的普通响应不返回本机绝对路径。
+配置写接口拒绝跨站浏览器来源，只接受声明过的字段和类型。插件 Web 路由会复用 DSH `connection.admit()` 的 Host/Origin/浏览器会话检查；旧宿主没有该服务时，至少拒绝非 loopback socket。`/reports`、`/usage` 和 `/diag` 的普通响应不返回本机绝对路径。
 
 ### 平台能力和不可信内容
 
@@ -49,9 +52,9 @@ GET 等安全请求可按既有策略重试；POST、PUT、PATCH、DELETE 默认
 
 ## 还需要外部环境补的检查
 
-1. 用有效账号完成赛事摘要、分页、排行榜、理论题、AWD/CFS、附件和环境接口的 live 检查。
+1. 用有效账号完成赛事摘要、分页、排行榜、理论题、AWD/CFS、附件和环境接口的 live 检查；可使用 `scripts/sample-live-contract.mjs` 生成脱敏样本。当前账号已确认失效，不能伪造成功 fixture。
 2. 在 DSH 桌面端用两个不同赛事交错运行会话，复验切换会话、服务重连、热重载和卸载后的订阅与定时器；本版本已完成同赛事双 session 的冷恢复和生命周期回执。
 3. 在 Windows 完成安装、路径、文件权限退化和界面检查。
-4. 多个独立 DSH 进程共用平台账号时，限流仍需由部署层统一协调。
+4. 如果部署是跨机器多实例，仍需由共享网关/限流服务协调；当前实现只覆盖同一台机器共享 `DSH_HOME` 的 DSH 进程。
 
 历史提交和旧 tag 保持不变。本轮采用前向提交和新版本标签，不通过 force-push 改写公共历史。
