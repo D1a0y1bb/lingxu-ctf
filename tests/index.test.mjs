@@ -401,10 +401,10 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(ctx._collected.tools.length, 17, '工具只依赖 tools，立即可用')
   assert.deepEqual(
     ctx._collected.injected.map((d) => d[0]).sort(),
-    ['agentTeams', 'commands', 'sessionProjections', 'sessions', 'settings', 'systemPrompt', 'webServer'],
-    '可选服务都应通过 ctx.inject 声明（settings=设置页回写；sessions/sessionProjections=token 用量投影对账）',
+    ['agentTeams', 'commands', 'sessionProjections', 'sessionQuery', 'sessions', 'settings', 'systemPrompt', 'webServer'],
+    '可选服务都应通过 ctx.inject 声明（settings=设置页回写；sessionQuery=恢复冷会话；sessions/sessionProjections=token 用量投影对账）',
   )
-  assert.equal(ctx._collected.pending.length, 7, '依赖未就绪时应挂起而不是失败（含 settings / sessions / sessionProjections）')
+  assert.equal(ctx._collected.pending.length, 8, '依赖未就绪时应挂起而不是失败（含 settings / sessions / sessionQuery / sessionProjections）')
 
   // 逐个交付服务
   const sections = []
@@ -419,14 +419,14 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   assert.equal(routes.some((r) => r.path === '/lingxu-ctf/state'), true, 'webServer 就绪后应注册面板路由')
 
   ctx._collected_deliver('commands', { register: () => () => {} })
-  assert.equal(ctx._collected.pending.length, 4, '只剩 agentTeams / sessions / settings / sessionProjections 未就绪')
+  assert.equal(ctx._collected.pending.length, 5, '只剩 agentTeams / sessions / sessionQuery / settings / sessionProjections 未就绪')
 
   // settings 就绪 → deps.settings 被填上（ctf_connect 要用它回写设置页）
   ctx._collected_deliver('settings', {
     describe: () => [{ ns: 'lingxu-ctf', revision: 3 }],
     update: async () => {},
   })
-  assert.equal(ctx._collected.pending.length, 3, '只剩 agentTeams / sessions / sessionProjections 未就绪')
+  assert.equal(ctx._collected.pending.length, 4, '只剩 agentTeams / sessions / sessionQuery / sessionProjections 未就绪')
 })
 
 test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延迟赋值）', async () => {
@@ -1186,6 +1186,47 @@ test('GET /lingxu-ctf/usage：日志根目录不接受浏览器参数', async ()
     else process.env.DSH_HOME = previousHome
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
     await fsp.rm(attackerRoot, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+test('GET /lingxu-ctf/usage：重启后的冷会话由 sessionQuery 精确恢复', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-cold-session-'))
+  const previousHome = process.env.DSH_HOME
+  const sessionId = 'session-cold-route-test'
+  let disposed = 0
+  const observed = []
+  try {
+    process.env.DSH_HOME = root
+    const dir = path.join(root, 'sessions', 'workspace', sessionId)
+    await fsp.mkdir(dir, { recursive: true })
+    await fsp.writeFile(path.join(dir, 'session.v4.jsonl'), [
+      JSON.stringify({ type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 13, outputTokens: 5 } } }),
+      '',
+    ].join('\n'))
+    const sessionQuery = {
+      observeSession(id, options) {
+        observed.push([id, options])
+        return {
+          header: { id },
+          [Symbol.dispose]() { disposed += 1 },
+        }
+      },
+    }
+    const ctx = mockCtx({ sessionQuery })
+    apply(ctx, {})
+    const route = ctx._collected.routes.find((item) => item.path === '/lingxu-ctf/usage')
+    const response = await callRoute(route, { url: `/lingxu-ctf/usage?session=${sessionId}` })
+    const body = JSON.parse(response.body)
+    assert.equal(body.ok, true)
+    assert.equal(body.sessionId, sessionId)
+    assert.equal(body.totals.uncachedInputTokens, 13)
+    assert.equal(body.totals.outputTokens, 5)
+    assert.deepEqual(observed, [[sessionId, { projectionMode: 'none' }]])
+    assert.equal(disposed, 1, '只读 session 观察必须释放租约')
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
   }
 })
 

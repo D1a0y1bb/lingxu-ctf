@@ -118,16 +118,23 @@ console.log(statusText.split('\n').slice(0, 8).map((l) => `   ${l}`).join('\n'))
 //  3. ctf_challenges
 console.log('\n── ctf_challenges')
 const listText = await tool('ctf_challenges').execute({ solved: false, limit: 5 }, exec)
-check('列出未解题（limit=5 生效）', /Crypto|Web|Pwn|Misc|安全/.test(listText))
 // 输出是 markdown 表格：统计「| 数字 |」开头的数据行（排除表头与分隔行）
-const listed = listText.split('\n').filter((l) => /^\|\s*\d+\s*\|/.test(l)).length
+const listedIds = listText
+  .split('\n')
+  .map((line) => /^\|\s*(\d+)\s*\|/.exec(line)?.[1])
+  .filter(Boolean)
+  .map(Number)
+const listed = listedIds.length
+check('列出未解题（limit=5 生效）', listed === 5)
 check('条目数受 limit 约束', listed === 5, `列出 ${listed} 条`)
 check('表格含 id 与分值列', /\|\s*id\s*\|/.test(listText) && /分值/.test(listText))
+const targetChallengeId = listedIds[0] ?? 0
+check('从真实题目列表解析题目 id', targetChallengeId > 0, `题目 #${targetChallengeId}`)
 
 //  4. ctf_challenge（含附件下载路径）
 console.log('\n── ctf_challenge')
-const detailText = await tool('ctf_challenge').execute({ id: 1 }, exec)
-check('拿到题面', /NeuroSign|题面|描述/.test(detailText), detailText.split('\n')[0].slice(0, 80))
+const detailText = await tool('ctf_challenge').execute({ id: targetChallengeId }, exec)
+check('拿到题面', /题目详情|题面|描述/.test(detailText), detailText.split('\n')[0].slice(0, 80))
 const workFiles = await fsp.readdir(path.join(home, 'work', 'challenges')).catch(() => [])
 check('题目工作目录已建立', workFiles.length > 0, workFiles.join(', '))
 
@@ -146,8 +153,8 @@ console.log('\n── ctf_submit_flag 去重护栏')
 const store = (await import('../lib/store.js')).getStore()
 const conn = await store.resolveConnection({})
 const connKey = (await import('../lib/store.js')).connectionKey(conn)
-await store.recordSubmission({ connKey, challengeId: 1, flag: 'flag{e2e-dedupe-probe}', status: 'correct' })
-const dedupeText = await tool('ctf_submit_flag').execute({ id: 1, flag: 'flag{e2e-dedupe-probe}' }, exec)
+await store.recordSubmission({ connKey, challengeId: targetChallengeId, flag: 'flag{e2e-dedupe-probe}', status: 'correct' })
+const dedupeText = await tool('ctf_submit_flag').execute({ id: targetChallengeId, flag: 'flag{e2e-dedupe-probe}' }, exec)
 check('重复 flag 被去重拦截（未打到平台）', /已提交|重复|already/i.test(dedupeText), dedupeText.split('\n')[0].slice(0, 90))
 
 //  8. ctf_solve_start 在无 agentTeams 时给出清晰报错

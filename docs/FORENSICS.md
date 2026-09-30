@@ -21,7 +21,7 @@
 
 短时窗口内工具调用峰值约 60 次/分钟。旧版本面板和视图各自每 5 秒轮询一次 `/state`，一次快照会触发多次平台请求；工具调用和轮询叠加后可能造成会话 403。
 
-当前版本已加入面板 TTL、single-flight、刷新下限和滚动刷新预算。是否足以覆盖当前赛事流量，仍需带有效 Cookie 的 live 运行确认。
+当前版本已加入面板 TTL、single-flight、刷新下限和滚动刷新预算；赛事 7 的真实 smoke/e2e 及 macOS DSH 面板回执已通过。不同部署实例共用账号时仍需由部署层统一协调限流。
 
 ### 理论题调用次数符合任务量
 
@@ -33,14 +33,14 @@
 
 ### Agent 和工作区
 
-旧会话出现过一次 teammate 名额不足。日志还显示题目目录和 writeup 曾落到 DSH profile 目录，而不是会话工作区；这与当时使用进程 cwd 和相对路径有关。当前代码以会话/调用上下文的工作目录为优先，仍应在 DSH 桌面端做一次实际安装验证。
+旧会话出现过一次 teammate 名额不足。日志还显示题目目录和 writeup 曾落到 DSH profile 目录，而不是会话工作区；这与当时使用进程 cwd 和相对路径有关。当前代码以会话/调用上下文的工作目录为优先，macOS DSH 已完成实际安装和重启回执，Windows 路径仍待复验。
 
 ## 当前版本对应关系
 
 | 历史观察 | 当前代码入口 | 本地验证 | live 状态 |
 | --- | --- | --- | --- |
-| 面板轮询过密 | `createPanelSnapshotCache` | 缓存、single-flight、预算测试通过 | `unverified` |
-| 日志多帧/增量读取 | `readSessionTokenUsage` | zstd 多帧、JSONL 追加测试通过 | `unverified` |
+| 面板轮询过密 | `createPanelSnapshotCache` | 缓存、single-flight、预算测试通过 | `passed`（macOS DSH/赛事 7） |
+| 日志多帧/增量读取 | `readSessionTokenUsage` | zstd 多帧、JSONL 追加测试通过 | `passed`（真实面板用量路由） |
 | team-message 结构变化 | `teamDeliveryOf` | 当前 `data.content` 与旧结构测试通过 | `unverified` |
 | agent 环境配额 | `ctf_start_env`、`ctf_release_env` | 本地错误路径测试通过 | `unverified` |
 | 工作目录 | `resolveWorkDir`、`writeup.js` | 路径单测通过 | `unverified` |
@@ -49,6 +49,6 @@
 
 - 没有旧版 0.1.0 的同赛事日志，无法做严格版本速度对比。
 - 日志不包含完整的 teammate 生命周期、题型并发和平台服务端耗时。
-- 没有当前赛事 Cookie，无法确认接口字段、排名、理论题和真实环境启动时延。
+- 本附录不保存本轮 Cookie 和原始响应；赛事字段、排名、理论题和环境接口的本轮回执请以 `docs/AUDIT.md` 与 `docs/RELEASE-1.0.9.md` 为准。
 
 需要更新本报告时，先保存脱敏的原始 session，再记录 DSH 版本、赛事 ID、会话时区和验证命令；不要把 Cookie、完整请求头或私有题面提交到仓库。

@@ -1,6 +1,6 @@
 {
   "name": "dsh-lingxu-ctf",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "DSH 凌虚竞赛插件：查看赛题、管理环境、编排解题 agent，并保存提交记录和 writeup。",
   "type": "module",
   "main": "./lib/index.js",
