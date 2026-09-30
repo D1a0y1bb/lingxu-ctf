@@ -2432,6 +2432,43 @@ test('视图控制器：筛选（分类 / 状态 / 搜索）与工具条随 tab 
   view.destroy()
 })
 
+test('视图导航：主入口收敛到四项，低频页面仍可从更多视图进入', async () => {
+  const { impl } = viewFetch()
+  const { view } = mountView({ fetchImpl: impl })
+  await view.refresh()
+
+  const find = (predicate) => {
+    const stack = [view.element()]
+    while (stack.length > 0) {
+      const node = stack.pop()
+      if (predicate(node)) return node
+      for (const child of node?.children || []) stack.push(child)
+    }
+    return null
+  }
+  const primary = find((node) => String(node?.className || '').split(/\s+/).includes('lx-vtabs-primary'))
+  const secondary = find((node) => String(node?.className || '').split(/\s+/).includes('lx-vtabs-secondary'))
+  const more = find((node) => String(node?.className || '').split(/\s+/).includes('lx-vmore'))
+  assert.ok(primary)
+  assert.ok(secondary)
+  assert.ok(more)
+  assert.equal(primary.children.length, 4, '题目看板 / Agent / 环境 / 报告是首屏主入口')
+  assert.equal(secondary.children.length, 3, '理论题 / 协同通信 / 提交审计不能被删除')
+
+  const boardButton = find((node) => node?.dataset?.tab === 'board')
+  const theoryButton = find((node) => node?.dataset?.tab === 'theory')
+  assert.equal(boardButton.children[0].textContent, '题目看板', '保留准确的 CTF 语义文案')
+  assert.equal(boardButton.getAttribute('aria-pressed'), 'true')
+  assert.equal(theoryButton.getAttribute('aria-pressed'), 'false')
+
+  view.setTab('theory')
+  assert.equal(more.open, true, '进入低频页面时自动展开更多视图')
+  assert.equal(theoryButton.getAttribute('aria-pressed'), 'true')
+  view.setTab('board')
+  assert.equal(more.open, false, '回到主入口时收起更多视图')
+  view.destroy()
+})
+
 test('视图控制器：轮询在页面隐藏时暂停、恢复可见后继续、销毁后停表', async () => {
   let calls = 0
   const { impl } = viewFetch()

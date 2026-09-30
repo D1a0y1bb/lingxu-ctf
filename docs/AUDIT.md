@@ -1,20 +1,20 @@
 # 交付审计
 
-审计基线为 `1.0.9` 工作树，Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
+审计基线为 `1.0.10` 工作树，Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
 
 ## 结果
 
 | 范围 | 状态 | 证据 |
 | --- | --- | --- |
 | JavaScript 语法 | `passed` | `node --check lib/*.js tests/*.mjs` |
-| 单元与契约回归 | `passed` | `npm test`，639/639 |
+| 单元与契约回归 | `passed` | `npm test`，640/640 |
 | 多会话身份隔离 | `passed`（本地） | 并行 session registry、显式未知 session、客户端 session 路由用例 |
 | token 用量折叠 | `passed`（本地） | 多帧 zstd、JSONL、交错 step、retry 和宿主投影用例 |
 | 请求与附件边界 | `passed`（本地） | 同源跳转、响应大小、写请求重试、附件限额、正文超时和半文件清理用例 |
 | 状态存储 | `passed`（本地） | 权限、损坏恢复、两个 store 并发合并和 schema 归一化用例 |
 | 平台能力合同 | `passed`（本地） | `present/absent/unknown` 与执行前复核用例 |
 | 真实凌虚平台 | `passed` | `tests/smoke-live.mjs` 与 `tests/e2e-live.mjs` 使用赛事 7 的有效会话完成；赛事摘要 78 题、54 已解、24 待解，排行榜 8 人第 1 |
-| DSH 桌面端会话恢复、生命周期与面板 | `partial` | macOS DSH 重启后两个已存在 session 的 `/state` 均恢复为 78/54/24；主 CTF 视图和浮动面板均显示真实赛事；关闭/重新启用插件时路由分别 404/恢复。不同赛事交错切换仍未在本轮完成 |
+| DSH 桌面端会话恢复、生命周期与面板 | `partial` | macOS DSH 重启后两个已存在 session 的 `/state` 均恢复为 78/54/24；主 CTF 视图和浮动面板均显示真实赛事；关闭/重新启用插件时路由分别 404/恢复。不同赛事交错切换仍未在本轮完成；本轮 UI 以隔离浏览器页面完成桌面/窄屏和轮询展开状态复核 |
 | Windows 安装 | `unverified` | 当前没有 Windows 验证主机 |
 
 ## 关键链路
