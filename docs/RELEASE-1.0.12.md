@@ -15,7 +15,7 @@
 | `npm test` | `passed` | 646 个测试：644 passed、2 skipped |
 | `node --check lib/*.js tests/*.mjs` | `passed` | 全部 JavaScript 文件语法通过 |
 | `git diff --check` | `passed` | 无空白错误 |
-| `npm pack --dry-run` | `passed` | 29 个发布文件，包版本为 `1.0.12` |
+| `npm pack --dry-run` | `passed` | 30 个发布文件，包版本为 `1.0.12` |
 | 真实凌虚赛事 10 | `passed` | 合同采样、smoke 和 e2e 通过；AWD/CFS 为 `absent` |
 | 真实凌虚赛事 11 | `passed` | 合同采样、smoke 和 e2e 通过；附件元数据和环境地址均可读取 |
 | 插件级双赛事交错 | `passed` | session 10/11 的隐式工具解析和 `/state` 路由返回各自赛事 |

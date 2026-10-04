@@ -1,6 +1,6 @@
 # 交付审计
 
-审计基线为当前工作树（待发布 `1.0.12`），Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
+审计基线为已发布 `1.0.13`，Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
 
 ## 结果
 
@@ -13,10 +13,10 @@
 | 请求与附件边界 | `passed`（本地） | 同源跳转、响应大小、写请求重试、附件限额、正文超时和半文件清理用例 |
 | 状态存储 | `passed`（本地） | 权限、损坏恢复、两个 store 并发合并；两个独立 Node 进程共写 40 连接/提交/进度/消息，临时文件与锁均清理 |
 | 同机多 DSH 限流 | `passed`（本地） | 两个独立 Node 进程共用 host 租约，10 个真实 HTTP 请求全局并发 1、配置 60ms 且实测间隔下界 ≥35ms |
-| DSH 宿主认证与 `/diag` | `partial`（代码通过，桌面未复验） | 插件路由复用 `connection.admit()`；本地替身未认证返回 401、非 loopback 返回 403；本轮未启动 DSH 桌面端，真实 `/diag` 回执仍待复验 |
+| DSH 宿主认证与 `/diag` | `environment_failed`（代码通过） | 插件路由复用 `connection.admit()`；本地替身未认证返回 401、非 loopback 返回 403；本机没有 DSH 桌面应用，无法取得真实 `/diag` 回执 |
 | 平台能力合同 | `passed`（本地） | `present/absent/unknown` 与执行前复核用例 |
 | 真实凌虚赛事 10/11 | `passed` | 两场只读合同采样、smoke 和 e2e 均通过；赛事 10 采样 20 个接口，赛事 11 采样 12 个接口；两场 AWD/CFS 均为 absent |
-| DSH 桌面端会话恢复、生命周期与面板 | `partial` | 已完成真实平台上的插件 session/tool/`/state` 交错隔离；macOS DSH 的不同赛事交错、热重载和桌面路由回执仍待下一轮 |
+| DSH 桌面端会话恢复、生命周期与面板 | `environment_failed` | 插件级真实平台 session/tool/`/state` 交错隔离已通过；本机没有 DSH 桌面应用，无法完成不同赛事、热重载和桌面路由回执 |
 | Windows 安装 | `environment_failed` | 当前没有 Windows 验证主机，无法完成安装、重启和真实桌面验收 |
 | `npm audit` | `environment_failed`（仓库合同）/ `passed`（隔离清单） | 仓库按 host-managed 策略没有 lockfile，直接执行返回 ENOLOCK；把 `package.json` 复制到临时目录生成临时 lockfile 后，npm 官方 registry 高危级别为 0 |
 
