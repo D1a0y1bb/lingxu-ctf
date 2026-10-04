@@ -6,7 +6,7 @@
 
 ```bash
 LINGXU_COOKIE_FILE=/绝对路径/lingxu.cookie \
-LINGXU_BASE_URL=https://shuxinbei.clsadp.com:8000 \
+LINGXU_BASE_URL=https://ctf.example.com:8000 \
 LINGXU_EVENT_ID=4 \
 LINGXU_SAMPLE_MAX_DETAILS=12 \
 node scripts/sample-live-contract.mjs \
@@ -15,4 +15,4 @@ node scripts/sample-live-contract.mjs \
 
 Cookie 文件只应包含浏览器复制的完整 Cookie，命令行和样本都不会写出 Cookie、flag、token、用户名、密码或原始响应。样本中的每个调用有 `passed` / `failed` 状态；403 未登录、权限不足、未配置赛段等错误会保留机器可读的状态码和错误码。题目详情默认最多采样 12 道（可用 `LINGXU_SAMPLE_MAX_DETAILS` 调整，上限 50），直到找到附件型和环境型题；输出会记录实际采样数量，避免把未采样误报为平台没有该能力。赛事摘要成功但部分接口失败时，顶层状态为 `partial`。
 
-当前仓库没有有效的真实 Cookie，旧保存连接已由平台返回 HTTP 403 `session-expired`。因此本轮只能交付采样器和失败回执，不能把本地 fixture 或历史赛事结果冒充当前 AWD/CFS 成功合同。
+最近一次验收已使用临时有效 Cookie 完成赛事 10 和 11 的只读采样。两场赛事摘要、题目、理论题、排行榜、环境地址和 e2e 链路均成功；两场的 AWD/CFS 能力均由平台返回为 `absent`。Cookie 未写入仓库、样本或持久化记忆。

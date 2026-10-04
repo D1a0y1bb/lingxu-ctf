@@ -8,7 +8,7 @@
  *
  * 用法：
  *  LINGXU_COOKIE_FILE=/path/cookie \
- *  LINGXU_BASE_URL=https://shuxianbei.clsadp.com:8000 \
+ *  LINGXU_BASE_URL=https://ctf.example.com:8000 \
  *  LINGXU_EVENT_ID=4 \
  *  node tests/e2e-live.mjs
  */
@@ -18,7 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { readFileSync } from 'node:fs'
 
-const BASE = process.env.LINGXU_BASE_URL || 'https://shuxinbei.clsadp.com:8000'
+const BASE = process.env.LINGXU_BASE_URL || 'https://ctf.example.com:8000'
 const EVENT = process.env.LINGXU_EVENT_ID || '4'
 
 function readCookie() {

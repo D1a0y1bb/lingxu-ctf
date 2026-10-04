@@ -15,7 +15,7 @@ import path from 'node:path'
 import { LingxuAdapter } from '../lib/platforms.js'
 import { PLATFORM_CONTRACT_VERSION, stageCapabilitiesFromSummary } from '../lib/platforms.js'
 
-const baseUrl = process.env.LINGXU_BASE_URL || 'https://shuxinbei.clsadp.com:8000'
+const baseUrl = process.env.LINGXU_BASE_URL || 'https://ctf.example.com:8000'
 const eventId = Number(process.env.LINGXU_EVENT_ID || 4)
 const requestedDetailSamples = Number(process.env.LINGXU_SAMPLE_MAX_DETAILS || 12)
 const maxDetailSamples = Number.isFinite(requestedDetailSamples)

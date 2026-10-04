@@ -16,7 +16,7 @@ import path from 'node:path'
 
 import {
   buildToolSpecs, TOOL_NAMES, SESSION_EXPIRED_TEXT, normalizeId,
-  connectionOriginLines, resolveWorkDirInfo, workDirNoticeLines,
+  connectionOriginLines, resolveAdapterFor, resolveWorkDirInfo, workDirNoticeLines,
 } from '../lib/tools.js'
 
 test('normalizeId：拒绝路径段和控制字符，保留平台普通标识', () => {
@@ -2521,4 +2521,36 @@ test('resolveAdapterFor：解析后记下「当前赛事」（submissions/面板
   const { tools } = createHarness({ adapter, store, connection: { ...CONNECTION, key: 'lingxu:h:8000:7' } })
   await tools.ctf_challenges.execute({})
   assert.equal(await store.getActiveConnKey(), 'lingxu:h:8000:7')
+})
+
+test('resolveAdapterFor：隐式解析沿用当前 session 的赛事，显式目标优先', async () => {
+  const requests = []
+  const session = {
+    currentContext({ allowLatest }) {
+      assert.equal(allowLatest, false)
+      return { connKey: 'lingxu:h:8000:10' }
+    },
+  }
+  const ctx = {
+    deps: {
+      session,
+      resolveAdapter: async (args) => {
+        requests.push(args)
+        return {
+          adapter: {},
+          connection: { key: args.connection || 'lingxu:h:8000:11', eventId: args.eventId || 11 },
+          connKey: args.connection || 'lingxu:h:8000:11',
+        }
+      },
+    },
+    logger: {},
+  }
+
+  await resolveAdapterFor(ctx, {})
+  await resolveAdapterFor(ctx, { eventId: 11 })
+
+  assert.deepEqual(requests, [
+    { connection: 'lingxu:h:8000:10' },
+    { eventId: 11 },
+  ])
 })

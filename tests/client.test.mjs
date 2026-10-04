@@ -3117,7 +3117,7 @@ function driftSnapshot() {
   return {
     ok: true,
     configured: true,
-    connection: { key: 'lingxu:h:4', platform: 'lingxu', baseUrl: 'https://shuxinbei.clsadp.com:8000', eventId: 4 },
+    connection: { key: 'lingxu:h:4', platform: 'lingxu', baseUrl: 'https://ctf.example.com:8000', eventId: 4 },
     event: { name: '题目测试', remainingSeconds: 125434, user: { username: 'xiyi' }, punish: true },
     stats: { total: 78, solved: 42, working: 15, pending: 21, totalScore: 4200 },
     rank: { rank: 1, total: 4, self: { id: 7, username: 'xiyi', score: 5200 } },
@@ -3199,7 +3199,7 @@ test('一致性：面板骨架里没有平台/URL 行，也没有刷新按钮；
     await panel.refresh()
     const text = collectText(panel.root())
     assert.match(text, /题目测试/)
-    assert.equal(text.includes('shuxinbei'), false, '面板不该显示 URL')
+    assert.equal(text.includes('ctf.example.com'), false, '面板不该显示 URL')
     assert.equal(text.includes('凌虚 ·'), false, '面板不该显示平台名前缀')
   } finally {
     env.restore()
