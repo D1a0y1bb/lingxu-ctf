@@ -1,6 +1,6 @@
 # 安装与排错
 
-本文对应 `dsh-lingxu-ctf` `1.0.12`。插件是 DSH bundle，不是独立的 Node 服务。
+本文对应 `dsh-lingxu-ctf` `1.0.13`。插件是 DSH bundle，不是独立的 Node 服务。
 
 ## 支持范围
 
