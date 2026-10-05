@@ -2,7 +2,7 @@
 
 DeepSeek Harness（DSH）的凌虚竞赛平台插件。它把赛事连接、题目查询、环境管理、提交记录和并行解题接到同一套工具里，附件与 writeup 保存到当前工作区。
 
-当前版本：`1.0.13`
+当前版本：`1.1.0`
 
 ## 能做什么
 
@@ -61,7 +61,7 @@ ctf_status
 
 ## 工具
 
-基础工具始终注册，共 17 个：
+基础工具始终注册，共 18 个：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -77,10 +77,11 @@ ctf_status
 | `ctf_leaderboard` | 查询排行榜 |
 | `ctf_theory` | 查询理论题、开始/答题/交卷 |
 | `ctf_notice` | 读取公告 |
-| `ctf_solve_start` | 启动并行解题任务 |
+| `ctf_solve_start` | 启动并行解题任务；传 `dryRun=true` 先查看计划 |
 | `ctf_solve_status` | 查看 agent、任务和环境状态 |
 | `ctf_solve_stop` | 停止并行解题任务 |
 | `ctf_writeup` | 生成或读取 writeup |
+| `ctf_export_bundle` | 导出脱敏题目结果包 |
 | `ctf_team_log` | 记录队内线索和进展 |
 
 含 AWD 赛段时增加 9 个 `ctf_awd_*` 工具，含 CFS 赛段时增加 7 个 `ctf_cfs_*` 工具。赛段状态分为 `present`、`absent` 和 `unknown`；状态不明确时，工具在执行前会重新确认，不会沿用上一场赛事的结果。
@@ -133,6 +134,7 @@ AWD 的提交、自己的 flag、重置靶机和裁判消息，CFS 的逐关提�
 | `/lingxu-ctf/beacon` | 接收客户端状态信号 |
 | `/lingxu-ctf/team` | agent、任务和队内消息 |
 | `/lingxu-ctf/reports` | 本地 writeup 列表 |
+| `/lingxu-ctf/challenge?id=<id>` | 按需读取单题详情 |
 | `/lingxu-ctf/theory` | 按需读取理论题概要 |
 | `/lingxu-ctf/usage` | 读取当前会话 token 用量 |
 
@@ -149,10 +151,11 @@ lingxu-ctf-work/
 ├── challenges/<题目-slug>-<id>/
 │   └── distfiles/
 ├── writeups/
+├── exports/
 └── store.json
 ```
 
-题目、连接、提交记录和队内消息使用本地 store 保存。写入使用进程间锁、唯一临时文件和原子替换，状态目录权限为 `0700`，文件权限为 `0600`。Cookie 不写入题面、报告或普通面板快照。
+题目、连接、提交记录和队内消息使用本地 store 保存。写入使用进程间锁、唯一临时文件和原子替换，状态目录权限为 `0700`，文件权限为 `0600`。Cookie 不写入题面、报告或普通面板快照。`ctf_export_bundle` 只复制题目附件、writeup 和脚本，manifest 会脱敏 flag，并排除 store、Cookie、日志和符号链接。
 
 ## 开发和验证
 

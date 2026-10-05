@@ -308,6 +308,7 @@ const {
   VIEW_LOCALE_NS,
   VIEW_LABEL_FALLBACK,
   TEAM_URL,
+  CHALLENGE_URL,
   THEORY_URL,
   renderTokenUsageHtml,
   messageCategory,
@@ -351,6 +352,7 @@ const {
   renderTheoryItemsHtml,
   theoryQuestionCount,
   renderViewChallengeCard,
+  renderChallengeDetailHtml,
   renderViewTabCount,
   challengeKey,
   mergeChallengeBoard,
@@ -2705,6 +2707,21 @@ test('看板卡片：题型徽章 + 环境剩余（橙 / 红 / 正常）都渲�
   assert.equal(card.includes('lx-venv'), false)
 })
 
+test('题目详情抽屉：展示题面与进度，并转义题面和脱敏提交值', () => {
+  const html = renderChallengeDetailHtml({
+    ok: true,
+    challenge: { id: 7, name: '<题目>', category: 'Web', score: 100, taskType: 3, description: '<script>alert(1)</script>' },
+    work: { status: 'solved', owner: 'solver-7' },
+    submissions: [{ status: 'correct', flag: 'FLAG{f******t}', at: '2026-01-01' }],
+    writeup: { exists: true, path: 'writeups/7.md' },
+  })
+  assert.match(html, /lx-vdetail/)
+  assert.match(html, /&lt;题目&gt;/)
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/)
+  assert.match(html, /FLAG\{f\*+t\}/)
+  assert.equal(html.includes('alert(1)</script>'), false)
+})
+
 test('摘要指标行：环境 held/limit；free === 0 时高亮', () => {
   const normal = renderViewMetaHtml(envModel(envSnapshot()))
   // 文案刻意写明「本插件」：held 只统计插件自己起的实例，与平台侧配额是两回事
@@ -3433,7 +3450,7 @@ test('ctf_team_log 落盘并返回可读结果；参数容错', async () => {
   }
   const specs = buildToolSpecs({ store, resolveAdapter: async () => ({ connKey: 'k1' }), config: {}, now: () => Date.now(), logger: {} })
   const tool = specs.find((spec) => spec.name === 'ctf_team_log')
-  assert.ok(tool, '第 17 个工具 ctf_team_log 必须存在')
+  assert.ok(tool, '第 18 个工具 ctf_team_log 必须存在')
   assert.deepEqual(Object.keys(tool.parameters).sort(), ['challengeId', 'connection', 'kind', 'text', 'to'])
 
   const out = await tool.execute({ text: 'A 题凭据可登 B 题 ssh', kind: 'clue', challengeId: 12, to: 'lead' })

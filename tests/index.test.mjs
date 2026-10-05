@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
-  apply, normalizeConfig, slugify, maskFlag, injectBootEntry, buildPanelState,
+  apply, normalizeConfig, slugify, maskFlag, injectBootEntry, buildPanelState, buildChallengeDetailState,
   buildTeamState, buildReportsState, readLimitParam, toChallengeId, toEpochMs, withSessionCapture,
   createSessionRegistry, sessionIdFromRequest, resolveRequestSession,
   isSameOriginConfigRequest,
@@ -119,7 +119,7 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.deepEqual(inject, ['tools'])
 
   const names = ctx._collected.tools.map((t) => t.name).sort()
-  assert.equal(names.length, 17, `应注册 17 个工具，实际 ${names.length}: ${names.join(',')}`)
+  assert.equal(names.length, 18, `应注册 18 个工具，实际 ${names.length}: ${names.join(',')}`)
   for (const expected of [
     'ctf_connect', 'ctf_session', 'ctf_status', 'ctf_challenges', 'ctf_challenge', 'ctf_start_env',
     'ctf_delay_env', 'ctf_release_env', 'ctf_submit_flag', 'ctf_leaderboard', 'ctf_theory', 'ctf_notice',
@@ -147,13 +147,14 @@ test('apply: 注册工具 / 提示词 / 路由 / 命令，并暴露插件身份'
   assert.equal(routes.includes('/lingxu-ctf/beacon'), true, '客户端回传探针路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/team'), true, '顶部「CTF」视图的团队数据路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/reports'), true, '顶部「CTF」视图的报告路由必须注册')
+  assert.equal(routes.includes('/lingxu-ctf/challenge'), true, '顶部「CTF」视图的题目详情路由必须注册')
   assert.equal(routes.includes('/lingxu-ctf/theory'), true, '理论题题目概要路由必须注册（按需拉取，视图不自动全量请求）')
   assert.equal(routes.includes('/lingxu-ctf/usage'), true, 'token 用量路由必须注册（只读会话日志）')
   // client.js 路由仅在 lib/client.js 存在时注册（优雅降级）
   const hasBundle = routes.includes('/lingxu-ctf/client.js')
   // 客户端半改走官方 dsh.client 机制，**不再**注册 tapIndex
   assert.equal(ctx._collected.taps.length, 0, '不得再注册 tapIndex 注入（会被宿主权威 graph 覆盖）')
-  assert.equal(routes.length, hasBundle ? 9 : 8)
+  assert.equal(routes.length, hasBundle ? 10 : 9)
   assert.equal(ctx._collected.commands.length, 1)
   assert.equal(ctx._collected.commands[0].name, 'ctf-status')
 })
@@ -163,13 +164,13 @@ test('apply: enableWebPanel=false 时不注册路由', () => {
   apply(ctx, { workDir: '/tmp/lingxu-test', enableWebPanel: false })
   assert.equal(ctx._collected.routes.length, 0)
   assert.equal(ctx._collected.taps.length, 0)
-  assert.equal(ctx._collected.tools.length, 17, '工具不受面板开关影响')
+  assert.equal(ctx._collected.tools.length, 18, '工具不受面板开关影响')
 })
 
 test('apply: 无 agentTeams 服务时仍能加载（编排工具给出清晰报错）', () => {
   const ctx = mockCtx() // services 里没有 agentTeams
   apply(ctx, { workDir: '/tmp/lingxu-test' })
-  assert.equal(ctx._collected.tools.length, 17)
+  assert.equal(ctx._collected.tools.length, 18)
 })
 
 /**
@@ -203,7 +204,7 @@ test('apply: 在 Cordis 严格 Proxy 上下文下不触碰未 inject 的 service
   // 真实场景：插件行挂在 profile 层，没有 ambient agent / systemPrompt / webServer 等
   const ctx = strictCordisCtx({}) // 所有 service 都缺失
   assert.doesNotThrow(() => apply(ctx, {}), '不得因读取未声明的 service 而炸掉加载')
-  assert.equal(ctx._collected.tools.length, 17, '工具仍应全部注册')
+  assert.equal(ctx._collected.tools.length, 18, '工具仍应全部注册')
 })
 
 test('apply: 严格 Proxy + 完整 service 时正常装配', () => {
@@ -398,7 +399,7 @@ test('apply: 用 ctx.inject 等待可选 service（生产路径）', () => {
   const ctx = injectAwareCtx({}) // 一开始什么服务都没有
   apply(ctx, { workDir: '/tmp/lingxu-test' })
 
-  assert.equal(ctx._collected.tools.length, 17, '工具只依赖 tools，立即可用')
+  assert.equal(ctx._collected.tools.length, 18, '工具只依赖 tools，立即可用')
   assert.deepEqual(
     ctx._collected.injected.map((d) => d[0]).sort(),
     ['agentTeams', 'commands', 'connection', 'sessionProjections', 'sessionQuery', 'sessions', 'settings', 'systemPrompt', 'webServer'],
@@ -469,7 +470,7 @@ test('apply: agentTeams 就绪后编排器才被装配（deps.orchestrator 延�
 test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替身兼容）', () => {
   const ctx = mockCtx({ agentTeams: { spawnTeammate() {}, createTask() {}, listTasks() {}, listMembers() {} } })
   assert.doesNotThrow(() => apply(ctx, { workDir: '/tmp/lingxu-test' }))
-  assert.equal(ctx._collected.tools.length, 17)
+  assert.equal(ctx._collected.tools.length, 18)
   assert.equal(ctx._collected.sections.length, 1)
   assert.equal(ctx._collected.routes.some((r) => r.path === '/lingxu-ctf/state'), true)
 })
@@ -477,7 +478,7 @@ test('apply: 缺少 ctx.inject 的上下文退化为直接取一次（测试替�
 test('apply: 工具可通过 dispose 注销', () => {
   const ctx = mockCtx()
   apply(ctx, { workDir: '/tmp/lingxu-test' })
-  assert.equal(ctx._collected.tools.length, 17)
+  assert.equal(ctx._collected.tools.length, 18)
   ctx._disposeAll()
   assert.equal(ctx._collected.tools.length, 0)
 })
@@ -544,7 +545,38 @@ test('buildPanelState: 汇总平台与本地状态', async () => {
 
   assert.equal(state.submissions[0].challengeName, 'B', '最新提交在前')
   assert.equal(state.submissions[0].flag.includes('secret'), false, 'flag 必须脱敏')
+  assert.equal(state.submissions[1].flag.includes('wrong'), false, '所有提交记录都必须脱敏')
   assert.equal(state.theory.length, 1)
+})
+
+test('buildChallengeDetailState: 题面可读、提交 flag 脱敏、本地 WP 路径受工作区约束', async () => {
+  const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lingxu-detail-'))
+  try {
+    const writeupPath = path.join(workDir, 'writeups', 'fixture-7.md')
+    await fsp.mkdir(path.dirname(writeupPath), { recursive: true })
+    await fsp.writeFile(writeupPath, '# fixture')
+    const state = await buildChallengeDetailState({
+      id: 7,
+      workDir,
+      store: {
+        async getChallengeWork() { return { challengeId: '7', status: 'solved', owner: 'solver-7', writeupPath } },
+        async recentSubmissions() { return [{ challengeId: 7, status: 'correct', flag: 'FLAG{detail-secret}', at: '2026-01-01' }] },
+      },
+      resolveAdapter: async () => ({
+        connKey: 'fixture:7',
+        connection: { platform: 'lingxu', eventId: 7 },
+        adapter: { challengeDetail: async () => ({ id: 7, name: 'fixture', category: 'Web', score: 100, description: '<题面>', taskType: 3 }) },
+      }),
+    })
+    assert.equal(state.ok, true)
+    assert.equal(state.challenge.description, '<题面>')
+    assert.equal(state.submissions[0].flag.includes('detail-secret'), false)
+    assert.equal(state.writeup.exists, true)
+    assert.match(state.writeup.path, /writeups\/fixture-7\.md$/)
+    assert.equal(path.isAbsolute(state.writeup.path), false)
+  } finally {
+    await fsp.rm(workDir, { recursive: true, force: true })
+  }
 })
 
 test('buildPanelState: 平台接口部分失败时不整体崩', async () => {

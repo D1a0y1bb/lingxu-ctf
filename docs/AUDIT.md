@@ -1,6 +1,6 @@
 # 交付审计
 
-审计基线为已发布 `1.0.13`，Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
+审计基线为已发布 `1.1.0`，Node 要求 `>=18`。本文只记录当前代码和可复现检查；没有真实平台或宿主回执的项目保留为 `unverified`。
 
 ## 结果
 
@@ -12,6 +12,10 @@
 | token 用量折叠 | `passed`（本地） | 多帧 zstd、JSONL、交错 step、retry 和宿主投影用例 |
 | 请求与附件边界 | `passed`（本地） | 同源跳转、响应大小、写请求重试、附件限额、正文超时和半文件清理用例 |
 | 状态存储 | `passed`（本地） | 权限、损坏恢复、两个 store 并发合并；两个独立 Node 进程共写 40 连接/提交/进度/消息，临时文件与锁均清理 |
+| 调度预览 | `passed`（本地） | `ctf_solve_start(dryRun=true)` 返回环境配额、并发槽、任务复用和派发队列，不创建任务、不拉起 agent、不写题型缓存 |
+| 题目详情与提交脱敏 | `passed`（本地） | `/lingxu-ctf/challenge` 按需返回题面和工作状态；面板、详情和导出 manifest 均只返回脱敏 flag |
+| 脱敏 fixture 回放 | `passed`（本地） | 合成赛事 fixture 覆盖赛事、题目、详情、排行、理论题和 session 失效响应 |
+| 结果包导出 | `passed`（本地） | `ctf_export_bundle` 复制附件、writeup 和脚本，排除 store、Cookie、日志和符号链接 |
 | 同机多 DSH 限流 | `passed`（本地） | 两个独立 Node 进程共用 host 租约，10 个真实 HTTP 请求全局并发 1、配置 60ms 且实测间隔下界 ≥35ms |
 | DSH 宿主认证与 `/diag` | `environment_failed`（代码通过） | 插件路由复用 `connection.admit()`；本地替身未认证返回 401、非 loopback 返回 403；本机没有 DSH 桌面应用，无法取得真实 `/diag` 回执 |
 | 平台能力合同 | `passed`（本地） | `present/absent/unknown` 与执行前复核用例 |

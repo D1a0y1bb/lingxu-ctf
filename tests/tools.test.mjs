@@ -193,10 +193,10 @@ const callsOf = (adapter, method) => adapter.calls.filter((call) => call.method 
 
 // ------------------------------------------------------------------ 规格形状
 
-test('导出 17 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
+test('导出 18 个工具规格，名字与 TOOL_NAMES 一致且形状符合 defineTool 契约', () => {
   const { specs, tools } = createHarness()
-  assert.equal(specs.length, 17)
-  assert.equal(TOOL_NAMES.length, 17)
+  assert.equal(specs.length, 18)
+  assert.equal(TOOL_NAMES.length, 18)
   assert.deepEqual(specs.map((spec) => spec.name), TOOL_NAMES)
   assert.deepEqual(Object.keys(tools).sort(), [...TOOL_NAMES].sort())
   for (const spec of specs) {
@@ -211,8 +211,8 @@ test('导出 17 个工具规格，名字与 TOOL_NAMES 一致且形状符合 def
 })
 
 test('buildToolSpecs() 无 deps 也能构造全部规格（执行时才需要依赖）', () => {
-  assert.equal(buildToolSpecs().length, 17)
-  assert.equal(buildToolSpecs({}).length, 17)
+  assert.equal(buildToolSpecs().length, 18)
+  assert.equal(buildToolSpecs({}).length, 18)
 })
 
 // ------------------------------------------------------------------ 连接解析失败
@@ -1326,7 +1326,7 @@ test('ctf_connect：cookie 缺 csrftoken 只提醒不拒绝', async () => {
   assert.match(out, /^✅ 已连接凌虚赛事平台/)
   assert.match(out, /建议把 csrftoken 一起带上/)
   assert.match(out, /不强制/)
-  assert.ok(specs.length === 17)
+  assert.ok(specs.length === 18)
 
   const withCsrf = await tools.ctf_connect.execute({
     baseUrl: 'https://example.com:8000',
@@ -1387,8 +1387,8 @@ function sessionExpiredError() {
   })
 }
 
-test('基础工具数 17：TOOL_NAMES 含 ctf_session / ctf_delay_env / ctf_notice / ctf_team_log（AWD/CFS 工具动态注册，不在此列）', () => {
-  assert.equal(TOOL_NAMES.length, 17)
+test('基础工具数 18：TOOL_NAMES 含 ctf_session / ctf_delay_env / ctf_notice / ctf_team_log（AWD/CFS 工具动态注册，不在此列）', () => {
+  assert.equal(TOOL_NAMES.length, 18)
   assert.ok(TOOL_NAMES.includes('ctf_delay_env'))
   assert.ok(TOOL_NAMES.includes('ctf_notice'))
   assert.equal(TOOL_NAMES.includes('ctf_awd_submit'), false, 'AWD 工具由 buildAwdToolSpecs 动态注册')

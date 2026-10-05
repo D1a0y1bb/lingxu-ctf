@@ -574,6 +574,36 @@ test('start：建任务 + 按 concurrency 拉起 agent + 摘要', async () => {
   assert.equal(work.every((w) => typeof w.taskCreatedAt === 'string' && w.taskCreatedAt.includes('T')), true)
 })
 
+test('start dryRun：只返回调度计划，不创建任务、不拉起 agent、不写题型缓存', async () => {
+  const store = await makeStore()
+  const challenges = [
+    makeChallenge({ id: 11, name: 'fixture-web', category: 'web', score: 300 }),
+    makeChallenge({ id: 12, name: 'fixture-pwn', category: 'pwn', score: 200 }),
+  ]
+  const { teams, calls } = makeTeams({
+    createTaskImpl: async () => { throw new Error('dry-run must not create task') },
+    spawnImpl: async () => { throw new Error('dry-run must not spawn') },
+  })
+  const { orchestrator } = await makeOrchestrator({
+    challenges,
+    teams,
+    store,
+    config: { concurrency: 2 },
+    details: {
+      11: { taskType: 1, taskTypeLabel: '环境型' },
+      12: { taskType: 3, taskTypeLabel: '附件型' },
+    },
+  })
+  const preview = await orchestrator.start({ __agent: AGENT, dryRun: true })
+  assert.match(preview, /调度预览（dry-run）/)
+  assert.match(preview, /未创建任务/)
+  assert.match(preview, /fixture-web/)
+  assert.match(preview, /全程 agent/)
+  assert.equal(calls.createTask.length, 0)
+  assert.equal(calls.spawn.length, 0)
+  assert.equal((await store.listChallengeWork(CONNECTION.key)).length, 0)
+})
+
 test('getCaller：start/status/stop 捕获会话身份（/lingxu-ctf/team 依赖它）', async () => {
   const { teams } = makeTeams()
   const { orchestrator } = await makeOrchestrator({ challenges: [makeChallenge({ id: 1 })], teams })

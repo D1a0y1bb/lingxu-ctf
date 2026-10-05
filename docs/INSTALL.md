@@ -1,6 +1,6 @@
 # 安装与排错
 
-本文对应 `dsh-lingxu-ctf` `1.0.13`。插件是 DSH bundle，不是独立的 Node 服务。
+本文对应 `dsh-lingxu-ctf` `1.1.0`。插件是 DSH bundle，不是独立的 Node 服务。
 
 ## 支持范围
 
@@ -94,7 +94,7 @@ bash scripts/verify.sh
 grep -n "dsh-lingxu-ctf" "$HOME/.dsh/profiles/desktop/package.json"
 ```
 
-成功加载后，DSH 日志中应出现插件名称和基础工具数量。基础工具应为 17 个；AWD/CFS 只有在连接到含对应赛段的赛事后才出现。
+成功加载后，DSH 日志中应出现插件名称和基础工具数量。基础工具应为 18 个；AWD/CFS 只有在连接到含对应赛段的赛事后才出现。
 
 ## 连接平台
 
@@ -120,7 +120,7 @@ ctf_status
 2. `dsh.profile.bundles` 里有同名条目；
 3. DSH 已完全退出并重新启动。
 
-### 工具只有基础 17 个
+### 工具只有基础 18 个
 
 这是正常的初始状态。先确保连接有效，再运行 `ctf_status`。赛事摘要没有返回 AWD/CFS 时，专用工具不会注册。
 

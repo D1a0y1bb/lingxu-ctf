@@ -30,7 +30,7 @@ ctx.tools.register(defineTool({
 
 `register` 返回 disposer。插件销毁和 AWD/CFS 赛段切换时必须调用 disposer，避免旧工具留在上下文中。
 
-基础工具 17 个；赛段工具由 `lib/stage-tools.js` 按赛事摘要动态注册。读取不到摘要时保持原列表，不因一次失败注销全部赛段工具。
+基础工具 18 个；赛段工具由 `lib/stage-tools.js` 按赛事摘要动态注册。读取不到摘要时保持原列表，不因一次失败注销全部赛段工具。
 
 ## 可选服务
 

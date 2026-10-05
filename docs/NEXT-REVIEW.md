@@ -1,6 +1,6 @@
 # 研发审查与后续设计
 
-基线为已发布 `1.0.13`。本地回归覆盖独立进程、宿主认证和并行赛事绑定；真实凌虚赛事 10、11 已有只读回执，但这仍没有替代 DSH 桌面验收。
+基线为当前开发版本 `1.1.0`。本地回归覆盖独立进程、宿主认证和并行赛事绑定；真实凌虚赛事 10、11 已有只读回执，但这仍没有替代 DSH 桌面验收。
 
 ## 本轮复核
 
@@ -18,6 +18,9 @@
 | B10 限流器仅进程级 | 同机共享 `DSH_HOME` 的 host 租约，跨机器明确交给网关 | `passed`（同机）；跨机器 `partial` |
 | B11 客户端慢响应覆盖 | AbortController、请求代次和同轮 session 参数 | `passed`（本地） |
 | B12 平台能力无版本 | 新增版本化合同、稳定错误投影和测试 fixture | `passed`（本地） |
+| B16 调度计划不可预览 | `ctf_solve_start dryRun=true` 返回队列和资源预算，不创建任务或 agent | `passed`（本地） |
+| B17 题目详情只能看题面 | CTF 视图按需读取详情，提交值统一脱敏 | `passed`（本地） |
+| B18 结果难以移交 | `ctf_export_bundle` 生成脱敏 manifest 和本地目录包 | `passed`（本地） |
 | B13 重启后的冷 session | 路由用 `sessionQuery` 确认宿主 session 后恢复最小上下文 | `passed`（本地 + macOS DSH） |
 | B14 classic bootstrap 重复挂载 | ModuleLoader 接管时跳过备用 bootstrap，配置轮询跟随 `ctx` 销毁 | `passed`（本地 + macOS DSH） |
 | B15 宿主认证与诊断边界 | 插件路由复用 `connection.admit()`，旧宿主拒绝非 loopback | `environment_failed`：代码用例通过；本机没有 DSH 桌面应用，无法取得真实 `/diag` 回执 |
@@ -32,7 +35,7 @@
 
 ### P1：真实平台合同采样
 
-赛事 10、11 的真实采样已经覆盖赛事摘要、题目分页、排行榜、理论题、附件元数据和环境地址；后续仍应保存脱敏 fixture，并补齐会话过期、权限不足和 AWD/CFS 存在时的形状。fixture 不包含 Cookie、flag、用户名和内部地址。
+赛事 10、11 的真实采样已经覆盖赛事摘要、题目分页、排行榜、理论题、附件元数据和环境地址；当前仓库已经加入合成脱敏 fixture 回放，并覆盖会话过期。fixture 不包含 Cookie、flag、真实用户名和内部地址。
 
 能力合同应继续由平台响应推导，不根据工具是否注册反推平台能力。平台字段变化时先更新 fixture 和适配器，再改界面。
 

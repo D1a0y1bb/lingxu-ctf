@@ -12,21 +12,22 @@
 | `lib/lingxu.js` | 凌虚 HTTP 客户端、响应归一化、限流和错误分类 |
 | `lib/platforms.js` | 平台适配器接口和连接选择 |
 | `lib/store.js` | 本地连接、题目工作记录、提交审计、团队消息和 writeup 索引 |
-| `lib/tools.js` | 17 个基础工具规格 |
+| `lib/tools.js` | 18 个基础工具规格 |
 | `lib/stage-tools.js` | AWD/CFS 赛段工具规格 |
 | `lib/orchestrate.js` | Agent Teams 任务分配、复用和停止 |
 | `lib/writeup.js` | writeup 文件生成与记录 |
+| `lib/export.js` | 脱敏题目结果包导出与文件边界 |
 | `lib/team-events.js` | DSH team-message 事件解析 |
 | `lib/client.js` | 浏览器端 classic script、视图模型和面板控制器 |
 | `lib/toolkit.js` | 工具定义和文本输出包装 |
 
-依赖方向保持单向：`index → tools/orchestrate/writeup/platforms/store`，平台客户端不依赖 UI；`client.js` 不依赖 Node 模块。
+依赖方向保持单向：`index → tools/orchestrate/writeup/export/platforms/store`，平台客户端不依赖 UI；`client.js` 不依赖 Node 模块。
 
 ## 装配流程
 
 1. DSH 调用默认导出的 `Config`、`inject` 和 `apply`。
 2. `apply` 归一化配置并建立 store、连接解析器和平台适配器。
-3. 注册 17 个基础工具、系统提示词、Web 路由和命令。
+3. 注册 18 个基础工具、系统提示词、Web 路由和命令。
 4. 通过可选注入等待 `settings`、`sessions`、`sessionProjections`、`agentTeams` 等服务。
 5. 连接成功或状态探测拿到赛段信息后，同步 AWD/CFS 工具。
 6. DSH 销毁插件时注销工具、路由和赛段工具。
@@ -49,7 +50,7 @@ ctf_challenges       ctf_challenge      ctf_start_env
 ctf_delay_env        ctf_release_env    ctf_submit_flag
 ctf_leaderboard      ctf_theory         ctf_notice
 ctf_solve_start      ctf_solve_status   ctf_solve_stop
-ctf_writeup          ctf_team_log
+ctf_writeup          ctf_export_bundle   ctf_team_log
 ```
 
 AWD 和 CFS 使用独立的工具名，而不是一个带 action 的总工具。只有赛事摘要明确包含赛段时才注册，避免无关工具占用模型上下文。
@@ -78,7 +79,7 @@ store 记录：
 - writeup 文件路径；
 - `ctf_team_log` 与观察到的 team-message。
 
-写入按连接 key 隔离。提交审计保留 flag 文本以便复核，但不会保存 Cookie。重复 `messageId` 和重复 flag 是否拦截由 store/config 控制。
+写入按连接 key 隔离。提交审计保留原始 flag 供本地去重；面板、题目详情和导出 manifest 只返回脱敏 flag。导出不会复制 store、Cookie、日志或符号链接。重复 `messageId` 和重复 flag 是否拦截由 store/config 控制。
 
 ## Agent Teams
 
@@ -106,7 +107,8 @@ session/event
 ```text
 /lingxu-ctf/state   /lingxu-ctf/client.js  /lingxu-ctf/config
 /lingxu-ctf/diag    /lingxu-ctf/beacon      /lingxu-ctf/team
-/lingxu-ctf/reports /lingxu-ctf/theory      /lingxu-ctf/usage
+/lingxu-ctf/reports /lingxu-ctf/challenge    /lingxu-ctf/theory
+/lingxu-ctf/usage
 ```
 
 `/state` 使用 TTL、single-flight、刷新下限和滚动预算。默认 TTL 4 秒，后台平台刷新至少间隔 20 秒，60 秒窗口最多 4 次刷新；写操作可以请求受控的即时刷新。返回中带 `cachedAt`、`fromCache` 和 `stale`，客户端据此显示数据新鲜度。
